@@ -1,0 +1,361 @@
+# =============================================================================
+# DBNOTEBOOK UNIFIED CONFIGURATION
+# Single source of truth for all settings
+# Merges: ingestion.yaml, sql_chat.yaml, raptor.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DOCUMENT INGESTION
+# Controls how documents are processed, chunked, and embedded
+# -----------------------------------------------------------------------------
+ingestion:
+  # Chunking settings
+  chunking:
+    chunk_size: 512             # Document chunk size in tokens
+    chunk_overlap: 32           # Overlap between adjacent chunks
+    chunking_regex: "[^,.;。？！]+[,.;。？！]?"  # Sentence boundary regex
+    paragraph_sep: "\n \n"      # Paragraph separator pattern
+
+  # Embedding generation
+  embedding:
+    batch_size: 8               # Number of embeddings to generate at once
+    cache_folder: "data/huggingface"  # Cache directory for models
+
+  # Contextual retrieval (Anthropic approach)
+  # Enriches chunks with LLM-generated context during ingestion
+  contextual_retrieval:
+    enabled: false              # Enable contextual retrieval enrichment
+    batch_size: 5               # Number of chunks to process in each batch
+    max_concurrency: 3          # Maximum concurrent LLM calls for context generation
+    context_prompt: |
+      <document>
+      {doc_content}
+      </document>
+
+      Here is a chunk from the document:
+      <chunk>
+      {chunk_content}
+      </chunk>
+
+      Please provide a brief context (1-2 sentences) that situates this chunk within the overall document.
+      Focus on what information this chunk contains and how it relates to the document's main topics.
+      Do not summarize the chunk itself, just provide context about where it fits.
+
+# -----------------------------------------------------------------------------
+# RETRIEVAL (Unified for RAG, SQL Chat, etc.)
+# Default settings for the retrieval pipeline
+# -----------------------------------------------------------------------------
+retrieval:
+  strategy: "hybrid"            # hybrid|semantic|keyword
+  similarity_top_k: 20          # Top k documents for initial retrieval
+  retriever_weights: [0.5, 0.5] # [BM25, Vector] weights for hybrid search
+  fusion_mode: "dist_based_score"
+  num_queries: 3                # Generated queries for query expansion
+
+  # Reranker settings
+  # MxBai reranker models:
+  # - mxbai-rerank-large-v1: ~3GB, slow (~30s), best quality
+  # - mxbai-rerank-base-v1: ~500MB, medium (~10s), good quality
+  # - mxbai-rerank-xsmall-v1: ~100MB, fast (~2s), acceptable quality
+  # Override via RERANKER_MODEL env var (xsmall|base|large|disabled)
+  reranker:
+    enabled: true
+    model: "base"               # xsmall|base|large
+    top_k: 10                   # Top k after reranking (final results to LLM)
+    full_model_name: "mixedbread-ai/mxbai-rerank-base-v1"
+
+  # Chat V2 specific settings
+  chat_v2:
+    use_raptor_in_retrieval: true   # Enable RAPTOR summaries in retrieval ranking
+    force_reranker: true            # Force reranker (overrides DISABLE_RERANKER env var)
+    raptor_top_k: 5                 # Maximum RAPTOR summaries to retrieve
+    min_raptor_score: 0.3           # Minimum relevance score (0.0-1.0)
+
+  # SQL Chat overrides (text-to-SQL has different optimal weights)
+  sql_chat:
+    retriever_weights: [0.3, 0.7]   # BM25 lower for SQL
+    reranker:
+      model: "base"
+      top_k: 15
+
+# -----------------------------------------------------------------------------
+# LLM SETTINGS (Provider defaults)
+# These can be overridden by environment variables
+# -----------------------------------------------------------------------------
+llm:
+  keep_alive: "1h"              # Keep model loaded in memory
+  tfs_z: 1.0                    # TFS normalization factor
+  top_k: 40                     # Top k sampling
+  top_p: 0.9                    # Top p (nucleus) sampling
+  repeat_last_n: 64             # Repeat last n tokens for penalty
+  repeat_penalty: 1.1           # Repeat penalty factor
+  request_timeout: 300          # Request timeout in seconds
+  temperature: 0.1              # Default temperature (low = deterministic)
+
+# -----------------------------------------------------------------------------
+# RAPTOR (Hierarchical Retrieval)
+# Recursive Abstractive Processing for Tree-Organized Retrieval
+# Reference: https://arxiv.org/abs/2401.18059
+# -----------------------------------------------------------------------------
+raptor:
+  enabled: true                 # Enable RAPTOR processing
+  auto_build_on_upload: true    # Auto-build tree after document upload
+  fallback_to_flat_retrieval: true  # Use flat retrieval if tree not built
+
+  # Clustering (GMM + UMAP)
+  clustering:
+    umap_n_components: 10       # Target dimensions after reduction
+    umap_n_neighbors: 15        # Local neighborhood size for UMAP
+    umap_min_dist: 0.1          # Minimum distance between points
+    umap_metric: "cosine"       # Distance metric for UMAP
+    gmm_probability_threshold: 0.3  # Min probability for soft cluster membership
+    min_cluster_size: 3         # Minimum nodes per cluster
+    max_cluster_size: 10        # Maximum nodes per cluster
+    max_clusters: 50            # Maximum clusters per level (safety limit)
+    random_state: 42            # For reproducibility
+    n_init: 10                  # GMM initialization attempts
+
+  # Summarization
+  summarization:
+    max_input_tokens: 6000      # Max tokens for chunks being summarized
+    summary_max_tokens: 500     # Max tokens for generated summary
+    max_chunks_per_summary: 10  # Max chunks to include in one summary
+
+    cluster_summary_prompt: |
+      You are an expert summarizer. Below are related text chunks from a document that have been grouped together by semantic similarity.
+
+      Create a comprehensive summary that:
+      1. Captures the main themes and key points across all chunks
+      2. **CRITICAL: Preserve ALL numerical values exactly as written** (amounts like 150, 300, 500, percentages, limits, thresholds, dates, IDs)
+      3. **CRITICAL: When you encounter tables or eligibility matrices, list the specific values for each category/row**
+         - Format: "[Category/Level]: [field1]=value1, [field2]=value2, ..."
+         - Example: "L1-L3 employees: local_conveyance=150, per_diem=500, private_arrangement=200"
+      4. Maintains logical flow and coherence
+      5. Is self-contained and understandable without the original chunks
+
+      IMPORTANT: Do NOT summarize numbers as "varies" or "depends on level" - always include the actual specific values.
+
+      CHUNKS TO SUMMARIZE:
+      {chunks}
+
+      COMPREHENSIVE SUMMARY:
+
+    root_summary_prompt: |
+      You are an expert summarizer. Below are summaries from different sections of a document.
+
+      Create a high-level executive summary that:
+      1. Provides an overview of the entire document's content
+      2. Highlights the most important themes and conclusions
+      3. **CRITICAL: Preserve ALL specific numerical values from the summaries below** (amounts, percentages, limits, thresholds)
+      4. **CRITICAL: If the summaries contain tabular data or eligibility information with specific values, include them**
+         - List specific values rather than generalizing
+         - Example: "Travel allowances by level: L1-L3 (local_conveyance=150), L4-L7 (local_conveyance=250), L8-L10 (local_conveyance=300)"
+      5. Notes any key relationships between different sections
+
+      IMPORTANT: Numerical precision is required. Do NOT replace specific values with general statements.
+
+      SECTION SUMMARIES:
+      {summaries}
+
+      DOCUMENT SUMMARY:
+
+  # Tree building
+  tree_building:
+    max_tree_depth: 4           # Maximum levels (0=chunks, 1-3=summaries)
+    min_nodes_to_cluster: 5     # Minimum nodes needed to create new level
+    batch_size: 50              # Nodes to process in one batch
+    embedding_batch_size: 8     # Embeddings to generate at once
+    max_concurrent_summaries: 3 # Parallel LLM calls for summarization
+    max_retries: 3              # Retry failed operations
+    retry_delay_seconds: 1.0    # Delay between retries
+
+  # Level retrieval
+  level_retrieval:
+    summary_query_levels: [0, 1, 2, 3]  # All levels for summary queries
+    detail_query_levels: [0, 1]          # L0 + L1 for detail queries
+    top_k_per_level: 6          # Results per tree level
+    rerank_top_k: 6             # Final results after reranking
+    min_similarity_threshold: 0.3  # Minimum similarity for inclusion
+    summary_level_boost: 1.5    # Boost for higher-level nodes in summary queries
+    detail_level_boost: 1.3     # Boost for level-0 nodes in detail queries
+    use_hybrid_retrieval: true
+    bm25_weight: 0.5
+    vector_weight: 0.5
+    num_query_variations: 3
+
+  # Intent detection keywords
+  keywords:
+    summary:
+      - summarize
+      - summary
+      - overview
+      - main points
+      - key takeaways
+      - themes
+      - gist
+      - brief
+      - what is this about
+      - tldr
+      - highlights
+      - main ideas
+      - general idea
+      - big picture
+    detail:
+      - specific
+      - detail
+      - exactly
+      - quote
+      - what does it say about
+      - where
+      - when
+      - how many
+      - what is the
+      - explain
+      - section
+      - page
+      - paragraph
+
+  # Quality presets
+  presets:
+    fast:
+      tree_building:
+        max_tree_depth: 2
+        min_nodes_to_cluster: 8
+      clustering:
+        max_cluster_size: 15
+      summarization:
+        summary_max_tokens: 300
+        max_chunks_per_summary: 15
+    thorough:
+      tree_building:
+        max_tree_depth: 5
+        min_nodes_to_cluster: 3
+      clustering:
+        min_cluster_size: 2
+        max_cluster_size: 6
+        gmm_probability_threshold: 0.2
+      summarization:
+        summary_max_tokens: 800
+        max_chunks_per_summary: 6
+
+# -----------------------------------------------------------------------------
+# SQL CHAT (Chat with Data)
+# Text-to-SQL natural language query interface
+# -----------------------------------------------------------------------------
+sql_chat:
+  # Connection settings
+  connections:
+    max_per_user: 10
+    supported_types:
+      - postgresql
+      - mysql
+      - sqlite
+    default_ports:
+      postgresql: 5432
+      mysql: 3306
+      sqlite: 0
+    pool:
+      size: 5
+      max_overflow: 10
+      timeout_seconds: 30
+    password_encryption_key_env: "SQL_CHAT_ENCRYPTION_KEY"
+
+  # Query execution
+  query:
+    max_rows: 10000
+    timeout_seconds: 30
+    max_correction_attempts: 3
+    max_semantic_retries: 3
+    cost_estimation:
+      max_estimated_rows: 100000
+      max_cost_units: 50000
+
+  # Schema introspection
+  schema:
+    cache_ttl_seconds: 3600
+    max_sample_values: 5
+    table_threshold: 20
+
+  # Few-shot learning
+  few_shot:
+    dataset_name: "gretelai/synthetic_text_to_sql"
+    top_k: 5
+    batch_size: 100
+    min_required_examples: 50000
+    rag_integration:
+      enabled: true
+      use_reranker: true
+      rerank_model: "mixedbread-ai/mxbai-rerank-base-v1"
+      rerank_top_k: 15
+      weights:
+        bm25: 0.3
+        vector: 0.7
+
+  # Intent classification
+  intent:
+    default_intent: "lookup"
+    confidence_thresholds:
+      high: 0.3
+      medium: 0.2
+      low: 0.1
+
+  # Confidence scoring
+  confidence:
+    thresholds:
+      high: 0.8
+      medium: 0.5
+    weights:
+      table_relevance: 0.30
+      few_shot_similarity: 0.30
+      retry_penalty: 0.20
+      column_overlap: 0.20
+
+  # Security
+  security:
+    forbidden_operations:
+      - DROP
+      - DELETE
+      - TRUNCATE
+      - ALTER
+      - INSERT
+      - UPDATE
+      - CREATE
+      - GRANT
+      - REVOKE
+      - EXEC
+      - EXECUTE
+    require_read_only_user: true
+    detect_injection_patterns: true
+
+  # Data masking
+  masking:
+    auto_detect: true
+    sensitive_patterns:
+      mask:
+        - email
+        - phone
+        - address
+        - dob
+        - date_of_birth
+      redact:
+        - password
+        - secret
+        - token
+        - api_key
+        - ssn
+        - social_security
+      hash:
+        - user_id
+        - customer_id
+        - account_id
+
+  # Telemetry
+  telemetry:
+    enabled: true
+    max_memory_entries: 1000
+    retention_days: 90
+
+  # Session
+  session:
+    max_history: 10
+    idle_timeout_minutes: 30

@@ -1,0 +1,148 @@
+# Model Configuration for RAG Chatbot
+# This file controls which models appear in the UI dropdown
+#
+# Structure:
+#   providers:
+#     <provider_name>:
+#       enabled: true/false          # Whether to show this provider's models
+#       type: local/api              # "local" for Ollama, "api" for cloud providers
+#       requires_api_key: true/false # Whether API key is required (for API providers)
+#       env_key: "ENV_VAR_NAME"      # Environment variable name for API key
+#       models:
+#         - name: "model-name"       # Model identifier used in API calls
+#           display_name: "Display"  # Optional: Human-readable name for UI
+#           enabled: true/false      # Optional: Enable/disable individual models
+
+providers:
+  ollama:
+    enabled: true
+    type: local
+    requires_api_key: false
+    # Models are auto-detected from running Ollama server
+    # You can optionally specify a whitelist to filter:
+    models:
+    - name: "llama3.1:latest"
+    - name: "qwen2:7b"
+
+  openai:
+    enabled: true
+    type: api
+    requires_api_key: true
+    env_key: "OPENAI_API_KEY"
+    models:
+      # GPT-4 series
+      - name: "gpt-4.1-nano"
+        display_name: "GPT-4.1 Nano"
+        context_window: 128000
+      - name: "gpt-4.1-mini"
+        display_name: "GPT-4.1 Mini"
+        context_window: 128000
+      - name: "gpt-4.1"
+        display_name: "GPT-4.1"
+        context_window: 128000
+      - name: "gpt-4o"
+        display_name: "GPT-4o"
+        context_window: 128000
+      - name: "gpt-4o-mini"
+        display_name: "GPT-4o Mini"
+        context_window: 128000
+      - name: "gpt-4-turbo"
+        display_name: "GPT-4 Turbo"
+        context_window: 128000
+      - name: "gpt-4"
+        display_name: "GPT-4"
+        context_window: 8192
+      - name: "gpt-3.5-turbo"
+        display_name: "GPT-3.5 Turbo"
+        context_window: 16385
+      # O-series reasoning models (200K context) - require temperature=1.0
+      - name: "o3"
+        display_name: "O3"
+        context_window: 200000
+      - name: "o3-mini"
+        display_name: "O3 Mini"
+        context_window: 200000
+      - name: "o3-pro"
+        display_name: "O3 Pro"
+        context_window: 200000
+      - name: "o4-mini"
+        display_name: "O4 Mini"
+        context_window: 200000
+
+  google:
+    enabled: true
+    type: api
+    requires_api_key: true
+    env_key: "GOOGLE_API_KEY"
+    models:
+      - name: "gemini-2.5-pro"
+        display_name: "Gemini 2.5 Pro"
+      - name: "gemini-2.5-flash"
+        display_name: "Gemini 2.5 Flash"
+      - name: "gemini-2.0-flash-exp"
+        display_name: "Gemini 2.0 Flash"
+      - name: "gemini-1.5-pro"
+        display_name: "Gemini 1.5 Pro"
+      - name: "gemini-1.5-flash"
+        display_name: "Gemini 1.5 Flash"
+
+  groq:
+    enabled: true
+    type: api
+    requires_api_key: true
+    env_key: "GROQ_API_KEY"
+    models:
+      # OpenAI GPT-OSS models (Apache 2.0 license, best quality)
+      - name: "openai/gpt-oss-120b"
+        display_name: "GPT-OSS 120B"
+        context_window: 128000
+      - name: "openai/gpt-oss-20b"
+        display_name: "GPT-OSS 20B"
+        context_window: 128000
+      # Llama 4 models (fastest inference)
+      - name: "meta-llama/llama-4-maverick-17b-128e-instruct"
+        display_name: "Llama 4 Maverick"
+        context_window: 128000
+      - name: "meta-llama/llama-4-scout-17b-16e-instruct"
+        display_name: "Llama 4 Scout"
+        context_window: 128000
+      # Llama 3.3 70B (high quality)
+      - name: "llama-3.3-70b-versatile"
+        display_name: "Llama 3.3 70B"
+        context_window: 128000
+
+# Default model to select on startup (optional)
+default_model: "gpt-4.1"
+default_provider: "openai"
+
+# ============================================
+# Reranker Models
+# ============================================
+# Local models always available, Groq models available if groq provider is enabled above
+rerankers:
+  default: "base"
+
+  # Local cross-encoder models (always available)
+  local:
+    - id: "xsmall"
+      name: "XSmall"
+      description: "Fastest (~22s CPU)"
+    - id: "base"
+      name: "Base"
+      description: "Balanced (~30s CPU)"
+    - id: "large"
+      name: "Large"
+      description: "Best local (~60s CPU)"
+
+  # Groq rerankers (uses groq provider config above)
+  # Note: GPT-OSS models are NOT supported for reranking (incompatible with JSON modes)
+  groq:
+    - id: "groq:scout"
+      name: "Llama 4 Scout"
+      description: "Fast (~300ms)"
+    - id: "groq:maverick"
+      name: "Llama 4 Maverick"
+      description: "Better (~400ms)"
+    - id: "groq:llama70b"
+      name: "Llama 3.3 70B"
+      description: "High quality (~600ms)"
