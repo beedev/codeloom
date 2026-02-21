@@ -25,6 +25,17 @@ function edgeStyle(edgeType: string): string {
   return EDGE_COLORS[edgeType] || 'text-text-dim bg-void-surface border-void-surface';
 }
 
+const IMPACT_LEVEL_STYLES: Record<string, string> = {
+  critical: 'text-danger bg-danger/15',
+  high: 'text-warning bg-warning/15',
+  moderate: 'text-amber-400 bg-amber-500/15',
+  low: 'text-text-dim bg-void-surface',
+};
+
+function impactLevelStyle(level: string): string {
+  return IMPACT_LEVEL_STYLES[level] || IMPACT_LEVEL_STYLES.low;
+}
+
 function shortPath(filePath: string): string {
   const parts = filePath.split('/');
   if (parts.length <= 2) return filePath;
@@ -48,6 +59,10 @@ export function ImpactPanel({ impact }: ImpactPanelProps) {
 
   const totalDirect = impact.reduce((sum, e) => sum + e.direct, 0);
   const totalIndirect = impact.reduce((sum, e) => sum + e.indirect, 0);
+  const maxEntry = impact.reduce<ImpactEntry | null>(
+    (best, e) => (!best || e.impact_score > best.impact_score ? e : best),
+    null,
+  );
 
   return (
     <div className="border-b border-void-surface">
@@ -63,6 +78,11 @@ export function ImpactPanel({ impact }: ImpactPanelProps) {
         <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-400">
           {impact.length} units · {totalDirect} direct / {totalIndirect} indirect
         </span>
+        {maxEntry != null && maxEntry.impact_score > 0 && (
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${impactLevelStyle(maxEntry.impact_level)}`}>
+            {maxEntry.impact_level.toUpperCase()} ({(maxEntry.impact_score * 100).toFixed(0)}%)
+          </span>
+        )}
         <div className="flex-1" />
         {collapsed ? (
           <ChevronRight className="h-3 w-3 text-text-dim" />
@@ -127,6 +147,11 @@ function ImpactCard({
 
         {/* Summary badges */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {entry.impact_score > 0 && (
+            <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${impactLevelStyle(entry.impact_level)}`}>
+              {(entry.impact_score * 100).toFixed(0)}%
+            </span>
+          )}
           <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-400">
             {entry.direct} direct
           </span>

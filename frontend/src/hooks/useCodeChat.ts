@@ -21,6 +21,8 @@ export interface ImpactEntry {
   direct: number;
   indirect: number;
   files_affected: number;
+  impact_score: number;
+  impact_level: string;
   dependents: { name: string; edge_type: string; depth: number }[];
 }
 

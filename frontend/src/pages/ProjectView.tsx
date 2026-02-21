@@ -6,7 +6,7 @@
  * Bottom status bar with file info
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   Loader2,
@@ -53,6 +53,9 @@ export function ProjectView() {
   // Existing migration plan for this project (if any)
   const [existingPlanId, setExistingPlanId] = useState<string | null>(null);
 
+  // Track previous analysis status for auto-redirect on completion
+  const prevAnalysisStatus = useRef(project?.deep_analysis_status);
+
   // Load project and file tree
   useEffect(() => {
     if (!projectId) return;
@@ -97,6 +100,33 @@ export function ProjectView() {
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [projectId]);
+
+  // Poll project when deep analysis is active (pending/running)
+  useEffect(() => {
+    if (!projectId) return;
+    const status = project?.deep_analysis_status;
+    if (status !== 'pending' && status !== 'running') return;
+
+    const interval = setInterval(async () => {
+      try {
+        const fresh = await api.getProject(projectId);
+        setProject(fresh);
+      } catch { /* swallow */ }
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [projectId, project?.deep_analysis_status]);
+
+  // Auto-redirect to Understanding tab when analysis completes
+  useEffect(() => {
+    const prev = prevAnalysisStatus.current;
+    const curr = project?.deep_analysis_status;
+    prevAnalysisStatus.current = curr;
+
+    if ((prev === 'pending' || prev === 'running') && curr === 'completed') {
+      setActiveTab('understanding');
+    }
+  }, [project?.deep_analysis_status]);
 
   // Load file content when selected
   useEffect(() => {
@@ -233,6 +263,17 @@ export function ProjectView() {
               ASG COMPLETE
             </span>
           )}
+          {(project?.deep_analysis_status === 'pending' || project?.deep_analysis_status === 'running') && (
+            <span className="flex items-center gap-1 rounded bg-nebula/10 px-2 py-0.5 text-[10px] font-medium text-nebula animate-pulse">
+              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+              ANALYZING
+            </span>
+          )}
+          {project?.deep_analysis_status === 'completed' && (
+            <span className="rounded bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success">
+              ANALYSIS COMPLETE
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* Code / Graph tabs */}
@@ -279,15 +320,27 @@ export function ProjectView() {
             <UploadIcon className="h-3.5 w-3.5" />
             Ingest Code
           </button>
-          {project?.asg_status === 'complete' && (
-            <button
-              onClick={() => setActiveTab('understanding')}
-              className="flex items-center gap-1.5 rounded-md border border-glow/50 px-3 py-1.5 text-xs text-glow hover:bg-glow/10"
-            >
-              <Brain className="h-3.5 w-3.5" />
-              Analyze
-            </button>
-          )}
+          {project?.asg_status === 'complete' && (() => {
+            const isAnalyzing = project?.deep_analysis_status === 'pending' || project?.deep_analysis_status === 'running';
+            return (
+              <button
+                onClick={() => setActiveTab('understanding')}
+                disabled={isAnalyzing}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs ${
+                  isAnalyzing
+                    ? 'border-void-surface text-text-dim cursor-not-allowed opacity-50'
+                    : 'border-glow/50 text-glow hover:bg-glow/10'
+                }`}
+              >
+                {isAnalyzing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Brain className="h-3.5 w-3.5" />
+                )}
+                {isAnalyzing ? 'Analyzing...' : 'Analyze'}
+              </button>
+            );
+          })()}
           {project?.asg_status === 'complete' && (
             <Link
               to={existingPlanId
