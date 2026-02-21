@@ -9,7 +9,7 @@ Reference: https://arxiv.org/abs/2401.18059
 from dataclasses import dataclass, field
 from typing import List, Any, Dict
 
-from dbnotebook.core.config.config_loader import (
+from codeloom.core.config.config_loader import (
     get_clustering_config,
     get_summarization_config,
     get_tree_building_config,

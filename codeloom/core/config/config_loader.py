@@ -1,6 +1,6 @@
 """Unified configuration loader for YAML config files.
 
-Loads configuration from config/dbnotebook.yaml (unified) with fallback to
+Loads configuration from config/codeloom.yaml (unified) with fallback to
 legacy separate files (raptor.yaml, ingestion.yaml, sql_chat.yaml).
 
 Config files are loaded once at startup and cached.
@@ -24,7 +24,7 @@ def get_config_path() -> Path:
     """
     # Try relative to this file (project structure)
     current_file = Path(__file__)
-    # Go up: config_loader.py -> config -> core -> dbnotebook -> project_root
+    # Go up: config_loader.py -> config -> core -> codeloom -> project_root
     project_root = current_file.parent.parent.parent.parent
     config_path = project_root / "config"
 
@@ -44,7 +44,7 @@ def _load_yaml_file(filename: str) -> Dict[str, Any]:
     """Load a YAML config file.
 
     Args:
-        filename: Name of the YAML file (e.g., 'dbnotebook.yaml')
+        filename: Name of the YAML file (e.g., 'codeloom.yaml')
 
     Returns:
         Parsed YAML as dictionary, empty dict if file not found
@@ -74,14 +74,14 @@ def _load_yaml_file(filename: str) -> Dict[str, Any]:
 
 @lru_cache(maxsize=1)
 def load_unified_config() -> Dict[str, Any]:
-    """Load unified configuration from config/dbnotebook.yaml.
+    """Load unified configuration from config/codeloom.yaml.
 
     Returns:
         Dictionary with all configuration sections
     """
-    config = _load_yaml_file("dbnotebook.yaml")
+    config = _load_yaml_file("codeloom.yaml")
     if config:
-        logger.info("Loaded unified config from dbnotebook.yaml")
+        logger.info("Loaded unified config from codeloom.yaml")
     return config
 
 
@@ -117,7 +117,7 @@ def load_raptor_config() -> Dict[str, Any]:
     # Fallback to legacy file
     legacy = _load_yaml_file("raptor.yaml")
     if legacy:
-        logger.info("Using legacy raptor.yaml (consider migrating to dbnotebook.yaml)")
+        logger.info("Using legacy raptor.yaml (consider migrating to codeloom.yaml)")
     return legacy
 
 
@@ -135,7 +135,7 @@ def load_ingestion_config() -> Dict[str, Any]:
     # Fallback to legacy file
     legacy = _load_yaml_file("ingestion.yaml")
     if legacy:
-        logger.info("Using legacy ingestion.yaml (consider migrating to dbnotebook.yaml)")
+        logger.info("Using legacy ingestion.yaml (consider migrating to codeloom.yaml)")
     return legacy
 
 
@@ -153,7 +153,7 @@ def load_sql_chat_config() -> Dict[str, Any]:
     # Fallback to legacy file
     legacy = _load_yaml_file("sql_chat.yaml")
     if legacy:
-        logger.info("Using legacy sql_chat.yaml (consider migrating to dbnotebook.yaml)")
+        logger.info("Using legacy sql_chat.yaml (consider migrating to codeloom.yaml)")
     return legacy
 
 
@@ -171,6 +171,17 @@ def load_llm_config() -> Dict[str, Any]:
     return unified.get('llm', {})
 
 
+@lru_cache(maxsize=1)
+def load_migration_config() -> Dict[str, Any]:
+    """Load migration configuration from unified config.
+
+    Returns the 'migration' section containing deep_analysis
+    and llm_overrides settings.
+    """
+    unified = load_unified_config()
+    return unified.get('migration', {})
+
+
 def reload_configs() -> None:
     """Clear config caches to reload from files.
 
@@ -182,6 +193,7 @@ def reload_configs() -> None:
     load_sql_chat_config.cache_clear()
     load_retrieval_config.cache_clear()
     load_llm_config.cache_clear()
+    load_migration_config.cache_clear()
     logger.info("Config caches cleared - will reload on next access")
 
 
@@ -281,6 +293,36 @@ def get_llm_settings() -> Dict[str, Any]:
     return load_ingestion_config().get("llm", {})
 
 
+# Migration / Deep Analysis configuration getters
+def get_deep_analysis_config() -> Dict[str, Any]:
+    """Get deep analysis configuration from migration section."""
+    return load_migration_config().get("deep_analysis", {})
+
+
+def get_deep_analysis_worker_config() -> Dict[str, Any]:
+    """Get deep analysis worker configuration."""
+    return get_deep_analysis_config().get("worker", {})
+
+
+def get_deep_analysis_coverage_config() -> Dict[str, Any]:
+    """Get deep analysis coverage threshold configuration."""
+    return get_deep_analysis_config().get("coverage", {})
+
+
+def get_deep_analysis_detection_config() -> Dict[str, Any]:
+    """Get deep analysis entry-point detection configuration."""
+    return get_deep_analysis_config().get("detection", {})
+
+
+def get_llm_overrides_config() -> Dict[str, Any]:
+    """Get LLM override configuration for migration phases.
+
+    Returns dict with optional 'understanding_llm' and 'generation_llm' keys.
+    Each is either None or a dict with provider/model/temperature.
+    """
+    return load_migration_config().get("llm_overrides", {})
+
+
 # SQL Chat configuration getters
 def get_sql_chat_connections_config() -> Dict[str, Any]:
     """Get SQL Chat connection settings."""
@@ -315,12 +357,13 @@ def get_config_value(
 
     Args:
         config_type: Config section name. Supports:
-            - 'dbnotebook': Root of unified config (navigate with keys)
+            - 'codeloom': Root of unified config (navigate with keys)
             - 'raptor': RAPTOR section
             - 'ingestion': Ingestion section
             - 'sql_chat': SQL Chat section
             - 'retrieval': Retrieval section (unified only)
             - 'llm': LLM section (unified only)
+            - 'migration': Migration section (deep_analysis, llm_overrides)
         *keys: Nested keys to traverse
         default: Default value if key not found
 
@@ -329,7 +372,7 @@ def get_config_value(
 
     Examples:
         # Unified config access
-        get_config_value('dbnotebook', 'retrieval', 'reranker', 'model')
+        get_config_value('codeloom', 'retrieval', 'reranker', 'model')
 
         # Legacy-compatible access
         get_config_value('raptor', 'clustering', 'min_cluster_size', default=3)
@@ -341,7 +384,7 @@ def get_config_value(
         get_config_value('llm', 'temperature', default=0.1)
     """
     # Map config type to loader
-    if config_type == 'dbnotebook':
+    if config_type == 'codeloom':
         config = load_unified_config()
     elif config_type == 'raptor':
         config = load_raptor_config()
@@ -353,6 +396,8 @@ def get_config_value(
         config = load_retrieval_config()
     elif config_type == 'llm':
         config = load_llm_config()
+    elif config_type == 'migration':
+        config = load_migration_config()
     else:
         logger.warning(f"Unknown config type: {config_type}")
         return default

@@ -21,7 +21,7 @@ from llama_index.core.schema import BaseNode
 from sqlalchemy.orm import Session
 
 from ..db import DatabaseManager
-from ..db.models import NotebookSource
+from ..db.models import CodeFile
 from .config import RAPTORConfig, DEFAULT_CONFIG
 from .tree_builder import RAPTORTreeBuilder, TreeBuildResult
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class RAPTORJob:
     """A job to build RAPTOR tree for a source."""
     source_id: str
-    notebook_id: str
+    project_id: str
     file_name: str
 
 
@@ -150,7 +150,7 @@ class RAPTORWorker:
                 for source_data in pending:
                     job = RAPTORJob(
                         source_id=source_data["source_id"],
-                        notebook_id=source_data["notebook_id"],
+                        project_id=source_data["project_id"],
                         file_name=source_data["file_name"],
                     )
                     await self._queue.put(job)
@@ -184,7 +184,7 @@ class RAPTORWorker:
                 return
 
             # Get chunks from vector store
-            chunks = self._get_source_chunks(source_id, job.notebook_id)
+            chunks = self._get_source_chunks(source_id, job.project_id)
 
             if not chunks:
                 logger.warning(f"No chunks found for source: {source_id}")
@@ -198,7 +198,7 @@ class RAPTORWorker:
                 self._tree_builder.build_tree,
                 chunks=chunks,
                 source_id=source_id,
-                notebook_id=job.notebook_id,
+                project_id=job.project_id,
                 progress_callback=lambda stage, progress, msg:
                     logger.debug(f"RAPTOR [{source_id[:8]}] {stage}: {progress:.0%} - {msg}")
             )
@@ -211,7 +211,7 @@ class RAPTORWorker:
             if result.summary_nodes:
                 stored = self._store_summary_nodes(
                     result.summary_nodes,
-                    job.notebook_id,
+                    job.project_id,
                     source_id
                 )
                 logger.info(f"Stored {stored} summary nodes for {job.file_name}")
@@ -256,13 +256,13 @@ class RAPTORWorker:
     def _get_source_chunks(
         self,
         source_id: str,
-        notebook_id: str
+        project_id: str
     ) -> List[BaseNode]:
         """Get chunks for a source from the vector store."""
         try:
             # Get level 0 nodes (original chunks) for this source
             nodes = self.vector_store.get_nodes_by_tree_level(
-                notebook_id=notebook_id,
+                project_id=project_id,
                 tree_level=0,
                 source_ids=[source_id]
             )
@@ -274,7 +274,7 @@ class RAPTORWorker:
     def _store_summary_nodes(
         self,
         summary_nodes: List,
-        notebook_id: str,
+        project_id: str,
         source_id: str
     ) -> int:
         """Store summary nodes in the vector store."""
@@ -299,7 +299,7 @@ class RAPTORWorker:
             for level, nodes in sorted(nodes_by_level.items()):
                 stored = self.vector_store.add_tree_nodes(
                     nodes=nodes,
-                    notebook_id=notebook_id,
+                    project_id=project_id,
                     source_id=source_id,
                     tree_level=level,
                     tree_root_id=tree_root_id
@@ -317,15 +317,15 @@ class RAPTORWorker:
         """Get sources with pending RAPTOR status."""
         try:
             with self.db.get_session() as session:
-                sources = session.query(NotebookSource).filter(
-                    NotebookSource.raptor_status == "pending"
+                sources = session.query(CodeFile).filter(
+                    CodeFile.raptor_status == "pending"
                 ).limit(limit).all()
 
                 return [
                     {
-                        "source_id": str(s.source_id),
-                        "notebook_id": str(s.notebook_id),
-                        "file_name": s.file_name,
+                        "source_id": str(s.file_id),
+                        "project_id": str(s.project_id),
+                        "file_name": s.file_path,
                     }
                     for s in sources
                 ]
@@ -342,15 +342,15 @@ class RAPTORWorker:
         """Update RAPTOR status for a source."""
         try:
             with self.db.get_session() as session:
-                source = session.query(NotebookSource).filter(
-                    NotebookSource.source_id == UUID(source_id)
+                code_file = session.query(CodeFile).filter(
+                    CodeFile.file_id == UUID(source_id)
                 ).first()
 
-                if source:
-                    source.raptor_status = status
-                    source.raptor_error = error
+                if code_file:
+                    code_file.raptor_status = status
+                    code_file.raptor_error = error
                     if status == "completed":
-                        source.raptor_built_at = datetime.utcnow()
+                        code_file.raptor_built_at = datetime.utcnow()
 
                     logger.debug(f"Updated RAPTOR status for {source_id}: {status}")
 
@@ -362,7 +362,7 @@ def build_raptor_tree_sync(
     db_manager: DatabaseManager,
     vector_store: "PGVectorStore",
     source_id: str,
-    notebook_id: str,
+    project_id: str,
     config: Optional[RAPTORConfig] = None,
 ) -> TreeBuildResult:
     """Build RAPTOR tree synchronously for a single source.
@@ -373,7 +373,7 @@ def build_raptor_tree_sync(
         db_manager: Database manager
         vector_store: Vector store for chunks
         source_id: Source ID to process
-        notebook_id: Notebook ID containing the source
+        project_id: Project ID containing the source
         config: Optional RAPTOR configuration
 
     Returns:
@@ -389,7 +389,7 @@ def build_raptor_tree_sync(
         return TreeBuildResult(
             success=False,
             source_id=source_id,
-            notebook_id=notebook_id,
+            project_id=project_id,
             total_nodes=0,
             levels={},
             max_level=0,
@@ -401,7 +401,7 @@ def build_raptor_tree_sync(
 
     # Get chunks
     chunks = vector_store.get_nodes_by_tree_level(
-        notebook_id=notebook_id,
+        project_id=project_id,
         tree_level=0,
         source_ids=[source_id]
     )
@@ -410,7 +410,7 @@ def build_raptor_tree_sync(
         return TreeBuildResult(
             success=False,
             source_id=source_id,
-            notebook_id=notebook_id,
+            project_id=project_id,
             total_nodes=0,
             levels={},
             max_level=0,
@@ -420,7 +420,7 @@ def build_raptor_tree_sync(
     result = builder.build_tree(
         chunks=chunks,
         source_id=source_id,
-        notebook_id=notebook_id
+        project_id=project_id
     )
 
     # Store summary nodes if successful
@@ -440,7 +440,7 @@ def build_raptor_tree_sync(
             for level, nodes in sorted(nodes_by_level.items()):
                 vector_store.add_tree_nodes(
                     nodes=nodes,
-                    notebook_id=notebook_id,
+                    project_id=project_id,
                     source_id=source_id,
                     tree_level=level,
                     tree_root_id=tree_root_id
@@ -450,15 +450,15 @@ def build_raptor_tree_sync(
     status = "completed" if result.success else "failed"
     try:
         with db_manager.get_session() as session:
-            source = session.query(NotebookSource).filter(
-                NotebookSource.source_id == UUID(source_id)
+            code_file = session.query(CodeFile).filter(
+                CodeFile.file_id == UUID(source_id)
             ).first()
 
-            if source:
-                source.raptor_status = status
-                source.raptor_error = result.error
+            if code_file:
+                code_file.raptor_status = status
+                code_file.raptor_error = result.error
                 if status == "completed":
-                    source.raptor_built_at = datetime.utcnow()
+                    code_file.raptor_built_at = datetime.utcnow()
 
     except Exception as e:
         logger.error(f"Error updating status after sync build: {e}")

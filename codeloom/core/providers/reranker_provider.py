@@ -17,7 +17,7 @@ and Groq LLM-based reranking for fast cloud-based inference.
 
 ## Usage Examples
 
-    from dbnotebook.core.providers.reranker_provider import get_shared_reranker
+    from codeloom.core.providers.reranker_provider import get_shared_reranker
 
     # Local cross-encoder (default)
     reranker = get_shared_reranker(model="base", top_n=10)

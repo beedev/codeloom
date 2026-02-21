@@ -21,7 +21,7 @@ class IChatService(ABC):
     def stream_chat(
         self,
         query: str,
-        notebook_id: str | None = None,
+        project_id: str | None = None,
         user_id: str | None = None,
         conversation_id: str | None = None,
         mode: str = "chat",
@@ -31,7 +31,7 @@ class IChatService(ABC):
 
         Args:
             query: User query text
-            notebook_id: Optional notebook UUID to limit context
+            project_id: Optional project UUID to limit context
             user_id: Optional user UUID for multi-user support
             conversation_id: Optional conversation UUID for history
             mode: Chat mode ("chat" or "QA")
@@ -45,13 +45,13 @@ class IChatService(ABC):
     @abstractmethod
     def get_context(
         self,
-        notebook_id: str,
+        project_id: str,
         top_k: int = 6
     ) -> Dict[str, Any]:
-        """Get retrieval context for a notebook.
+        """Get retrieval context for a project.
 
         Args:
-            notebook_id: Notebook UUID
+            project_id: Project UUID
             top_k: Number of top chunks to retrieve
 
         Returns:
@@ -177,7 +177,7 @@ class IDocumentService(ABC):
         self,
         file: bytes,
         filename: str,
-        notebook_id: str,
+        project_id: str,
         user_id: str | None = None,
         metadata: Dict[str, Any] | None = None
     ) -> Dict[str, Any]:
@@ -186,7 +186,7 @@ class IDocumentService(ABC):
         Args:
             file: File content as bytes
             filename: Original filename
-            notebook_id: Notebook UUID to add document to
+            project_id: Project UUID to add document to
             user_id: Optional user UUID for ownership
             metadata: Optional document metadata (it_practice, offering_id, etc.)
 
@@ -205,14 +205,14 @@ class IDocumentService(ABC):
     def delete(
         self,
         source_id: str,
-        notebook_id: str,
+        project_id: str,
         user_id: str | None = None
     ) -> bool:
-        """Delete a document from notebook.
+        """Delete a document from project.
 
         Args:
             source_id: Source UUID to delete
-            notebook_id: Notebook UUID containing the source
+            project_id: Project UUID containing the source
             user_id: Optional user UUID for authorization
 
         Returns:
@@ -225,14 +225,14 @@ class IDocumentService(ABC):
         self,
         source_id: str,
         active: bool,
-        notebook_id: str | None = None
+        project_id: str | None = None
     ) -> bool:
         """Toggle document active status for RAG inclusion.
 
         Args:
             source_id: Source UUID to update
             active: New active status
-            notebook_id: Optional notebook UUID for validation
+            project_id: Optional project UUID for validation
 
         Returns:
             True if successful
@@ -242,14 +242,14 @@ class IDocumentService(ABC):
     @abstractmethod
     def list_documents(
         self,
-        notebook_id: str,
+        project_id: str,
         user_id: str | None = None,
         include_inactive: bool = True
     ) -> List[Dict[str, Any]]:
-        """List documents in a notebook.
+        """List documents in a project.
 
         Args:
-            notebook_id: Notebook UUID
+            project_id: Project UUID
             user_id: Optional user UUID for filtering
             include_inactive: Include inactive documents
 
@@ -268,13 +268,13 @@ class IDocumentService(ABC):
     def get_document_info(
         self,
         source_id: str,
-        notebook_id: str | None = None
+        project_id: str | None = None
     ) -> Dict[str, Any]:
         """Get detailed information about a document.
 
         Args:
             source_id: Source UUID
-            notebook_id: Optional notebook UUID for validation
+            project_id: Optional project UUID for validation
 
         Returns:
             Dictionary with document details and statistics
@@ -286,14 +286,14 @@ class IDocumentService(ABC):
         self,
         source_id: str,
         metadata: Dict[str, Any],
-        notebook_id: str | None = None
+        project_id: str | None = None
     ) -> bool:
         """Update document metadata.
 
         Args:
             source_id: Source UUID
             metadata: New metadata dictionary
-            notebook_id: Optional notebook UUID for validation
+            project_id: Optional project UUID for validation
 
         Returns:
             True if successful
@@ -301,83 +301,83 @@ class IDocumentService(ABC):
         pass
 
 
-class INotebookService(ABC):
-    """Interface for notebook management operations.
+class IProjectService(ABC):
+    """Interface for project management operations.
 
-    Handles notebook lifecycle, document organization, and
-    NotebookLM-style document collections.
+    Handles project lifecycle, code file organization, and
+    codebase-level document collections.
     """
 
     @abstractmethod
-    def create_notebook(
+    def create_project(
         self,
         name: str,
         user_id: str,
         description: str | None = None
     ) -> Dict[str, Any]:
-        """Create a new notebook.
+        """Create a new project.
 
         Args:
-            name: Notebook name
+            name: Project name
             user_id: Owner user UUID
             description: Optional description
 
         Returns:
             Dictionary containing:
-            - notebook_id: UUID of created notebook
-            - name: Notebook name
+            - project_id: UUID of created project
+            - name: Project name
             - created_at: Creation timestamp
         """
         pass
 
     @abstractmethod
-    def get_notebook(
+    def get_project(
         self,
-        notebook_id: str,
+        project_id: str,
         user_id: str | None = None
     ) -> Dict[str, Any]:
-        """Get notebook details.
+        """Get project details.
 
         Args:
-            notebook_id: Notebook UUID
+            project_id: Project UUID
             user_id: Optional user UUID for authorization
 
         Returns:
-            Dictionary with notebook details and statistics
+            Dictionary with project details and statistics
         """
         pass
 
     @abstractmethod
-    def list_notebooks(
+    def list_projects(
         self,
         user_id: str,
         limit: int = 100,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
-        """List notebooks for a user.
+        """List projects for a user.
 
         Args:
             user_id: User UUID
-            limit: Maximum number of notebooks to return
+            limit: Maximum number of projects to return
             offset: Offset for pagination
 
         Returns:
-            List of notebook metadata dictionaries
+            List of project metadata dictionaries
         """
         pass
 
     @abstractmethod
-    def update_notebook(
+    def update_project(
         self,
-        notebook_id: str,
+        project_id: str,
         name: str | None = None,
         description: str | None = None,
         user_id: str | None = None
     ) -> bool:
-        """Update notebook metadata.
+        """Update project metadata.
 
         Args:
-            notebook_id: Notebook UUID
+            project_id: Project UUID
             name: Optional new name
             description: Optional new description
             user_id: Optional user UUID for authorization
@@ -388,15 +388,15 @@ class INotebookService(ABC):
         pass
 
     @abstractmethod
-    def delete_notebook(
+    def delete_project(
         self,
-        notebook_id: str,
+        project_id: str,
         user_id: str | None = None
     ) -> bool:
-        """Delete a notebook and all its documents.
+        """Delete a project and all its code files.
 
         Args:
-            notebook_id: Notebook UUID
+            project_id: Project UUID
             user_id: Optional user UUID for authorization
 
         Returns:
@@ -405,15 +405,15 @@ class INotebookService(ABC):
         pass
 
     @abstractmethod
-    def switch_notebook(
+    def switch_project(
         self,
-        notebook_id: str,
+        project_id: str,
         user_id: str | None = None
     ) -> bool:
-        """Switch active notebook context.
+        """Switch active project context.
 
         Args:
-            notebook_id: Notebook UUID to switch to
+            project_id: Project UUID to switch to
             user_id: Optional user UUID for authorization
 
         Returns:

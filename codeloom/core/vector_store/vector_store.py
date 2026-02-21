@@ -53,8 +53,8 @@ class LocalVectorStore:
         else:
             self._chroma_client = chromadb.EphemeralClient()
 
-        # Per-notebook cache for vector indices (MVP 3 optimization)
-        # Cache key format: f"index_{notebook_id}" or "index_all" for global
+        # Per-project cache for vector indices (MVP 3 optimization)
+        # Cache key format: f"index_{project_id}" or "index_all" for global
         self._index_cache: Dict[str, VectorStoreIndex] = {}
         self._cached_node_counts: Dict[str, int] = {}
 
@@ -168,10 +168,10 @@ class LocalVectorStore:
             for node in nodes:
                 metadata = node.metadata or {}
 
-                # Check notebook_id filter (for notebook-based architecture)
+                # Check project_id filter (for project-based architecture)
                 if offering_ids:
-                    node_notebook_id = metadata.get("notebook_id")
-                    if node_notebook_id and node_notebook_id in offering_ids:
+                    node_project_id = metadata.get("project_id")
+                    if node_project_id and node_project_id in offering_ids:
                         filtered_nodes.append(node)
                         continue
 
@@ -194,13 +194,13 @@ class LocalVectorStore:
             if not filtered_nodes:
                 logger.warning(
                     f"No nodes found matching filters: "
-                    f"offerings/notebooks={offering_ids}, practices={practice_names}"
+                    f"offerings/projects={offering_ids}, practices={practice_names}"
                 )
                 return None
 
             logger.info(
                 f"Filtered {len(filtered_nodes)} nodes from {len(nodes)} total "
-                f"(offerings/notebooks={offering_ids}, practices={practice_names})"
+                f"(offerings/projects={offering_ids}, practices={practice_names})"
             )
 
         # Create index with filtered nodes
@@ -277,107 +277,107 @@ class LocalVectorStore:
             return {"error": str(e)}
 
     # =========================================================================
-    # Notebook-Specific Methods (NotebookLM Architecture)
+    # Project-Specific Methods (ProjectLM Architecture)
     # =========================================================================
 
-    def get_nodes_by_notebook(
+    def get_nodes_by_project(
         self,
         nodes: List[BaseNode],
-        notebook_id: str
+        project_id: str
     ) -> List[BaseNode]:
         """
-        Filter nodes by notebook_id for NotebookLM-style isolation.
+        Filter nodes by project_id for ProjectLM-style isolation.
 
         Args:
             nodes: List of nodes to filter
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
 
         Returns:
-            List of nodes belonging to the specified notebook
+            List of nodes belonging to the specified project
         """
-        return self.get_nodes_by_metadata(nodes, {"notebook_id": notebook_id})
+        return self.get_nodes_by_metadata(nodes, {"project_id": project_id})
 
-    def get_index_by_notebook(
+    def get_index_by_project(
         self,
         nodes: List[BaseNode],
-        notebook_id: str,
+        project_id: str,
         force_rebuild: bool = False
     ) -> Optional[VectorStoreIndex]:
         """
-        Get or create filtered vector index for a specific notebook.
+        Get or create filtered vector index for a specific project.
 
         Args:
             nodes: List of all available nodes
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
             force_rebuild: Force rebuild even if cached
 
         Returns:
-            VectorStoreIndex with notebook-filtered nodes, or None if no matching nodes
+            VectorStoreIndex with project-filtered nodes, or None if no matching nodes
         """
-        filtered_nodes = self.get_nodes_by_notebook(nodes, notebook_id)
+        filtered_nodes = self.get_nodes_by_project(nodes, project_id)
 
         if not filtered_nodes:
-            logger.warning(f"No nodes found for notebook: {notebook_id}")
+            logger.warning(f"No nodes found for project: {project_id}")
             return None
 
         logger.info(
-            f"Filtered {len(filtered_nodes)} nodes for notebook {notebook_id} "
+            f"Filtered {len(filtered_nodes)} nodes for project {project_id} "
             f"from {len(nodes)} total"
         )
 
         return self.get_index(filtered_nodes, force_rebuild=force_rebuild)
 
-    def delete_notebook_nodes(
+    def delete_project_nodes(
         self,
         nodes: List[BaseNode],
-        notebook_id: str
+        project_id: str
     ) -> List[BaseNode]:
         """
-        Filter out nodes belonging to a specific notebook.
+        Filter out nodes belonging to a specific project.
 
-        Use this to remove notebook nodes from the in-memory node list
-        after deleting a notebook from the database.
+        Use this to remove project nodes from the in-memory node list
+        after deleting a project from the database.
 
         Args:
             nodes: List of all nodes
-            notebook_id: Notebook UUID to remove
+            project_id: Project UUID to remove
 
         Returns:
-            List of nodes NOT belonging to the specified notebook
+            List of nodes NOT belonging to the specified project
         """
         remaining_nodes = [
             node for node in nodes
-            if node.metadata.get("notebook_id") != notebook_id
+            if node.metadata.get("project_id") != project_id
         ]
 
         removed_count = len(nodes) - len(remaining_nodes)
         logger.info(
-            f"Removed {removed_count} nodes for notebook {notebook_id}, "
+            f"Removed {removed_count} nodes for project {project_id}, "
             f"{len(remaining_nodes)} nodes remaining"
         )
 
         return remaining_nodes
 
-    def get_notebook_document_count(
+    def get_project_document_count(
         self,
         nodes: List[BaseNode],
-        notebook_id: str
+        project_id: str
     ) -> int:
         """
-        Get count of unique documents in a notebook.
+        Get count of unique documents in a project.
 
         Args:
             nodes: List of all nodes
-            notebook_id: Notebook UUID
+            project_id: Project UUID
 
         Returns:
-            Number of unique documents (source_ids) in the notebook
+            Number of unique documents (source_ids) in the project
         """
-        notebook_nodes = self.get_nodes_by_notebook(nodes, notebook_id)
+        project_nodes = self.get_nodes_by_project(nodes, project_id)
 
         # Count unique source_ids
         source_ids = set()
-        for node in notebook_nodes:
+        for node in project_nodes:
             source_id = node.metadata.get("source_id")
             if source_id:
                 source_ids.add(source_id)
@@ -389,7 +389,7 @@ class LocalVectorStore:
         Load all persisted nodes from ChromaDB.
 
         This method retrieves all nodes that have been persisted to ChromaDB,
-        allowing notebooks to persist across sessions.
+        allowing projects to persist across sessions.
 
         Returns:
             List of all BaseNode objects stored in ChromaDB
@@ -452,7 +452,7 @@ class LocalVectorStore:
             # Efficient deletion using ChromaDB native filtering (MVP 3)
             collection.delete(where={"source_id": source_id})
 
-            # Invalidate all caches since we don't know which notebook this document belonged to
+            # Invalidate all caches since we don't know which project this document belonged to
             self._index_cache = {}
             self._cached_node_counts = {}
 

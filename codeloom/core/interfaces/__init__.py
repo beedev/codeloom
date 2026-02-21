@@ -11,7 +11,7 @@ from .services import (
     IChatService,
     IImageService,
     IDocumentService,
-    INotebookService,
+    IProjectService,
     IVisionService,
 )
 from .routing import (
@@ -38,7 +38,7 @@ __all__ = [
     "IChatService",
     "IImageService",
     "IDocumentService",
-    "INotebookService",
+    "IProjectService",
     "IVisionService",
     # Routing interfaces
     "IDocumentRoutingService",

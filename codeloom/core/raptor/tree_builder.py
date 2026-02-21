@@ -34,7 +34,7 @@ class TreeBuildResult:
     """Result of RAPTOR tree building."""
     success: bool
     source_id: str
-    notebook_id: str
+    project_id: str
 
     # Tree statistics
     total_nodes: int = 0
@@ -57,7 +57,7 @@ class TreeBuildResult:
         return {
             "success": self.success,
             "source_id": self.source_id,
-            "notebook_id": self.notebook_id,
+            "project_id": self.project_id,
             "total_nodes": self.total_nodes,
             "levels": self.levels,
             "max_level": self.max_level,
@@ -103,7 +103,7 @@ class RAPTORTreeBuilder:
         self,
         chunks: List[BaseNode],
         source_id: str,
-        notebook_id: str,
+        project_id: str,
         progress_callback: Optional[callable] = None
     ) -> TreeBuildResult:
         """
@@ -112,7 +112,7 @@ class RAPTORTreeBuilder:
         Args:
             chunks: List of document chunks (level 0 nodes)
             source_id: Source document ID
-            notebook_id: Notebook ID
+            project_id: Project ID
             progress_callback: Optional callback(stage, progress, message)
 
         Returns:
@@ -124,7 +124,7 @@ class RAPTORTreeBuilder:
         result = TreeBuildResult(
             success=False,
             source_id=source_id,
-            notebook_id=notebook_id,
+            project_id=project_id,
             started_at=started_at
         )
 
@@ -190,7 +190,7 @@ class RAPTORTreeBuilder:
                         cluster=cluster,
                         tree_level=current_level,
                         source_id=source_id,
-                        notebook_id=notebook_id
+                        project_id=project_id
                     )
                     level_summary_nodes.append(summary_node)
 
@@ -238,7 +238,7 @@ class RAPTORTreeBuilder:
                         cluster_id=node.metadata.get("cluster_id", ""),
                         token_count=len(node.get_content().split()),
                         source_id=source_id,
-                        notebook_id=notebook_id
+                        project_id=project_id
                     )
                     top_level_summaries.append(sn)
 
@@ -246,7 +246,7 @@ class RAPTORTreeBuilder:
                     summary_nodes=top_level_summaries,
                     tree_level=current_level,
                     source_id=source_id,
-                    notebook_id=notebook_id
+                    project_id=project_id
                 )
 
                 # Generate embedding for root
@@ -302,7 +302,7 @@ class RAPTORTreeBuilder:
         self,
         chunks: List[BaseNode],
         source_id: str,
-        notebook_id: str,
+        project_id: str,
         progress_callback: Optional[callable] = None
     ) -> TreeBuildResult:
         """
@@ -316,7 +316,7 @@ class RAPTORTreeBuilder:
         result = TreeBuildResult(
             success=False,
             source_id=source_id,
-            notebook_id=notebook_id,
+            project_id=project_id,
             started_at=started_at
         )
 
@@ -357,7 +357,7 @@ class RAPTORTreeBuilder:
                         cluster=cluster,
                         tree_level=current_level,
                         source_id=source_id,
-                        notebook_id=notebook_id
+                        project_id=project_id
                     )
                     for cluster in clusters
                 ]
@@ -397,7 +397,7 @@ class RAPTORTreeBuilder:
                         cluster_id=node.metadata.get("cluster_id", ""),
                         token_count=len(node.get_content().split()),
                         source_id=source_id,
-                        notebook_id=notebook_id
+                        project_id=project_id
                     )
                     top_level_summaries.append(sn)
 
@@ -405,7 +405,7 @@ class RAPTORTreeBuilder:
                     summary_nodes=top_level_summaries,
                     tree_level=current_level,
                     source_id=source_id,
-                    notebook_id=notebook_id
+                    project_id=project_id
                 )
 
                 root_embedding = self.embed_model.get_text_embedding(root_summary.text)

@@ -18,10 +18,9 @@ from .core import (
     get_system_prompt
 )
 from .core.db import DatabaseManager
-from .core.notebook import NotebookManager
+from .core.project.project_manager import ProjectManager
 from .core.conversation import ConversationStore
 from .core.observability import QueryLogger, get_token_counter
-from .core.transformations import TransformationWorker, TransformationJob
 from .core.raptor import RAPTORWorker, RAPTORJob
 from .core.memory import SessionMemoryService
 from .core.constants import DEFAULT_USER_ID
@@ -40,24 +39,24 @@ class LocalRAGPipeline:
     This class contains both single-user (global state) and multi-user (stateless) patterns.
 
     MULTI-USER SAFE METHODS (Thread-safe, no global state mutation):
-    - stateless_query()           - Fast query with explicit user_id/notebook_id
+    - stateless_query()           - Fast query with explicit user_id/project_id
     - stateless_query_streaming() - Streaming version of above
     - _get_cached_nodes()         - Thread-safe node cache access
 
     SINGLE-USER METHODS (Mutate global state - NOT safe for concurrent users):
-    - switch_notebook()           - Sets _current_notebook_id, _current_user_id
+    - switch_project()           - Sets _current_project_id, _current_user_id
     - set_engine()                - Sets _current_offering_filter
     - set_chat_mode()             - Sets engine mode
     - query()                     - Uses global engine state
 
     GLOBAL STATE (Document for awareness):
-    - _current_notebook_id: Active notebook for single-user session
+    - _current_project_id: Active project for single-user session
     - _current_user_id: Active user for single-user session
-    - _current_offering_filter: Active notebook filter for retrieval
+    - _current_offering_filter: Active project filter for retrieval
 
     RECOMMENDED USAGE:
     - For API/multi-user: Use stateless_query() with explicit IDs
-    - For UI session: Use switch_notebook() + query() pattern
+    - For UI session: Use switch_project() + query() pattern
     - For concurrent users: ONLY use stateless_* methods
 
     Optimized for:
@@ -85,9 +84,9 @@ class LocalRAGPipeline:
         self._engine_initialized: bool = False
         self._current_offering_filter: Optional[list[str]] = None  # Track current filter for isolation
 
-        # Notebook context tracking (NotebookLM architecture)
+        # Project context tracking (ProjectLM architecture)
         # NOTE: These are single-user state - use stateless_query() for multi-user
-        self._current_notebook_id: Optional[str] = None
+        self._current_project_id: Optional[str] = None
         self._current_user_id: str = DEFAULT_USER_ID  # Default user for single-user mode
 
         # Session memory for cross-request conversation persistence
@@ -98,7 +97,7 @@ class LocalRAGPipeline:
         logger.info("Session memory service initialized")
 
         # Node cache for performance optimization (avoids reloading nodes from DB)
-        # Cache format: {notebook_id: (nodes, timestamp, node_count)}
+        # Cache format: {project_id: (nodes, timestamp, node_count)}
         self._node_cache: Dict[str, Tuple[List[TextNode], float, int]] = {}
         self._node_cache_ttl = 300  # 5 minutes TTL
         self._node_cache_lock = threading.Lock()  # Thread-safe cache access for multi-user
@@ -110,10 +109,9 @@ class LocalRAGPipeline:
 
         # Database and conversation management (optional, only if database_url provided)
         self._db_manager: Optional[DatabaseManager] = None
-        self._notebook_manager: Optional[NotebookManager] = None
+        self._project_manager: Optional[ProjectManager] = None
         self._conversation_store: Optional[ConversationStore] = None
         self._query_logger: Optional[QueryLogger] = None
-        self._transformation_worker: Optional[TransformationWorker] = None
         self._raptor_worker: Optional[RAPTORWorker] = None
         if database_url:
             # Increased pool size for better concurrency under load
@@ -127,14 +125,14 @@ class LocalRAGPipeline:
                 pool_recycle=1800  # Recycle connections every 30 minutes
             )
             self._db_manager.init_db()
-            self._notebook_manager = NotebookManager(self._db_manager)
+            self._project_manager = ProjectManager(self._db_manager)
             self._conversation_store = ConversationStore(self._db_manager)
             self._query_logger = QueryLogger(db_manager=self._db_manager)
-            logger.info(f"Database initialized with notebook management, conversation persistence, and query logging")
+            logger.info(f"Database initialized with project management, conversation persistence, and query logging")
         else:
             # Initialize in-memory query logger even without database
             self._query_logger = QueryLogger()
-            logger.info("Query logger initialized (in-memory mode, notebook features disabled)")
+            logger.info("Query logger initialized (in-memory mode, project features disabled)")
 
         # Initialize components once - using PGVectorStore (pgvector)
         self._vector_store = PGVectorStore(
@@ -147,33 +145,7 @@ class LocalRAGPipeline:
             host=host
         )
 
-        # Initialize TransformationWorker for AI transformations (if database available)
-        # Skip in multi-worker mode (Gunicorn) - asyncio doesn't fork well
-        transformation_callback = None
         skip_background_workers = os.getenv("DISABLE_BACKGROUND_WORKERS", "").lower() in ("true", "1", "yes")
-        if self._db_manager and not skip_background_workers:
-            self._transformation_worker = TransformationWorker(
-                db_manager=self._db_manager,
-                embed_callback=self._embed_transformation,  # Will embed transformation content
-                poll_interval=10.0,
-                max_concurrent=2,
-            )
-            self._transformation_worker.start()
-            logger.info("TransformationWorker started for AI transformations")
-        elif skip_background_workers:
-            logger.info("TransformationWorker disabled (DISABLE_BACKGROUND_WORKERS=true)")
-
-            # Create callback for ingestion to queue transformation jobs
-            def transformation_callback(source_id: str, document_text: str, notebook_id: str, file_name: str):
-                """Queue a transformation job when a document is ingested."""
-                job = TransformationJob(
-                    source_id=source_id,
-                    document_text=document_text,
-                    notebook_id=notebook_id,
-                    file_name=file_name,
-                )
-                self._transformation_worker.queue_job(job)
-                logger.debug(f"Queued transformation job for source: {source_id}")
 
         self._ingestion = LocalDataIngestion(
             setting=self._settings,
@@ -181,7 +153,6 @@ class LocalRAGPipeline:
             use_cache=False,  # Disabled - using pgvector for persistence
             db_manager=self._db_manager,
             vector_store=self._vector_store,
-            transformation_callback=transformation_callback,
         )
 
         # Initialize models once and cache in Settings
@@ -219,22 +190,22 @@ class LocalRAGPipeline:
         logger.debug(f"LLM Model: {self._model_name or self._settings.ollama.llm}")
         logger.debug(f"Embed Model: {self._settings.ingestion.embed_llm}")
 
-    def switch_notebook(
+    def switch_project(
         self,
-        notebook_id: str,
+        project_id: str,
         user_id: Optional[str] = None
     ) -> None:
         """
-        Switch to a different notebook with fresh session memory.
+        Switch to a different project with fresh session memory.
 
         Session-only mode:
         1. Clear existing in-memory conversation
-        2. Update notebook context
-        3. Recreate engine with notebook-filtered nodes
+        2. Update project context
+        3. Recreate engine with project-filtered nodes
         4. Start fresh (no DB history loading)
 
         Args:
-            notebook_id: UUID of the notebook to switch to
+            project_id: UUID of the project to switch to
             user_id: UUID of the user (defaults to current user)
 
         Raises:
@@ -243,7 +214,7 @@ class LocalRAGPipeline:
         if not self._conversation_store:
             raise ValueError(
                 "Conversation persistence not available. "
-                "Initialize pipeline with database_url to enable notebook features."
+                "Initialize pipeline with database_url to enable project features."
             )
 
         user_id = user_id or self._current_user_id
@@ -256,29 +227,29 @@ class LocalRAGPipeline:
             except Exception as e:
                 logger.debug(f"No conversation to clear: {e}")
 
-        # Step 2: Update notebook context
-        self._current_notebook_id = notebook_id
+        # Step 2: Update project context
+        self._current_project_id = project_id
         self._current_user_id = user_id
-        logger.info(f"Switched to notebook: {notebook_id}")
+        logger.info(f"Switched to project: {project_id}")
 
         # Step 3: Get history from session memory (cross-request persistence)
-        # This allows resuming conversations when switching back to a notebook
-        chat_history = self._session_memory.get_history(user_id, notebook_id)
+        # This allows resuming conversations when switching back to a project
+        chat_history = self._session_memory.get_history(user_id, project_id)
         if chat_history:
             logger.info(f"Restored {len(chat_history)} messages from session memory")
         else:
             logger.info("Starting fresh session (no previous history)")
 
-        # Step 4: Load ONLY nodes for this notebook using cached SQL filtering
+        # Step 4: Load ONLY nodes for this project using cached SQL filtering
         # Uses caching to avoid repeated DB queries (100-300ms saved on cache hit)
-        logger.info(f"Loading nodes for notebook {notebook_id}")
-        notebook_nodes = self._get_cached_nodes(notebook_id)
-        logger.info(f"Got {len(notebook_nodes)} nodes for notebook {notebook_id}")
+        logger.info(f"Loading nodes for project {project_id}")
+        project_nodes = self._get_cached_nodes(project_id)
+        logger.info(f"Got {len(project_nodes)} nodes for project {project_id}")
 
-        # Step 5: Recreate engine with notebook context and chat history
+        # Step 5: Recreate engine with project context and chat history
         self._query_engine = self._engine.set_engine(
             llm=self._default_model,
-            nodes=notebook_nodes,
+            nodes=project_nodes,
             language=self._language,
             chat_history=chat_history
         )
@@ -287,8 +258,8 @@ class LocalRAGPipeline:
         self._engine_initialized = True
 
         logger.info(
-            f"Engine recreated for notebook {notebook_id} with "
-            f"{len(notebook_nodes)} nodes (session-only memory)"
+            f"Engine recreated for project {project_id} with "
+            f"{len(project_nodes)} nodes (session-only memory)"
         )
 
     def get_model_name(self) -> str:
@@ -302,11 +273,11 @@ class LocalRAGPipeline:
         """Get the current embedding model instance."""
         return Settings.embed_model
 
-    def _get_cached_nodes(self, notebook_id: str) -> List[TextNode]:
+    def _get_cached_nodes(self, project_id: str) -> List[TextNode]:
         """
-        Get nodes for a notebook with caching.
+        Get nodes for a project with caching.
 
-        Caches nodes per notebook with TTL to avoid repeated DB queries.
+        Caches nodes per project with TTL to avoid repeated DB queries.
         Cache is invalidated when:
         - TTL expires (5 minutes)
         - Node count changes (document added/removed)
@@ -314,51 +285,51 @@ class LocalRAGPipeline:
         Thread-safe for multi-user concurrent access.
 
         Args:
-            notebook_id: UUID of the notebook
+            project_id: UUID of the project
 
         Returns:
-            List of TextNode objects for the notebook
+            List of TextNode objects for the project
         """
         with self._node_cache_lock:
             current_time = time.time()
 
             # Check cache
-            if notebook_id in self._node_cache:
-                nodes, timestamp, cached_count = self._node_cache[notebook_id]
+            if project_id in self._node_cache:
+                nodes, timestamp, cached_count = self._node_cache[project_id]
 
                 # Check TTL
                 if current_time - timestamp < self._node_cache_ttl:
-                    logger.debug(f"Cache hit for notebook {notebook_id}: {len(nodes)} nodes")
+                    logger.debug(f"Cache hit for project {project_id}: {len(nodes)} nodes")
                     return nodes
                 else:
-                    logger.debug(f"Cache expired for notebook {notebook_id}")
+                    logger.debug(f"Cache expired for project {project_id}")
 
             # Cache miss - load from DB
             start_time = time.time()
-            nodes = self._vector_store.get_nodes_by_notebook_sql(notebook_id)
+            nodes = self._vector_store.get_nodes_by_project_sql(project_id)
             load_time_ms = int((time.time() - start_time) * 1000)
 
             # Store in cache
-            self._node_cache[notebook_id] = (nodes, current_time, len(nodes))
-            logger.info(f"Cached {len(nodes)} nodes for notebook {notebook_id} (loaded in {load_time_ms}ms)")
+            self._node_cache[project_id] = (nodes, current_time, len(nodes))
+            logger.info(f"Cached {len(nodes)} nodes for project {project_id} (loaded in {load_time_ms}ms)")
 
             return nodes
 
-    def invalidate_node_cache(self, notebook_id: Optional[str] = None) -> None:
+    def invalidate_node_cache(self, project_id: Optional[str] = None) -> None:
         """
-        Invalidate node cache for a notebook or all notebooks.
+        Invalidate node cache for a project or all projects.
 
         Call this after document upload/delete to ensure fresh nodes.
         Thread-safe for multi-user concurrent access.
 
         Args:
-            notebook_id: Specific notebook to invalidate, or None for all
+            project_id: Specific project to invalidate, or None for all
         """
         with self._node_cache_lock:
-            if notebook_id:
-                if notebook_id in self._node_cache:
-                    del self._node_cache[notebook_id]
-                    logger.debug(f"Invalidated node cache for notebook {notebook_id}")
+            if project_id:
+                if project_id in self._node_cache:
+                    del self._node_cache[project_id]
+                    logger.debug(f"Invalidated node cache for project {project_id}")
             else:
                 self._node_cache.clear()
                 logger.debug("Invalidated all node caches")
@@ -453,90 +424,10 @@ class LocalRAGPipeline:
         """Check if an embedding model exists on Ollama."""
         return LocalEmbedding.check_model_exist(self._ollama_host, model_name)
 
-    def _embed_transformation(
-        self,
-        text: str,
-        node_type: str,
-        source_id: str,
-        notebook_id: str
-    ) -> None:
-        """
-        Embed transformation content and store in vector store.
-
-        Called by TransformationWorker after generating transformations.
-        This allows transformation content (summaries, insights, questions)
-        to be retrieved alongside regular document chunks.
-
-        Args:
-            text: The transformation text to embed
-            node_type: Type of transformation ("summary", "insight", "question")
-            source_id: Source document UUID
-            notebook_id: Notebook UUID for filtering
-        """
-        try:
-            from llama_index.core.schema import TextNode
-            from uuid import UUID
-            import uuid
-
-            # Look up the source document to get file_name
-            file_name = None
-            if self._db_manager:
-                try:
-                    with self._db_manager.get_session() as session:
-                        from .core.db.models import NotebookSource
-                        source = session.query(NotebookSource).filter(
-                            NotebookSource.source_id == UUID(source_id)
-                        ).first()
-                        if source:
-                            file_name = source.file_name
-                except Exception as e:
-                    logger.warning(f"Could not lookup file_name for source {source_id}: {e}")
-
-            # Create a TextNode with transformation metadata including file_name
-            node = TextNode(
-                text=text,
-                id_=str(uuid.uuid4()),
-                metadata={
-                    "source_id": source_id,
-                    "notebook_id": notebook_id,
-                    "node_type": node_type,
-                    "file_name": file_name,  # Parent document name for source display
-                }
-            )
-
-            # Generate embedding for the node using Settings.embed_model
-            embed_model = Settings.embed_model
-            if embed_model:
-                try:
-                    # Generate embedding for this node
-                    embedding = embed_model.get_text_embedding(text)
-                    node.embedding = embedding
-                    logger.debug(f"Generated embedding for {node_type} (dim={len(embedding)})")
-                except Exception as e:
-                    logger.error(f"Error generating embedding for {node_type}: {e}")
-                    return  # Don't add node without embedding
-            else:
-                logger.warning("No embed model available for transformation embedding")
-                return
-
-            # Add to vector store with proper metadata
-            if hasattr(self._vector_store, 'add_transformation_nodes'):
-                self._vector_store.add_transformation_nodes(
-                    nodes=[node],
-                    notebook_id=notebook_id,
-                    source_id=source_id
-                )
-                logger.debug(f"Embedded {node_type} for source {source_id}")
-            else:
-                logger.warning("Vector store does not support add_transformation_nodes")
-
-        except Exception as e:
-            logger.error(f"Error embedding transformation for source {source_id}: {e}")
-
     def store_nodes(
         self,
         input_files: Optional[list[str]] = None,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         user_id: str = "default"
     ) -> None:
         """
@@ -544,7 +435,7 @@ class LocalRAGPipeline:
 
         Args:
             input_files: List of file paths to process
-            notebook_id: Notebook UUID for NotebookLM-style isolation (optional)
+            project_id: Project UUID for ProjectLM-style isolation (optional)
             user_id: User identifier (defaults to "default")
 
         Uses parallel processing and caching for efficiency.
@@ -556,13 +447,13 @@ class LocalRAGPipeline:
         logger.info(f"Processing {len(input_files)} files")
         self._ingestion.store_nodes(
             input_files=input_files,
-            notebook_id=notebook_id,
+            project_id=project_id,
             user_id=user_id
         )
 
-        # Invalidate node cache for this notebook (nodes have changed)
-        if notebook_id:
-            self.invalidate_node_cache(notebook_id)
+        # Invalidate node cache for this project (nodes have changed)
+        if project_id:
+            self.invalidate_node_cache(project_id)
 
         logger.info("Document processing complete")
 
@@ -579,18 +470,18 @@ class LocalRAGPipeline:
         self.set_engine(force_reset=force_reset)
         logger.debug(f"Chat mode configured (force_reset={force_reset})")
 
-    def load_notebook_documents(self, notebook_ids: list[str]) -> int:
+    def load_project_documents(self, project_ids: list[str]) -> int:
         """
-        Load and ingest documents from specified notebooks.
+        Load and ingest documents from specified projects.
 
         Args:
-            notebook_ids: List of notebook IDs to load documents from
+            project_ids: List of project IDs to load documents from
 
         Returns:
             Number of documents loaded
         """
-        if not self._notebook_manager:
-            logger.warning("Cannot load notebook documents - notebook manager not available")
+        if not self._project_manager:
+            logger.warning("Cannot load project documents - project manager not available")
             return 0
 
         import os
@@ -598,18 +489,18 @@ class LocalRAGPipeline:
 
         total_loaded = 0
 
-        for notebook_id in notebook_ids:
+        for project_id in project_ids:
             try:
-                # Get documents for this notebook from database
-                documents = self._notebook_manager.get_documents(notebook_id)
+                # Get documents for this project from database
+                documents = self._project_manager.get_documents(project_id)
 
                 if not documents:
-                    logger.info(f"No documents found for notebook {notebook_id}")
+                    logger.info(f"No documents found for project {project_id}")
                     continue
 
-                logger.info(f"Found {len(documents)} documents for notebook {notebook_id}")
+                logger.info(f"Found {len(documents)} documents for project {project_id}")
 
-                # Load each document from disk and ingest with notebook_id metadata
+                # Load each document from disk and ingest with project_id metadata
                 for doc in documents:
                     file_name = doc['file_name']
                     file_path = os.path.join(self._ingestion._data_dir, file_name)
@@ -618,18 +509,18 @@ class LocalRAGPipeline:
                         logger.warning(f"Document file not found: {file_path}")
                         continue
 
-                    # Ingest with notebook_id metadata
-                    logger.info(f"Loading document: {file_name} with notebook_id={notebook_id}")
+                    # Ingest with project_id metadata
+                    logger.info(f"Loading document: {file_name} with project_id={project_id}")
                     self._ingestion.store_nodes(
                         input_files=[file_path],
-                        notebook_id=notebook_id
+                        project_id=project_id
                     )
                     total_loaded += 1
 
-                logger.info(f"Loaded {total_loaded} documents for notebook {notebook_id}")
+                logger.info(f"Loaded {total_loaded} documents for project {project_id}")
 
             except Exception as e:
-                logger.error(f"Error loading documents for notebook {notebook_id}: {e}")
+                logger.error(f"Error loading documents for project {project_id}: {e}")
                 continue
 
         return total_loaded
@@ -643,10 +534,10 @@ class LocalRAGPipeline:
         Only recreates engine if filter changes or force_reset is True.
 
         Args:
-            offering_filter: List of offering names/IDs or notebook IDs to filter by
+            offering_filter: List of offering names/IDs or project IDs to filter by
             force_reset: Force recreation of engine even if filter unchanged
         """
-        # Check if filter has changed (critical for notebook isolation)
+        # Check if filter has changed (critical for project isolation)
         filter_changed = offering_filter != self._current_offering_filter
         if filter_changed:
             logger.info(f"Filter changed: {self._current_offering_filter} -> {offering_filter}")
@@ -657,22 +548,22 @@ class LocalRAGPipeline:
 
             # PRESERVE chat history from session memory (cross-request persistence)
             preserved_history = []
-            # Determine notebook_id: use current or extract from offering_filter
-            notebook_id_for_history = self._current_notebook_id
-            if not notebook_id_for_history and offering_filter and len(offering_filter) == 1:
-                # Single notebook filter - use it for history lookup
-                notebook_id_for_history = offering_filter[0]
+            # Determine project_id: use current or extract from offering_filter
+            project_id_for_history = self._current_project_id
+            if not project_id_for_history and offering_filter and len(offering_filter) == 1:
+                # Single project filter - use it for history lookup
+                project_id_for_history = offering_filter[0]
 
-            if notebook_id_for_history:
+            if project_id_for_history:
                 # Get history from session memory service
                 preserved_history = self._session_memory.get_history(
                     user_id=self._current_user_id,
-                    notebook_id=notebook_id_for_history
+                    project_id=project_id_for_history
                 )
                 if preserved_history:
-                    logger.info(f"✓ Restored {len(preserved_history)} messages from session memory for notebook {notebook_id_for_history}")
+                    logger.info(f"✓ Restored {len(preserved_history)} messages from session memory for project {project_id_for_history}")
                 else:
-                    logger.debug(f"No history in session memory for notebook {notebook_id_for_history}")
+                    logger.debug(f"No history in session memory for project {project_id_for_history}")
             else:
                 # Fallback: try to extract from existing engine memory buffer
                 if self._query_engine is not None and hasattr(self._query_engine, 'memory'):
@@ -686,20 +577,20 @@ class LocalRAGPipeline:
             # Load nodes using cached SQL filtering (O(log n) vs O(n))
             # Uses caching to avoid repeated DB queries (100-300ms saved on cache hit)
             if offering_filter:
-                # offering_filter can contain notebook_ids, offering_names, or offering_ids
-                # Try cached SQL-based loading for notebook_ids (most common case)
+                # offering_filter can contain project_ids, offering_names, or offering_ids
+                # Try cached SQL-based loading for project_ids (most common case)
                 nodes = []
                 for filter_id in offering_filter:
-                    # Try to load as notebook_id first (UUID format) with caching
-                    notebook_nodes = self._get_cached_nodes(filter_id)
-                    if notebook_nodes:
-                        nodes.extend(notebook_nodes)
-                        logger.debug(f"Got {len(notebook_nodes)} cached nodes for notebook {filter_id}")
+                    # Try to load as project_id first (UUID format) with caching
+                    project_nodes = self._get_cached_nodes(filter_id)
+                    if project_nodes:
+                        nodes.extend(project_nodes)
+                        logger.debug(f"Got {len(project_nodes)} cached nodes for project {filter_id}")
 
-                # If no nodes found via notebook_id, fall back to offering filter
+                # If no nodes found via project_id, fall back to offering filter
                 # This handles legacy offering_name/offering_id filters
                 if not nodes:
-                    logger.info("No notebook nodes found, falling back to offering filter")
+                    logger.info("No project nodes found, falling back to offering filter")
                     all_nodes = self._vector_store.load_all_nodes()
                     for node in all_nodes:
                         metadata = node.metadata or {}
@@ -721,12 +612,12 @@ class LocalRAGPipeline:
             # Create new engine WITH preserved chat history
             logger.info(f"Creating new engine with {len(preserved_history)} preserved messages")
 
-            # Determine notebook_id for RAPTOR-aware retrieval
-            # Use current_notebook_id if set, otherwise extract from offering_filter
-            notebook_id = self._current_notebook_id
-            if not notebook_id and offering_filter and len(offering_filter) == 1:
-                # Single notebook filter - use it as notebook_id for RAPTOR
-                notebook_id = offering_filter[0]
+            # Determine project_id for RAPTOR-aware retrieval
+            # Use current_project_id if set, otherwise extract from offering_filter
+            project_id = self._current_project_id
+            if not project_id and offering_filter and len(offering_filter) == 1:
+                # Single project filter - use it as project_id for RAPTOR
+                project_id = offering_filter[0]
 
             self._query_engine = self._engine.set_engine(
                 llm=self._default_model,
@@ -735,7 +626,7 @@ class LocalRAGPipeline:
                 offering_filter=offering_filter,
                 vector_store=self._vector_store,
                 chat_history=preserved_history,
-                notebook_id=notebook_id,
+                project_id=project_id,
             )
 
             # Verify the new engine has the history (optional - session memory handles persistence)
@@ -816,7 +707,7 @@ class LocalRAGPipeline:
 
     def save_message(
         self,
-        notebook_id: str,
+        project_id: str,
         user_id: str,
         role: str,
         content: str
@@ -825,7 +716,7 @@ class LocalRAGPipeline:
         Save a single conversation message to the database.
 
         Args:
-            notebook_id: UUID of the notebook
+            project_id: UUID of the project
             user_id: UUID of the user
             role: Message role ('user' or 'assistant')
             content: Message content text
@@ -842,12 +733,12 @@ class LocalRAGPipeline:
 
         try:
             conversation_id = self._conversation_store.save_message(
-                notebook_id=notebook_id,
+                project_id=project_id,
                 user_id=user_id,
                 role=role,
                 content=content
             )
-            logger.debug(f"Saved {role} message to notebook {notebook_id}")
+            logger.debug(f"Saved {role} message to project {project_id}")
             return conversation_id
         except Exception as e:
             logger.error(f"Failed to save message: {e}")
@@ -855,7 +746,7 @@ class LocalRAGPipeline:
 
     def save_conversation_exchange(
         self,
-        notebook_id: str,
+        project_id: str,
         user_id: str,
         user_message: str,
         assistant_message: str
@@ -868,7 +759,7 @@ class LocalRAGPipeline:
         response has been fully received.
 
         Args:
-            notebook_id: UUID of the notebook
+            project_id: UUID of the project
             user_id: UUID of the user
             user_message: User's query text
             assistant_message: Assistant's response text
@@ -883,7 +774,7 @@ class LocalRAGPipeline:
         try:
             # Save user message
             user_id_saved = self.save_message(
-                notebook_id=notebook_id,
+                project_id=project_id,
                 user_id=user_id,
                 role="user",
                 content=user_message
@@ -891,7 +782,7 @@ class LocalRAGPipeline:
 
             # Save assistant message
             assistant_id_saved = self.save_message(
-                notebook_id=notebook_id,
+                project_id=project_id,
                 user_id=user_id,
                 role="assistant",
                 content=assistant_message
@@ -899,7 +790,7 @@ class LocalRAGPipeline:
 
             success = user_id_saved is not None and assistant_id_saved is not None
             if success:
-                logger.info(f"Saved conversation exchange to notebook {notebook_id}")
+                logger.info(f"Saved conversation exchange to project {project_id}")
             return success
 
         except Exception as e:
@@ -974,7 +865,7 @@ class LocalRAGPipeline:
                 prompt_tokens = token_counter.count_tokens(message)
 
                 self._query_logger.log_query(
-                    notebook_id=self._current_notebook_id,  # Use current notebook or None
+                    project_id=self._current_project_id,  # Use current project or None
                     user_id=self._current_user_id,
                     query_text=message,
                     model_name=self._default_model.model,
@@ -993,7 +884,7 @@ class LocalRAGPipeline:
         self,
         user_message: str,
         assistant_message: str,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         user_id: Optional[str] = None
     ) -> None:
         """
@@ -1004,27 +895,27 @@ class LocalRAGPipeline:
         Args:
             user_message: The user's message
             assistant_message: The assistant's response
-            notebook_id: Notebook ID (defaults to current)
+            project_id: Project ID (defaults to current)
             user_id: User ID (defaults to current)
         """
-        nb_id = notebook_id or self._current_notebook_id
+        nb_id = project_id or self._current_project_id
         u_id = user_id or self._current_user_id
 
         if nb_id:
             self._session_memory.add_exchange(
                 user_id=u_id,
-                notebook_id=nb_id,
+                project_id=nb_id,
                 user_message=user_message,
                 assistant_message=assistant_message
             )
             msg_count = self._session_memory.get_message_count(u_id, nb_id)
-            logger.info(f"✓ Stored exchange in session memory for notebook {nb_id} (total: {msg_count} messages)")
+            logger.info(f"✓ Stored exchange in session memory for project {nb_id} (total: {msg_count} messages)")
         else:
-            logger.warning("No notebook context - skipping session memory storage")
+            logger.warning("No project context - skipping session memory storage")
 
     def get_session_history(
         self,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         user_id: Optional[str] = None,
         limit: Optional[int] = None
     ) -> list:
@@ -1032,14 +923,14 @@ class LocalRAGPipeline:
         Get conversation history from session memory.
 
         Args:
-            notebook_id: Notebook ID (defaults to current)
+            project_id: Project ID (defaults to current)
             user_id: User ID (defaults to current)
             limit: Maximum messages to return
 
         Returns:
             List of ChatMessage objects
         """
-        nb_id = notebook_id or self._current_notebook_id
+        nb_id = project_id or self._current_project_id
         u_id = user_id or self._current_user_id
 
         if nb_id:
@@ -1048,20 +939,20 @@ class LocalRAGPipeline:
 
     def clear_session_history(
         self,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         user_id: Optional[str] = None
     ) -> bool:
         """
         Clear conversation history from session memory.
 
         Args:
-            notebook_id: Notebook ID (defaults to current)
+            project_id: Project ID (defaults to current)
             user_id: User ID (defaults to current)
 
         Returns:
             True if session was cleared
         """
-        nb_id = notebook_id or self._current_notebook_id
+        nb_id = project_id or self._current_project_id
         u_id = user_id or self._current_user_id
 
         if nb_id:
@@ -1075,7 +966,7 @@ class LocalRAGPipeline:
     def stateless_query(
         self,
         message: str,
-        notebook_id: str,
+        project_id: str,
         user_id: str,
         include_history: bool = True,
         max_history: int = 10,
@@ -1097,7 +988,7 @@ class LocalRAGPipeline:
 
         Args:
             message: User's query string
-            notebook_id: UUID of the notebook to query
+            project_id: UUID of the project to query
             user_id: UUID of the user
             include_history: Whether to include conversation history
             max_history: Maximum history turns to include
@@ -1110,7 +1001,7 @@ class LocalRAGPipeline:
         Example:
             result = pipeline.stateless_query(
                 message="What are the key findings?",
-                notebook_id="uuid",
+                project_id="uuid",
                 user_id="uuid",
             )
             print(result["response"])
@@ -1130,14 +1021,14 @@ class LocalRAGPipeline:
 
         # Step 1: Get cached nodes (thread-safe)
         t1 = time.time()
-        nodes = self._get_cached_nodes(notebook_id)
+        nodes = self._get_cached_nodes(project_id)
         timings["1_node_cache_ms"] = int((time.time() - t1) * 1000)
 
         if not nodes:
-            logger.warning(f"No nodes found for notebook {notebook_id}")
+            logger.warning(f"No nodes found for project {project_id}")
             return {
                 "success": False,
-                "response": "No documents found in this notebook.",
+                "response": "No documents found in this project.",
                 "sources": [],
                 "metadata": {"error": "No documents"}
             }
@@ -1148,7 +1039,7 @@ class LocalRAGPipeline:
         if include_history and self._conversation_store:
             conversation_history = load_conversation_history(
                 conversation_store=self._conversation_store,
-                notebook_id=notebook_id,
+                project_id=project_id,
                 user_id=user_id,
                 max_history=max_history,
             )
@@ -1161,7 +1052,7 @@ class LocalRAGPipeline:
             retrieval_results = fast_retrieve(
                 nodes=nodes,
                 query=message,
-                notebook_id=notebook_id,
+                project_id=project_id,
                 vector_store=self._vector_store,
                 retriever_factory=self._engine._retriever,
                 llm=Settings.llm,
@@ -1173,7 +1064,7 @@ class LocalRAGPipeline:
         t4 = time.time()
         raptor_summaries = get_raptor_summaries(
             query=message,
-            notebook_id=notebook_id,
+            project_id=project_id,
             vector_store=self._vector_store,
             embed_model=Settings.embed_model,
             top_k=5,
@@ -1213,7 +1104,7 @@ class LocalRAGPipeline:
         if self._conversation_store:
             save_conversation_turn(
                 conversation_store=self._conversation_store,
-                notebook_id=notebook_id,
+                project_id=project_id,
                 user_id=user_id,
                 user_message=message,
                 assistant_response=response_text,
@@ -1245,7 +1136,7 @@ class LocalRAGPipeline:
     def stateless_query_streaming(
         self,
         message: str,
-        notebook_id: str,
+        project_id: str,
         user_id: str,
         include_history: bool = True,
         max_history: int = 10,
@@ -1258,7 +1149,7 @@ class LocalRAGPipeline:
 
         Args:
             message: User's query string
-            notebook_id: UUID of the notebook to query
+            project_id: UUID of the project to query
             user_id: UUID of the user
             include_history: Whether to include conversation history
             max_history: Maximum history turns to include
@@ -1281,7 +1172,7 @@ class LocalRAGPipeline:
 
         try:
             # Step 1-5: Same as stateless_query
-            nodes = self._get_cached_nodes(notebook_id)
+            nodes = self._get_cached_nodes(project_id)
             if not nodes:
                 yield {"type": "error", "error": "No documents found"}
                 return
@@ -1290,7 +1181,7 @@ class LocalRAGPipeline:
             if include_history and self._conversation_store:
                 conversation_history = load_conversation_history(
                     conversation_store=self._conversation_store,
-                    notebook_id=notebook_id,
+                    project_id=project_id,
                     user_id=user_id,
                     max_history=max_history,
                 )
@@ -1300,7 +1191,7 @@ class LocalRAGPipeline:
                 retrieval_results = fast_retrieve(
                     nodes=nodes,
                     query=message,
-                    notebook_id=notebook_id,
+                    project_id=project_id,
                     vector_store=self._vector_store,
                     retriever_factory=self._engine._retriever,
                     llm=Settings.llm,
@@ -1309,7 +1200,7 @@ class LocalRAGPipeline:
 
             raptor_summaries = get_raptor_summaries(
                 query=message,
-                notebook_id=notebook_id,
+                project_id=project_id,
                 vector_store=self._vector_store,
                 embed_model=Settings.embed_model,
             )
@@ -1334,7 +1225,7 @@ class LocalRAGPipeline:
             if self._conversation_store:
                 save_conversation_turn(
                     conversation_store=self._conversation_store,
-                    notebook_id=notebook_id,
+                    project_id=project_id,
                     user_id=user_id,
                     user_message=message,
                     assistant_response=response_text,
@@ -1358,7 +1249,7 @@ class LocalRAGPipeline:
     ) -> StreamingAgentChatResponse:
         """
         Direct chat with LLM without any document retrieval.
-        Used when no notebook is selected (General Chat mode).
+        Used when no project is selected (General Chat mode).
 
         This bypasses the entire retrieval pipeline for faster responses
         when the user just wants to chat with the LLM directly.
@@ -1419,7 +1310,7 @@ class LocalRAGPipeline:
             prompt_tokens = token_counter.count_tokens(message)
 
             self._query_logger.log_query(
-                notebook_id=None,  # NULL for general chat (no notebook)
+                project_id=None,  # NULL for general chat (no project)
                 user_id=self._current_user_id,
                 query_text=message,
                 model_name=self._default_model.model,
@@ -1434,7 +1325,7 @@ class LocalRAGPipeline:
         self,
         message: str,
         selected_offerings: Optional[list[str]] = None,
-        selected_notebooks: Optional[list[str]] = None,
+        selected_projects: Optional[list[str]] = None,
         chatbot: list = None
     ) -> StreamingAgentChatResponse:
         """
@@ -1446,15 +1337,15 @@ class LocalRAGPipeline:
 
         HYBRID MODE SUPPORT:
         - Traditional: Use selected_offerings (backward compatible)
-        - Notebook: Use selected_notebooks (NotebookLM architecture)
+        - Project: Use selected_projects (ProjectLM architecture)
         - Conversation-aware: Follow-up detection via conversation history
 
         Workflow:
         1. Classify query (problem_solving vs pitch modes)
         2. If problem_solving + follow-up: use existing context
-        3. If problem_solving + new: analyze ALL offerings/notebooks and recommend bundle
-        4. If pitch: use selected offerings/notebooks
-        5. Generate response with context from offerings/notebooks
+        3. If problem_solving + new: analyze ALL offerings/projects and recommend bundle
+        4. If pitch: use selected offerings/projects
+        5. Generate response with context from offerings/projects
 
         Note: This method does NOT automatically save messages to the database.
         If conversation persistence is enabled (database_url provided), the UI
@@ -1463,7 +1354,7 @@ class LocalRAGPipeline:
         Args:
             message: User's query
             selected_offerings: Pre-selected offerings for pitch mode (backward compatibility)
-            selected_notebooks: Pre-selected notebooks for pitch mode (hybrid architecture)
+            selected_projects: Pre-selected projects for pitch mode (hybrid architecture)
             chatbot: Conversation history
 
         Returns:
@@ -1492,7 +1383,7 @@ class LocalRAGPipeline:
         classification = self._query_classifier.classify(
             query=message,
             selected_offerings=selected_offerings,
-            selected_notebooks=selected_notebooks,
+            selected_projects=selected_projects,
             conversation_history=chatbot
         )
 
@@ -1515,23 +1406,23 @@ class LocalRAGPipeline:
         if mode == "problem_solving":
             # Check if this is a follow-up query (from classifier)
             is_follow_up = classification.get("is_follow_up", False)
-            use_all_notebooks = classification.get("use_all_notebooks", False)
+            use_all_projects = classification.get("use_all_projects", False)
 
             if is_follow_up:
                 logger.info("Detected follow-up query - skipping analysis, using existing engine")
                 # Use existing engine and filter - no need to run analysis again
-                # For follow-ups, use notebooks if provided, otherwise offerings
-                offering_filter = selected_notebooks if selected_notebooks else selected_offerings
+                # For follow-ups, use projects if provided, otherwise offerings
+                offering_filter = selected_projects if selected_projects else selected_offerings
                 # ChatMemoryBuffer in CondensePlusContextChatEngine will handle conversation history automatically
                 response_prefix = ""
             else:
                 # Analyze problem and recommend offering bundle
-                logger.info(f"New problem - running offering analysis (use_all_notebooks={use_all_notebooks})")
+                logger.info(f"New problem - running offering analysis (use_all_projects={use_all_projects})")
 
-                # Determine analysis mode: notebook mode vs traditional mode
-                if self._notebook_manager and use_all_notebooks:
-                    # Notebook mode: analyze all notebooks using document nodes
-                    logger.info("Using notebook mode for offering analysis")
+                # Determine analysis mode: project mode vs traditional mode
+                if self._project_manager and use_all_projects:
+                    # Project mode: analyze all projects using document nodes
+                    logger.info("Using project mode for offering analysis")
                     analysis_result = self._offering_analyzer.analyze_problem(
                         problem_description=classification["problem_description"],
                         user_id="default_user",  # TODO: Get from user context
@@ -1636,14 +1527,14 @@ class LocalRAGPipeline:
                 response_prefix = f"## {offering_name} - Comprehensive Summary\n\n"
             else:
                 logger.warning("Offering summary requested but no offering mentioned")
-                # Hybrid mode: use notebooks if provided, otherwise offerings
-                offering_filter = selected_notebooks if selected_notebooks else selected_offerings
+                # Hybrid mode: use projects if provided, otherwise offerings
+                offering_filter = selected_projects if selected_projects else selected_offerings
                 response_prefix = ""
 
         else:  # pitch_specific or pitch_generic
-            # Hybrid mode: use notebooks if provided, otherwise offerings
-            logger.info(f"Pitch mode: using selected {'notebooks' if selected_notebooks else 'offerings'}")
-            offering_filter = selected_notebooks if selected_notebooks else selected_offerings
+            # Hybrid mode: use projects if provided, otherwise offerings
+            logger.info(f"Pitch mode: using selected {'projects' if selected_projects else 'offerings'}")
+            offering_filter = selected_projects if selected_projects else selected_offerings
             response_prefix = ""
 
         # Step 3: Set engine with offering filter
@@ -1670,7 +1561,7 @@ class LocalRAGPipeline:
         if self._query_logger:
             response_time_ms = int((time.time() - start_time) * 1000)
             self._query_logger.log_query(
-                notebook_id=self._current_notebook_id,  # Use current notebook or None
+                project_id=self._current_project_id,  # Use current project or None
                 user_id=self._current_user_id,
                 query_text=message,
                 model_name=self._default_model.model,
@@ -1820,21 +1711,16 @@ Refined Implementation Plan:"""
         return output
 
     @property
-    def transformation_worker(self) -> Optional[TransformationWorker]:
-        """Get the TransformationWorker instance for API integration."""
-        return self._transformation_worker
-
-    @property
     def raptor_worker(self) -> Optional[RAPTORWorker]:
         """Get the RAPTORWorker instance for API integration."""
         return self._raptor_worker
 
-    def queue_raptor_build(self, source_id: str, notebook_id: str, file_name: str) -> bool:
+    def queue_raptor_build(self, source_id: str, project_id: str, file_name: str) -> bool:
         """Queue a RAPTOR tree build for a source.
 
         Args:
             source_id: Source ID to build tree for
-            notebook_id: Notebook containing the source
+            project_id: Project containing the source
             file_name: File name for logging
 
         Returns:
@@ -1846,7 +1732,7 @@ Refined Implementation Plan:"""
 
         job = RAPTORJob(
             source_id=source_id,
-            notebook_id=notebook_id,
+            project_id=project_id,
             file_name=file_name
         )
         self._raptor_worker.queue_job(job)
@@ -1859,14 +1745,6 @@ Refined Implementation Plan:"""
         Stops background workers and releases resources.
         """
         logger.info("Shutting down RAG pipeline...")
-
-        # Stop transformation worker
-        if self._transformation_worker:
-            try:
-                self._transformation_worker.stop()
-                logger.info("TransformationWorker stopped")
-            except Exception as e:
-                logger.error(f"Error stopping TransformationWorker: {e}")
 
         # Stop RAPTOR worker
         if self._raptor_worker:

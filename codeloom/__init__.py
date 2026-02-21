@@ -46,8 +46,16 @@ try:
 except (ImportError, AttributeError):
     pass
 
-from .pipeline import LocalRAGPipeline
-from .ollama import run_ollama_server
+# Lazy imports to avoid triggering full dependency chain
+# (e.g., Alembic only needs models, not the entire pipeline)
+def __getattr__(name):
+    if name == "LocalRAGPipeline":
+        from .pipeline import LocalRAGPipeline
+        return LocalRAGPipeline
+    elif name == "run_ollama_server":
+        from .ollama import run_ollama_server
+        return run_ollama_server
+    raise AttributeError(f"module 'codeloom' has no attribute {name}")
 
 __all__ = [
     "LocalRAGPipeline",

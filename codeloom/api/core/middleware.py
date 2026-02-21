@@ -6,7 +6,7 @@ Provides:
 - CORS handling
 
 Usage:
-    from dbnotebook.api.core.middleware import register_error_handlers
+    from codeloom.api.core.middleware import register_error_handlers
 
     app = Flask(__name__)
     register_error_handlers(app)
@@ -16,7 +16,7 @@ import logging
 import traceback
 from flask import Flask, jsonify, request
 
-from .exceptions import DBNotebookError
+from .exceptions import CodeLoomError
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +31,11 @@ def register_error_handlers(app: Flask) -> None:
         app: Flask application instance
     """
 
-    @app.errorhandler(DBNotebookError)
-    def handle_app_error(error: DBNotebookError):
+    @app.errorhandler(CodeLoomError)
+    def handle_app_error(error: CodeLoomError):
         """Handle domain-specific application errors.
 
-        Converts DBNotebookError subclasses to JSON responses with
+        Converts CodeLoomError subclasses to JSON responses with
         appropriate status codes.
         """
         # Log based on severity

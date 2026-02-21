@@ -15,12 +15,10 @@ from .rbac import (
     AccessLevel,
     Permission,
     require_permission,
-    require_notebook_access,
-    require_sql_connection_access,
+    require_project_access,
     get_rbac_service,
-    check_notebook_access,
-    check_multi_notebook_access,
-    check_sql_connection_access,
+    check_project_access,
+    check_multi_project_access,
 )
 
 __all__ = [
@@ -31,10 +29,8 @@ __all__ = [
     "AccessLevel",
     "Permission",
     "require_permission",
-    "require_notebook_access",
-    "require_sql_connection_access",
+    "require_project_access",
     "get_rbac_service",
-    "check_notebook_access",
-    "check_multi_notebook_access",
-    "check_sql_connection_access",
+    "check_project_access",
+    "check_multi_project_access",
 ]

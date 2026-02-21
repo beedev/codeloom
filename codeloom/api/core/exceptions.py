@@ -4,15 +4,15 @@ These exceptions can be caught by the global error handler middleware
 and converted to appropriate HTTP responses.
 
 Usage:
-    from dbnotebook.api.core.exceptions import ValidationError, NotFoundError
+    from codeloom.api.core.exceptions import ValidationError, NotFoundError
 
-    def get_notebook(notebook_id):
-        notebook = db.query(Notebook).get(notebook_id)
-        if not notebook:
-            raise NotFoundError("Notebook", notebook_id)
-        return notebook
+    def get_project(project_id):
+        project = db.query(Project).get(project_id)
+        if not project:
+            raise NotFoundError("Project", project_id)
+        return project
 
-    def create_notebook(data):
+    def create_project(data):
         if not data.get("name"):
             raise ValidationError("Name is required")
 """
@@ -20,8 +20,8 @@ Usage:
 from typing import Any, Dict, List, Optional, Union
 
 
-class DBNotebookError(Exception):
-    """Base exception for all DBNotebook application errors.
+class CodeLoomError(Exception):
+    """Base exception for all CodeLoom application errors.
 
     Attributes:
         message: Human-readable error message
@@ -52,7 +52,7 @@ class DBNotebookError(Exception):
         return result
 
 
-class ValidationError(DBNotebookError):
+class ValidationError(CodeLoomError):
     """Raised when request validation fails.
 
     HTTP Status: 400 Bad Request
@@ -76,7 +76,7 @@ class ValidationError(DBNotebookError):
         super().__init__(message, details)
 
 
-class AuthenticationError(DBNotebookError):
+class AuthenticationError(CodeLoomError):
     """Raised when authentication fails.
 
     HTTP Status: 401 Unauthorized
@@ -91,7 +91,7 @@ class AuthenticationError(DBNotebookError):
     default_message = "Authentication required"
 
 
-class AuthorizationError(DBNotebookError):
+class AuthorizationError(CodeLoomError):
     """Raised when user lacks permission for an action.
 
     HTTP Status: 403 Forbidden
@@ -99,21 +99,21 @@ class AuthorizationError(DBNotebookError):
     Examples:
         raise AuthorizationError()
         raise AuthorizationError("Admin access required")
-        raise AuthorizationError("You don't have access to this notebook")
+        raise AuthorizationError("You don't have access to this project")
     """
 
     status_code = 403
     default_message = "Access denied"
 
 
-class NotFoundError(DBNotebookError):
+class NotFoundError(CodeLoomError):
     """Raised when a requested resource doesn't exist.
 
     HTTP Status: 404 Not Found
 
     Examples:
-        raise NotFoundError("Notebook")
-        raise NotFoundError("Notebook", "abc-123")
+        raise NotFoundError("Project")
+        raise NotFoundError("Project", "abc-123")
         raise NotFoundError("User with email user@example.com")
     """
 
@@ -133,13 +133,13 @@ class NotFoundError(DBNotebookError):
         super().__init__(message, details)
 
 
-class ConflictError(DBNotebookError):
+class ConflictError(CodeLoomError):
     """Raised when there's a conflict with existing data.
 
     HTTP Status: 409 Conflict
 
     Examples:
-        raise ConflictError("Notebook with this name already exists")
+        raise ConflictError("Project with this name already exists")
         raise ConflictError("Username is already taken")
     """
 
@@ -147,7 +147,7 @@ class ConflictError(DBNotebookError):
     default_message = "Resource conflict"
 
 
-class RateLimitError(DBNotebookError):
+class RateLimitError(CodeLoomError):
     """Raised when rate limit is exceeded.
 
     HTTP Status: 429 Too Many Requests
@@ -170,7 +170,7 @@ class RateLimitError(DBNotebookError):
         self.retry_after = retry_after
 
 
-class ServiceUnavailableError(DBNotebookError):
+class ServiceUnavailableError(CodeLoomError):
     """Raised when a required service is unavailable.
 
     HTTP Status: 503 Service Unavailable
@@ -184,7 +184,7 @@ class ServiceUnavailableError(DBNotebookError):
     default_message = "Service temporarily unavailable"
 
 
-class ExternalServiceError(DBNotebookError):
+class ExternalServiceError(CodeLoomError):
     """Raised when an external service call fails.
 
     HTTP Status: 502 Bad Gateway
@@ -198,7 +198,7 @@ class ExternalServiceError(DBNotebookError):
     default_message = "External service error"
 
 
-class ConfigurationError(DBNotebookError):
+class ConfigurationError(CodeLoomError):
     """Raised when there's a configuration issue.
 
     HTTP Status: 500 Internal Server Error

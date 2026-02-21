@@ -86,7 +86,7 @@ class IDocumentRoutingService(ABC):
     def route_query(
         self,
         query: str,
-        notebook_id: str,
+        project_id: str,
         user_id: Optional[str] = None
     ) -> RoutingResult:
         """Analyze query and determine routing strategy.
@@ -97,35 +97,35 @@ class IDocumentRoutingService(ABC):
 
         Args:
             query: User query text
-            notebook_id: Notebook UUID to route within
+            project_id: Project UUID to route within
             user_id: Optional user UUID for access control
 
         Returns:
             RoutingResult with strategy, selected documents, and optional direct response
 
         Raises:
-            ValueError: If notebook_id is invalid
+            ValueError: If project_id is invalid
             RuntimeError: If LLM call fails
         """
         pass
 
     @abstractmethod
-    def get_notebook_summaries(
+    def get_project_summaries(
         self,
-        notebook_id: str,
+        project_id: str,
         active_only: bool = True
     ) -> List[DocumentSummary]:
-        """Retrieve all document summaries for a notebook.
+        """Retrieve all document summaries for a project.
 
         Args:
-            notebook_id: Notebook UUID
+            project_id: Project UUID
             active_only: If True, only return active documents (default)
 
         Returns:
             List of DocumentSummary objects with summary and insights
 
         Raises:
-            ValueError: If notebook_id is invalid
+            ValueError: If project_id is invalid
         """
         pass
 
@@ -171,7 +171,7 @@ class IRoutingPrompts(ABC):
         Args:
             query: User query text
             summaries_text: Formatted document summaries
-            document_count: Number of documents in notebook
+            document_count: Number of documents in project
 
         Returns:
             Complete prompt for LLM routing decision

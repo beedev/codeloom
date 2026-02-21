@@ -26,14 +26,14 @@ class IVectorStore(ABC):
     def add_nodes(
         self,
         nodes: List[BaseNode],
-        notebook_id: Optional[str] = None
+        project_id: Optional[str] = None
     ) -> int:
         """
         Store nodes with embeddings.
 
         Args:
             nodes: List of nodes to store
-            notebook_id: Optional notebook ID to associate with all nodes
+            project_id: Optional project ID to associate with all nodes
 
         Returns:
             Number of nodes successfully added (after deduplication)

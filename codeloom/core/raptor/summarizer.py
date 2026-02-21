@@ -36,7 +36,7 @@ class SummaryNode:
     cluster_id: str
     token_count: int
     source_id: str
-    notebook_id: str
+    project_id: str
 
     def to_text_node(self) -> TextNode:
         """Convert to LlamaIndex TextNode with tree metadata."""
@@ -49,7 +49,7 @@ class SummaryNode:
                 "child_node_ids": self.child_node_ids,
                 "cluster_id": self.cluster_id,
                 "source_id": self.source_id,
-                "notebook_id": self.notebook_id,
+                "project_id": self.project_id,
             }
         )
 
@@ -82,7 +82,7 @@ class RAPTORSummarizer:
         cluster: Cluster,
         tree_level: int,
         source_id: str,
-        notebook_id: str
+        project_id: str
     ) -> SummaryNode:
         """
         Create a summary node for a cluster.
@@ -91,7 +91,7 @@ class RAPTORSummarizer:
             cluster: Cluster of nodes to summarize
             tree_level: Tree level for the summary (1+)
             source_id: Source document ID
-            notebook_id: Notebook ID
+            project_id: Project ID
 
         Returns:
             SummaryNode containing the generated summary
@@ -121,7 +121,7 @@ class RAPTORSummarizer:
             cluster_id=cluster.cluster_id,
             token_count=int(token_count),
             source_id=source_id,
-            notebook_id=notebook_id
+            project_id=project_id
         )
 
     def summarize_cluster_sync(
@@ -129,7 +129,7 @@ class RAPTORSummarizer:
         cluster: Cluster,
         tree_level: int,
         source_id: str,
-        notebook_id: str
+        project_id: str
     ) -> SummaryNode:
         """
         Synchronous version of summarize_cluster.
@@ -138,7 +138,7 @@ class RAPTORSummarizer:
             cluster: Cluster of nodes to summarize
             tree_level: Tree level for the summary (1+)
             source_id: Source document ID
-            notebook_id: Notebook ID
+            project_id: Project ID
 
         Returns:
             SummaryNode containing the generated summary
@@ -168,7 +168,7 @@ class RAPTORSummarizer:
             cluster_id=cluster.cluster_id,
             token_count=int(token_count),
             source_id=source_id,
-            notebook_id=notebook_id
+            project_id=project_id
         )
 
     async def summarize_summaries(
@@ -176,7 +176,7 @@ class RAPTORSummarizer:
         summary_nodes: List[SummaryNode],
         tree_level: int,
         source_id: str,
-        notebook_id: str
+        project_id: str
     ) -> SummaryNode:
         """
         Create a higher-level summary from multiple summary nodes.
@@ -187,7 +187,7 @@ class RAPTORSummarizer:
             summary_nodes: List of summary nodes to combine
             tree_level: Tree level for the new summary
             source_id: Source document ID
-            notebook_id: Notebook ID
+            project_id: Project ID
 
         Returns:
             SummaryNode containing the combined summary
@@ -217,7 +217,7 @@ class RAPTORSummarizer:
             cluster_id=f"root_{source_id}",
             token_count=int(token_count),
             source_id=source_id,
-            notebook_id=notebook_id
+            project_id=project_id
         )
 
     def summarize_summaries_sync(
@@ -225,7 +225,7 @@ class RAPTORSummarizer:
         summary_nodes: List[SummaryNode],
         tree_level: int,
         source_id: str,
-        notebook_id: str
+        project_id: str
     ) -> SummaryNode:
         """
         Synchronous version of summarize_summaries.
@@ -234,7 +234,7 @@ class RAPTORSummarizer:
             summary_nodes: List of summary nodes to combine
             tree_level: Tree level for the new summary
             source_id: Source document ID
-            notebook_id: Notebook ID
+            project_id: Project ID
 
         Returns:
             SummaryNode containing the combined summary
@@ -264,7 +264,7 @@ class RAPTORSummarizer:
             cluster_id=f"root_{source_id}",
             token_count=int(token_count),
             source_id=source_id,
-            notebook_id=notebook_id
+            project_id=project_id
         )
 
     def _prepare_chunks_text(self, cluster: Cluster) -> str:

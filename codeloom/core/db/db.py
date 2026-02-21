@@ -1,5 +1,5 @@
 """
-Database Manager for Notebook Architecture
+Database Manager for CodeLoom
 
 Provides connection pooling, session management, and database health checks
 for PostgreSQL database using SQLAlchemy.
@@ -183,7 +183,7 @@ class DatabaseManager:
 def get_database_manager(
     host: str = "localhost",
     port: int = 5432,
-    database: str = "dbnotebook_dev",
+    database: str = "codeloom_dev",
     user: str = "postgres",
     password: str = "root",
     **kwargs

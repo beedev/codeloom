@@ -1,6 +1,6 @@
 """RAPTOR - Recursive Abstractive Processing for Tree-Organized Retrieval.
 
-This module implements RAPTOR for DBNotebook, enabling hierarchical document
+This module implements RAPTOR for CodeLoom, enabling hierarchical document
 summarization and multi-level retrieval.
 
 Key Components:
@@ -12,7 +12,7 @@ Key Components:
 - retriever: Level-aware retrieval for RAPTOR trees
 
 Usage:
-    from dbnotebook.core.raptor import RAPTORConfig, TreeBuilder, RAPTORRetriever
+    from codeloom.core.raptor import RAPTORConfig, TreeBuilder, RAPTORRetriever
 
     # Build tree for a document
     config = RAPTORConfig.default()

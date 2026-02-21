@@ -41,5 +41,20 @@ logs/
 # Uploads
 uploads/
 
+# Tools (build artifacts and downloaded binaries)
+tools/plantuml/plantuml.jar
+tools/javaparser-cli/target/
+tools/javaparser-cli/dependency-reduced-pom.xml
+tools/roslyn-analyzer/bin/
+tools/roslyn-analyzer/obj/
+
 # Claude
 .claude/
+
+# Development artifacts
+.playwright-mcp/
+outputs/
+context/
+frontend/context/
+screen_*.png
+activity-diagram-fixed.png

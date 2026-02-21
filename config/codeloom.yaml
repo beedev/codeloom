@@ -1,5 +1,5 @@
 # =============================================================================
-# DBNOTEBOOK UNIFIED CONFIGURATION
+# CODELOOM UNIFIED CONFIGURATION
 # Single source of truth for all settings
 # Merges: ingestion.yaml, sql_chat.yaml, raptor.yaml
 # =============================================================================
@@ -359,3 +359,63 @@ sql_chat:
   session:
     max_history: 10
     idle_timeout_minutes: 30
+
+# -----------------------------------------------------------------------------
+# MIGRATION — Deep Analysis & LLM Overrides
+# Controls the Deep Understanding Engine and per-phase LLM routing
+# -----------------------------------------------------------------------------
+migration:
+  # Deep Analysis settings
+  deep_analysis:
+    # Token budget thresholds for analysis tiers
+    tier_1_max_tokens: 100000       # Full source if <= this
+    tier_2_max_tokens: 200000       # Depth-prioritized truncation if <= this
+    # Above tier_2_max -> Tier 3 (summarization fallback)
+
+    # Call tree tracing
+    max_trace_depth: 10             # Maximum call tree depth
+    max_entry_points: 200           # Safety limit on entry points per project
+
+    # Analysis quality
+    require_evidence_refs: true     # Reject analysis without evidence refs
+    min_narrative_length: 100       # Minimum chars for narrative
+
+    # Worker settings
+    worker:
+      enabled: true                 # Enable background worker
+      poll_interval: 15.0           # Seconds between job polls
+      max_concurrent: 2             # Simultaneous jobs (Semaphore size)
+      heartbeat_interval: 30.0      # Seconds between heartbeats
+      stale_threshold: 120.0        # Seconds before reclaiming stale jobs
+      max_retries: 2                # Max retry attempts before terminal failure
+      retry_backoff_base_seconds: 15 # Backoff base; attempt N waits base*2^(N-1)
+
+    # Coverage thresholds
+    coverage:
+      warn_below: 50.0             # Warn in UI if coverage < 50%
+      target: 80.0                  # Target coverage percentage
+
+    # Entry point detection
+    detection:
+      enable_pass1_heuristic: true  # Zero-incoming-calls detection
+      enable_pass2_annotations: true # Annotation pattern matching
+      skip_test_functions: true     # Exclude test_* functions from Pass 1
+
+  # LLM overrides for different migration phases
+  # When set, these override Settings.llm for the specified context
+  llm_overrides:
+    # LLM for understanding/analysis tasks (deep analysis, chain analysis)
+    understanding_llm: null
+    # Example:
+    # understanding_llm:
+    #   provider: openai
+    #   model: gpt-4o
+    #   temperature: 0.1
+
+    # LLM for code generation tasks (transform, test generation)
+    generation_llm: null
+    # Example:
+    # generation_llm:
+    #   provider: anthropic
+    #   model: claude-sonnet-4-5-20250929
+    #   temperature: 0.2

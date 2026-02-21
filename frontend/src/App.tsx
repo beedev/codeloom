@@ -1,256 +1,123 @@
-import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { MainLayout } from './components/Layout';
-import { Header } from './components/Header';
-import { Sidebar } from './components/Sidebar';
-import { ChatArea } from './components/Chat';
-import { ToastContainer } from './components/ui';
-import { ProtectedRoute } from './components/ProtectedRoute';
-import { AppProviders, useNotebook, useDocument, SQLChatProvider, useApp } from './contexts';
-import { useNotebooks } from './hooks/useNotebooks';
-import { useModels } from './hooks/useModels';
-import { useToast } from './hooks/useToast';
-import { AnalyticsPage, QueryPage, QuizTakePage, QuizCreatePage, QuizResultsPage, QuizPage, DocumentsManagementPage, DocumentsLandingPage } from './pages';
-import { Login } from './pages/Login';
-import { Admin } from './pages/Admin';
-import { Profile } from './pages/Profile';
-import { SQLChatPage } from './components/SQLChat';
+/**
+ * App.tsx -- Root component and router for CodeLoom.
+ *
+ * Routes:
+ *   /login            -> Login page (public)
+ *   /                 -> Dashboard (protected)
+ *   /project/:id      -> Project view (protected)
+ *   /project/:id/chat -> Code chat (protected)
+ */
 
-function AppContent() {
-  // Use App context for navigation and model state
-  const { currentView, setModelsState } = useApp();
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import type { ReactNode } from 'react';
+import { AuthProvider, useAuth } from './contexts/AuthContext.tsx';
+import { Login } from './pages/Login.tsx';
+import { Dashboard } from './pages/Dashboard.tsx';
+import { ProjectView } from './pages/ProjectView.tsx';
+import { CodeChatPage } from './pages/CodeChatPage.tsx';
+import { MigrationWizard } from './pages/MigrationWizard.tsx';
+import { MigrationPlans } from './pages/MigrationPlans.tsx';
+import { Settings } from './pages/Settings.tsx';
 
-  // Use hooks for API logic
-  const {
-    notebooks,
-    selectedNotebook,
-    documents,
-    isLoadingDocs,
-    error: notebooksError,
-    selectNotebook,
-    updateNotebook,
-    deleteNotebook,
-    uploadDocument,
-  } = useNotebooks();
+// ---------------------------------------------------------------------------
+// ProtectedRoute -- redirects to /login if not authenticated
+// ---------------------------------------------------------------------------
 
-  const {
-    models,
-    selectedModel,
-    selectedProvider,
-    isLoading: isLoadingModels,
-    error: modelsError,
-    selectModel,
-  } = useModels();
+function ProtectedRoute({ children }: { children: ReactNode }) {
+  const { isAuthenticated, isLoading } = useAuth();
+  const location = useLocation();
 
-  // Sync models state with AppContext for the Header
-  useEffect(() => {
-    setModelsState({
-      models,
-      selectedModel,
-      selectedProvider,
-      isLoadingModels,
-      selectModel,
-    });
-  }, [models, selectedModel, selectedProvider, isLoadingModels, selectModel, setModelsState]);
-
-  const { toasts, removeToast, success, error: showError } = useToast();
-
-  // Get context setters to sync hook state with contexts
-  const notebookContext = useNotebook();
-  const documentContext = useDocument();
-
-  // Sync notebooks hook state with context
-  useEffect(() => {
-    notebookContext.setNotebooks(notebooks);
-  }, [notebooks, notebookContext]);
-
-  useEffect(() => {
-    notebookContext.selectNotebook(selectedNotebook);
-  }, [selectedNotebook, notebookContext]);
-
-  // Sync documents hook state with context
-  useEffect(() => {
-    documentContext.setDocuments(documents);
-  }, [documents, documentContext]);
-
-  useEffect(() => {
-    documentContext.setLoading(isLoadingDocs);
-  }, [isLoadingDocs, documentContext]);
-
-  // Show errors from hooks as toasts
-  useEffect(() => {
-    if (notebooksError) {
-      console.error('Notebooks API error:', notebooksError);
-      showError(`Notebooks: ${notebooksError}`);
-    }
-  }, [notebooksError, showError]);
-
-  useEffect(() => {
-    if (modelsError) {
-      console.error('Models API error:', modelsError);
-      showError(`Models: ${modelsError}`);
-    }
-  }, [modelsError, showError]);
-
-  // Handle file upload with toast notifications
-  const handleFileUpload = async (file: File): Promise<boolean> => {
-    const result = await uploadDocument(file);
-    if (result) {
-      success(`Uploaded: ${file.name}`);
-    } else {
-      showError(`Failed to upload: ${file.name}`);
-    }
-    return result;
-  };
-
-
-  // Handle copy to clipboard
-  const handleCopy = (content: string) => {
-    navigator.clipboard.writeText(content);
-    success('Copied to clipboard');
-  };
-
-  // Render Analytics page
-  if (currentView === 'analytics') {
+  if (isLoading) {
     return (
-      <MainLayout header={<Header />}>
-        <AnalyticsPage notebookId={selectedNotebook?.id} />
-        <ToastContainer toasts={toasts} onDismiss={removeToast} />
-      </MainLayout>
+      <div className="flex h-screen items-center justify-center bg-void">
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-void-surface border-t-glow" />
+      </div>
     );
   }
 
-  // Render SQL Chat page
-  if (currentView === 'sql-chat') {
-    return (
-      <MainLayout header={<Header />}>
-        <SQLChatPage />
-        <ToastContainer toasts={toasts} onDismiss={removeToast} />
-      </MainLayout>
-    );
+  if (!isAuthenticated) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Render Query API page
-  if (currentView === 'query-api') {
-    return (
-      <MainLayout header={<Header />}>
-        <QueryPage />
-        <ToastContainer toasts={toasts} onDismiss={removeToast} />
-      </MainLayout>
-    );
-  }
-
-  // Render main Chat view
-  return (
-    <MainLayout
-      header={<Header />}
-      sidebar={
-        <Sidebar
-          // Notebook operations
-          onSelectNotebook={selectNotebook}
-          onDeleteNotebook={deleteNotebook}
-          onUpdateNotebook={updateNotebook}
-        />
-      }
-    >
-      <ChatArea
-        notebookId={selectedNotebook?.id}
-        notebookName={selectedNotebook?.name}
-        selectedModel={selectedModel}
-        onCopy={handleCopy}
-        onFileUpload={handleFileUpload}
-      />
-
-      {/* Toast notifications */}
-      <ToastContainer toasts={toasts} onDismiss={removeToast} />
-    </MainLayout>
-  );
+  return <>{children}</>;
 }
+
+// ---------------------------------------------------------------------------
+// AppRoutes
+// ---------------------------------------------------------------------------
 
 function AppRoutes() {
   return (
     <Routes>
-      {/* Public routes */}
+      {/* Public */}
       <Route path="/login" element={<Login />} />
-      <Route path="/quiz/:quizId" element={<QuizTakePage />} />
 
-      {/* Protected routes */}
+      {/* Protected */}
       <Route
         path="/"
         element={
           <ProtectedRoute>
-            <SQLChatProvider>
-              <AppContent />
-            </SQLChatProvider>
+            <Dashboard />
           </ProtectedRoute>
         }
       />
       <Route
-        path="/admin"
-        element={
-          <ProtectedRoute requireAdmin>
-            <Admin />
-          </ProtectedRoute>
-        }
-      />
-      <Route
-        path="/profile"
+        path="/project/:id"
         element={
           <ProtectedRoute>
-            <Profile />
+            <ProjectView />
           </ProtectedRoute>
         }
       />
       <Route
-        path="/documents"
+        path="/project/:id/chat"
         element={
           <ProtectedRoute>
-            <DocumentsLandingPage />
+            <CodeChatPage />
           </ProtectedRoute>
         }
       />
       <Route
-        path="/quizzes"
+        path="/migrations"
         element={
           <ProtectedRoute>
-            <QuizPage />
+            <MigrationPlans />
           </ProtectedRoute>
         }
       />
       <Route
-        path="/quizzes/create"
+        path="/settings"
         element={
           <ProtectedRoute>
-            <QuizCreatePage />
+            <Settings />
           </ProtectedRoute>
         }
       />
       <Route
-        path="/quizzes/:quizId/results"
+        path="/migration/:planId"
         element={
           <ProtectedRoute>
-            <QuizResultsPage />
+            <MigrationWizard />
           </ProtectedRoute>
         }
       />
-      <Route
-        path="/notebook/:notebookId/documents"
-        element={
-          <ProtectedRoute>
-            <DocumentsManagementPage />
-          </ProtectedRoute>
-        }
-      />
+
+      {/* Fallback */}
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
 
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
 function App() {
   return (
     <BrowserRouter>
-      <AppProviders>
+      <AuthProvider>
         <AppRoutes />
-      </AppProviders>
+      </AuthProvider>
     </BrowserRouter>
   );
 }

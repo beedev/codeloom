@@ -1,244 +1,187 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-**CodeLoom** - A code intelligence and migration platform powered by AST (Abstract Syntax Tree) + ASG (Abstract Semantic Graph) + RAG. Upload an entire codebase, understand it through AI-powered code intelligence, and migrate it to a new architecture or tech stack with confidence.
+**CodeLoom** is a code intelligence and migration platform powered by AST + ASG + RAG. Users upload entire codebases, query them via AI-powered chat, and migrate to new architectures through a 6-phase pipeline.
 
-**Core capabilities**:
-- **Code RAG** - Upload a codebase, ask questions, get code snippets with context
-- **Code Intelligence** - AST parsing + ASG relationship mapping for deep understanding
-- **Code Migration** - 6-phase pipeline from current state to target architecture
-
-**Supported languages**: Python, JavaScript/TypeScript, Java, C#/.NET (via tree-sitter)
-
-**Forked from**: DBNotebook (dbn-v2) - reuses LLM providers, embeddings, pgvector, hybrid retrieval, reranking, RAPTOR, auth, Flask API, and SSE streaming infrastructure.
-
-## Architecture Reference
-
-See `docs/architecture.md` for the complete system architecture, data model, API surface, and phased delivery plan.
+**Forked from**: DBNotebook (dbn-v2). Reuses LLM providers, embeddings, pgvector, hybrid retrieval, reranking, RAPTOR, auth, and SSE streaming. All Python imports renamed from `dbnotebook` to `codeloom`.
 
 ## Development Commands
 
-**LOCAL DEVELOPMENT**: Use `./dev.sh` with local PostgreSQL on port 5432.
-
 ```bash
 # First-time setup
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-brew services start postgresql@17        # macOS - start PostgreSQL
-createdb codeloom_dev                     # Create database if needed
+brew services start postgresql@17
+createdb codeloom_dev
 
-# Local development
-./dev.sh local                # Start Flask backend locally
-./dev.sh                      # Shows usage help
-./dev.sh status               # Check status of all services
-./dev.sh stop                 # Stop all services
+# Copy .env.example to .env, then:
+./dev.sh local          # Starts backend (:9005) + frontend (:3000)
+./dev.sh stop           # Stop all services
+./dev.sh status         # Check service status
+./dev.sh setup-tools    # Build optional Java/C# enrichment tools (requires JDK+Maven / .NET SDK)
 
-# Local PostgreSQL setup
-# - PostgreSQL running on localhost:5432
-# - Database: codeloom_dev
-# - User/Password: dbnotebook/dbnotebook (inherited from dbn-v2, update as needed)
-# - Default login: admin / admin123
-# - .env uses host.docker.internal but dev.sh replaces with localhost
+# Frontend (separate terminal)
+cd frontend && npm install && npm run dev    # :3000, proxies /api to :9005
+npm run build           # Production build
+npm run lint            # ESLint
 
-# Frontend development (React + Vite)
-cd frontend
-npm install
-npm run dev                   # Dev server on :3000 (proxies to Flask :7860)
-npm run build                 # Production build
-npm run lint                  # ESLint
-
-# Database migrations (Alembic)
+# Database
 alembic upgrade head
 alembic revision --autogenerate -m "description"
 
 # Tests
-pytest                        # All tests
-pytest -v -x                  # Verbose, stop on first failure
+pytest                  # All tests
+pytest -v -x            # Verbose, stop on first failure
+pytest codeloom/tests/  # Test directory
 ```
 
-## Quick Reference
-
-**Add new provider**: Create class in `core/providers/`, register in `core/plugins.py`
-**Add new route**: Create in `api/routes/`, register in `ui/web.py` via `create_*_routes()`
-**Modify DB schema**: Edit `core/db/models.py`, then `alembic revision --autogenerate`
-**Frontend component**: Add to `frontend/src/components/`, types in `frontend/src/types/`
+**Default login**: admin / admin123
 
 ## Architecture
 
-### Core Data Flow
+### Stack
+
+- **Backend**: FastAPI + uvicorn (NOT Flask — migrated from Flask)
+- **Frontend**: React 19, Vite 7, Tailwind CSS 4, TypeScript, react-router-dom
+- **Database**: PostgreSQL 17 + pgvector (SQLAlchemy 2.0 + Alembic)
+- **LLM Framework**: LlamaIndex Core 0.14.x
+- **AST Parsing**: tree-sitter (Python, JS/TS, Java, C#) + optional JavaParser/Roslyn bridges
+
+### Entry Point and Startup
+
+`python -m codeloom` (`codeloom/__main__.py`) orchestrates startup:
+1. Initializes `LocalRAGPipeline` (LLM, embeddings, vector store, RAPTOR worker)
+2. Creates `DatabaseManager`, `ProjectManager`, `CodeIngestionService`, `ConversationStore`
+3. Calls `create_app()` in `codeloom/api/app.py` to build the FastAPI application
+4. Injects all services onto `app.state` for dependency injection
+5. Runs uvicorn on port 9005
+
+### Request Flow
 
 ```
-React Frontend (:3000) → Flask API (:7860) → CodeLoom Pipeline
-                                                    |
-                    +-------------------------------+-------------------------------+
-                    |                               |                               |
-            Code Ingestion                    Code RAG Chat                  Migration Engine
-            (zip upload)                    (hybrid retrieval)              (6-phase pipeline)
-                    |                               |                               |
-            tree-sitter AST                 ASG-Expanded                    LLM Analysis +
-            ASG Builder                     Retrieval                       ASG-Informed
-            Code Chunker                    (BM25+Vector+Graph)            Code Transform
-            Embedding                       Reranking                       Test Generation
-                    |                               |                               |
-                    +-------------------------------+-------------------------------+
-                                                    |
-                                    PostgreSQL + pgvector
-                        (projects, code_files, code_units, code_edges,
-                         data_embeddings, migration_plans, migration_phases)
+React Frontend (:3000) --proxy /api--> FastAPI (:9005) --> Pipeline/Services
+                                          |
+                                     api/deps.py (FastAPI Depends())
+                                     extracts services from app.state
 ```
 
-### Key Components
+### Key Architectural Patterns
 
-**`codeloom/pipeline.py`** - Central orchestrator (inherited from DBNotebook):
-- Manages LLM/embedding providers, project context
-- Key methods: `switch_notebook()`, `store_nodes()`, `stream_chat()`
+**Dependency Injection**: Services are stored on `app.state` (pipeline, db_manager, project_manager, code_ingestion, conversation_store) and accessed via `api/deps.py` dependency functions with FastAPI's `Depends()`.
 
-**`codeloom/core/ast_parser/`** - NEW - AST parsing via tree-sitter:
-- Unified parser for Python, JS/TS, Java, C#
-- Extracts functions, classes, methods, imports, module structure
-- Output: list of code units with boundaries, signatures, docstrings
+**Pipeline Dual-Mode**: `LocalRAGPipeline` has two query patterns:
+- `stateless_query()` / `stateless_query_streaming()` — thread-safe, multi-user safe, used by API routes
+- `query()` / `switch_project()` — mutates global state, single-user session mode
 
-**`codeloom/core/asg_builder/`** - NEW - Abstract Semantic Graph:
-- Builds relationship graph from AST output
-- Edge types: calls, imports, inherits, implements, uses, contains
-- Storage: PostgreSQL `code_edges` table
-- Queries: "what calls X", "what depends on X", "blast radius of changing X"
+**Lazy Imports**: `codeloom/core/__init__.py` uses `__getattr__` with an `_IMPORT_MAP` to avoid pulling in heavy dependencies (torch, LlamaIndex, etc.) on simple imports.
 
-**`codeloom/core/code_chunker/`** - NEW - Code-aware chunking:
-- AST-informed: each chunk = one logical code unit (function, class, module block)
-- Preamble injection: file path + imports + class context prepended
-- ~1024 token chunks (larger than document chunks - code needs more context)
-- Fallback: blank-line splitting for unknown languages
+**Plugin Architecture**: LLM/embedding/retrieval providers registered via `core/plugins.py` + `core/registry.py`. Selected by env vars: `LLM_PROVIDER`, `EMBEDDING_PROVIDER`, `RETRIEVAL_STRATEGY`.
 
-**`codeloom/core/migration/`** - NEW - 6-phase migration engine:
-1. `approach.py` - Analyze source, compare with target brief, produce strategy
-2. `architecture.py` - Design migration architecture, module mapping
-3. `mvp.py` - Identify MVP scope using ASG dependency ordering
-4. `design.py` - Detailed design per module
-5. `transform.py` - Code transformation using AST
-6. `testing.py` - Test generation from ASG paths
+### Core Components
 
-### Reused from DBNotebook (codeloom/core/)
+| Component | Path | Purpose |
+|-----------|------|---------|
+| Pipeline | `codeloom/pipeline.py` | Central orchestrator — manages LLM, embeddings, retrieval, caching |
+| FastAPI App | `codeloom/api/app.py` | App factory, CORS, session middleware, route registration |
+| Dependencies | `codeloom/api/deps.py` | FastAPI Depends() injection (auth, services from app.state) |
+| API Routes | `codeloom/api/routes/` | `fastapi_auth`, `projects`, `code_chat`, `fastapi_settings` |
+| DB Models | `codeloom/core/db/models.py` | SQLAlchemy ORM (User, Project, CodeFile, CodeUnit, CodeEdge, MigrationPlan, etc.) |
+| AST Parser | `codeloom/core/ast_parser/` | tree-sitter parsing: `base.py` (Strategy pattern), language-specific parsers (Python, JS, TS, Java, C#), `enricher.py` (semantic metadata) |
+| Bridges | `codeloom/core/ast_parser/bridges/` | Optional subprocess bridges for deep Java (JavaParser) and C# (Roslyn) semantic analysis |
+| Code Chunker | `codeloom/core/code_chunker/` | AST-informed chunking with preamble injection (~1024 tokens/chunk) |
+| Code Ingestion | `codeloom/core/ingestion/code_ingestion.py` | Upload → extract → AST parse → chunk → embed → store pipeline |
+| Vector Store | `codeloom/core/vector_store/pg_vector_store.py` | PGVectorStore wrapping pgvector |
+| Retrieval Engine | `codeloom/core/engine/` | Hybrid retrieval (BM25 + vector + reranking) |
+| RAPTOR | `codeloom/core/raptor/` | Hierarchical retrieval with background tree building |
+| Stateless Query | `codeloom/core/stateless/` | Thread-safe fast retrieval functions for API routes |
+| Config | `config/codeloom.yaml` | Unified YAML config (ingestion, retrieval, RAPTOR, SQL chat) |
+| Settings | `codeloom/setting/` | Settings loader merging YAML config + env vars |
 
-- **`providers/`** - LLM providers (Ollama, OpenAI, Anthropic, Gemini, Groq)
-- **`vector_store/`** - PGVectorStore (PostgreSQL + pgvector)
-- **`engine/`** - Hybrid retrieval engine (BM25 + vector + reranking)
-- **`embedding/`** - Embedding layer (HuggingFace, OpenAI)
-- **`config/`** - YAML config loader
-- **`auth/`** - Authentication + RBAC
-- **`db/`** - Database layer (SQLAlchemy 2.0 + Alembic)
-- **`raptor/`** - Hierarchical retrieval (to adapt for code hierarchy)
-- **`memory/`** - Session memory
-- **`observability/`** - Query logger, token metrics
-- **`interfaces/`** - Base interfaces
-- **`registry.py`** - Plugin registry
-- **`plugins.py`** - Plugin registration
-- **`api/core/`** - Decorators, response builders, exceptions
+### Frontend Structure
 
-### Plugin Architecture
+React SPA with route-based code splitting:
+- `/login` → `Login.tsx`
+- `/` → `Dashboard.tsx` (project list)
+- `/project/:id` → `ProjectView.tsx` (file tree, code browser)
+- `/project/:id/chat` → `CodeChatPage.tsx` (RAG chat)
 
-```
--- LLM Providers: Ollama, OpenAI, Anthropic, Gemini, Groq
--- Embedding Providers: HuggingFace, OpenAI
--- Retrieval Strategies: Hybrid, Semantic, Keyword
-```
+Auth via `contexts/AuthContext.tsx` with session cookies. API client in `services/api.ts`.
 
-Providers selected via env vars: `LLM_PROVIDER`, `EMBEDDING_PROVIDER`, `RETRIEVAL_STRATEGY`
+### Data Model (Implemented)
 
-### Data Model
+Core tables in `core/db/models.py`: `users`, `projects`, `code_files`, `code_units`, `code_edges`, `migration_plans`, `migration_phases`, `conversations`, `query_logs`, `embedding_config`, `roles`, `user_roles`, `project_access`.
 
-**Inherited tables**: `users`, `data_embeddings`
+### API Routes (Implemented)
 
-**New CodeLoom tables** (to be created):
-- `projects` - Codebase projects (replaces notebooks)
-- `code_files` - Individual files in project
-- `code_units` - AST-parsed units (functions, classes, methods)
-- `code_edges` - ASG relationships between code units
-- `migration_plans` - Migration configurations
-- `migration_phases` - Phase tracking and output
-
-### API Surface (Planned)
-
-**Project Management**:
-- `POST /api/projects/upload` - Upload zip/tar.gz codebase
-- `GET /api/projects/{id}/structure` - File tree + ASG overview
-- `GET /api/projects/{id}/graph` - ASG visualization data
-
-**Code Chat (RAG)**:
-- `POST /api/projects/{id}/query` - Query against codebase
-- `POST /api/projects/{id}/query/stream` - SSE streaming query
-
-**Migration**:
-- `POST /api/migration/plan` - Create migration plan
-- `GET /api/migration/{id}/status` - Migration progress
-- `POST /api/migration/{id}/phase/{n}/execute` - Execute phase
-- `GET /api/migration/{id}/phase/{n}/output` - Get phase output
-
-### Frontend Pages (Planned)
-
-- **Dashboard** - List projects, recent queries, active migrations
-- **Project View** - File tree, ASG graph visualization, code browser
-- **Code Chat** - RAG chat against uploaded codebase
-- **Migration Wizard** - 6-phase pipeline with approval gates
-- **Diff View** - Side-by-side source vs migrated code
-- **Dependency Graph** - Interactive ASG visualization
+All routes prefixed with `/api`:
+- **Auth**: `/api/auth/*` — login, logout, session check
+- **Projects**: `/api/projects/*` — CRUD, zip upload with ingestion, file/unit browsing
+- **Code Chat**: `/api/projects/{id}/query/stream` — SSE streaming RAG chat
+- **Settings**: `/api/settings/*` — runtime configuration
+- **Health**: `GET /api/health`
 
 ## Environment Configuration
 
-Copy `.env.example` to `.env`. Key variables:
+Copy `.env.example` to `.env`. Critical variables:
 
 ```bash
-# Core providers
 LLM_PROVIDER=ollama              # ollama|openai|anthropic|gemini|groq
-LLM_MODEL=llama3.1:latest
 EMBEDDING_PROVIDER=openai        # openai|huggingface
 EMBEDDING_MODEL=text-embedding-3-small
-RETRIEVAL_STRATEGY=hybrid        # hybrid|semantic|keyword
-
-# Database
-DATABASE_URL=postgresql://dbnotebook:dbnotebook@localhost:5432/codeloom_dev
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=codeloom_dev
-
-# pgvector embedding dimension (must match embedding model)
-PGVECTOR_EMBED_DIM=1536          # 1536 for OpenAI, 768 for nomic
-
-# Authentication
-FLASK_SECRET_KEY=change-me       # Required for sessions
+DATABASE_URL=postgresql://codeloom:codeloom@localhost:5432/codeloom_dev
+PGVECTOR_EMBED_DIM=1536          # Must match embedding model (1536=OpenAI, 768=nomic)
+FLASK_SECRET_KEY=change-me       # Used for session middleware (name is legacy)
 ```
-
-## Frontend
-
-Located in `/frontend/`:
-- **Stack**: React 19, Vite 7, Tailwind CSS 4, TypeScript
-- **Proxy**: Vite proxies `/api` to Flask :7860
-- **State**: React Context pattern
 
 ## Key Defaults
 
-- Flask: http://localhost:7860
-- Frontend dev: http://localhost:3000
-- PostgreSQL: localhost:5432
-- Default login: admin / admin123
+- Backend: http://localhost:9005 (not 7860 — updated from DBNotebook)
+- Frontend dev: http://localhost:3000 (Vite proxies `/api` to :9005)
+- PostgreSQL: localhost:5432 (database: `codeloom_dev`)
 - Embedding dimension: 1536 (OpenAI text-embedding-3-small)
-- Reranker: `mixedbread-ai/mxbai-rerank-large-v1`
+- Reranker: `mixedbread-ai/mxbai-rerank-base-v1`
+
+## Common Modifications
+
+**Add new API route**: Create in `api/routes/`, register router in `api/app.py` via `app.include_router()`
+**Add new service**: Initialize in `__main__.py`, attach to `app.state`, add dependency in `api/deps.py`
+**Add AST parser for new language**: Subclass `BaseLanguageParser` in `core/ast_parser/`, register in `core/ast_parser/__init__.py`
+**Modify DB schema**: Edit `core/db/models.py`, run `alembic revision --autogenerate -m "description"`
+**Frontend component**: Add to `frontend/src/components/`, types in `frontend/src/types/`
+
+## ASG Edge Types
+
+The ASG builder (`core/asg_builder/builder.py`) detects these relationship types between code units:
+
+| Edge Type | Meaning | Source |
+|-----------|---------|--------|
+| `contains` | Parent contains child (class -> method) | Structural nesting |
+| `imports` | File imports another file/module | Import statements (Python, JS/TS, Java, C#) |
+| `calls` | Function/method calls another | Call detection (regex + qualified) |
+| `inherits` | Class extends another class | `extends` metadata or signature regex |
+| `implements` | Class/struct implements interface | `implements` metadata from parser |
+| `overrides` | Method overrides parent class method | `@Override` / `override` modifier |
+| `type_dep` | Consumer depends on referenced type | Structured metadata: field types, param types, return types |
+
+**Enrichment layers**: (1) tree-sitter enricher (`enricher.py`) runs on all files, adding `parsed_params`, `return_type`, `modifiers`, and `fields` (class field declarations) to metadata. (2) Optional bridges (`bridges/`) provide deeper type resolution when Java/dotnet runtimes are available. Build with `./dev.sh setup-tools`.
 
 ## Phased Delivery
 
-**Phase 1 (MVP)**: Code upload + AST parsing + basic RAG chat (Python only)
-**Phase 2**: ASG + relationship-aware retrieval + JS/TS support
-**Phase 3**: Migration engine (6-phase pipeline) + Java, C# support
-**Phase 4**: Advanced features (diff views, test gen, VSCode extension)
+- **Phase 1 (MVP)**: Code upload + AST parsing + basic RAG chat (Python) — implemented
+- **Phase 2**: ASG builder + relationship-aware retrieval + JS/TS support — implemented
+- **Phase 3**: Migration engine (6-phase pipeline) + Java support — implemented
+- **Phase 4**: C# parser + semantic enrichment + implements/overrides edges + JavaParser/Roslyn bridges — implemented
+- **Phase 5**: Diff views, test generation, VSCode extension
 
-## Important Notes
+See `docs/architecture.md` for the full architecture document.
 
-- All Python imports currently reference `dbnotebook` - must be renamed to `codeloom` before running
-- New modules (ast_parser, asg_builder, code_chunker, migration) are empty directories awaiting implementation
-- `api/routes/` is empty - new CodeLoom-specific routes to be built
-- tree-sitter dependencies need to be added to requirements.txt
-- DB models need updating: strip document-specific tables, add CodeLoom tables
+## Important Gotchas
+
+- Thread safety: API routes must use `stateless_query*()` methods, never `pipeline.query()` directly
+- The RAPTOR background worker uses asyncio — it's disabled in multi-worker (Gunicorn) mode via `DISABLE_BACKGROUND_WORKERS=true`
+- `OMP_NUM_THREADS=1` and `TOKENIZERS_PARALLELISM=false` are set at startup to prevent segfaults with torch/onnxruntime in multi-threaded contexts
+- Node cache has 5-minute TTL — call `pipeline.invalidate_node_cache(project_id)` after document changes
+- The `FLASK_SECRET_KEY` env var name is legacy but still used for FastAPI's `SessionMiddleware`

@@ -9,19 +9,19 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:7860',
+        target: 'http://localhost:9005',
         changeOrigin: true,
       },
       '/chat': {
-        target: 'http://localhost:7860',
+        target: 'http://localhost:9005',
         changeOrigin: true,
       },
       '/upload': {
-        target: 'http://localhost:7860',
+        target: 'http://localhost:9005',
         changeOrigin: true,
       },
       '/image': {
-        target: 'http://localhost:7860',
+        target: 'http://localhost:9005',
         changeOrigin: true,
       },
     },

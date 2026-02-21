@@ -85,7 +85,7 @@ class PGVectorStore(IVectorStore):
                     # Fallback: build from individual env vars
                     db_host = os.getenv("POSTGRES_HOST", "localhost")
                     db_port = int(os.getenv("POSTGRES_PORT", "5433"))
-                    db_name = os.getenv("POSTGRES_DB", "dbnotebook_dev")
+                    db_name = os.getenv("POSTGRES_DB", "codeloom_dev")
                     db_user = os.getenv("POSTGRES_USER", "postgres")
                     db_password = os.getenv("POSTGRES_PASSWORD", "root")
                     self._connection_string = (
@@ -98,7 +98,7 @@ class PGVectorStore(IVectorStore):
             parsed = urlparse(self._connection_string)
             self._db_host = parsed.hostname or "localhost"
             self._db_port = parsed.port or 5432
-            self._db_name = parsed.path.lstrip('/') if parsed.path else "dbnotebook_dev"
+            self._db_name = parsed.path.lstrip('/') if parsed.path else "codeloom_dev"
             self._db_user = parsed.username or "postgres"
             self._db_password = parsed.password or ""
 
@@ -116,7 +116,7 @@ class PGVectorStore(IVectorStore):
                     # Fallback: use individual environment variables
                     self._db_host = os.getenv("POSTGRES_HOST", "localhost")
                     self._db_port = int(os.getenv("POSTGRES_PORT", "5433"))
-                    self._db_name = os.getenv("POSTGRES_DB", "dbnotebook_dev")
+                    self._db_name = os.getenv("POSTGRES_DB", "codeloom_dev")
                     self._db_user = os.getenv("POSTGRES_USER", "postgres")
                     self._db_password = os.getenv("POSTGRES_PASSWORD", "root")
                     self._connection_string = (
@@ -129,7 +129,7 @@ class PGVectorStore(IVectorStore):
             parsed = urlparse(self._connection_string)
             self._db_host = parsed.hostname or "localhost"
             self._db_port = parsed.port or 5432
-            self._db_name = parsed.path.lstrip('/') if parsed.path else "dbnotebook_dev"
+            self._db_name = parsed.path.lstrip('/') if parsed.path else "codeloom_dev"
             self._db_user = parsed.username or "postgres"
             self._db_password = parsed.password or ""
 
@@ -200,10 +200,10 @@ class PGVectorStore(IVectorStore):
         try:
             session = self._session_factory()
             try:
-                # Create index on notebook_id for O(log n) lookups
+                # Create index on project_id for O(log n) lookups
                 session.execute(text(f"""
-                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_notebook_id
-                    ON {self._actual_table_name} ((metadata_->>'notebook_id'))
+                    CREATE INDEX IF NOT EXISTS idx_{self._table_name}_project_id
+                    ON {self._actual_table_name} ((metadata_->>'project_id'))
                 """))
                 # Create index on source_id for document lookups
                 session.execute(text(f"""
@@ -216,11 +216,11 @@ class PGVectorStore(IVectorStore):
                     CREATE INDEX IF NOT EXISTS idx_{self._table_name}_node_type
                     ON {self._actual_table_name} ((metadata_->>'node_type'))
                 """))
-                # Create unique index on text + notebook_id to prevent duplicates
+                # Create unique index on text + project_id to prevent duplicates
                 # This prevents the same text chunk from being added multiple times
                 session.execute(text(f"""
-                    CREATE UNIQUE INDEX IF NOT EXISTS idx_{self._table_name}_unique_text_notebook
-                    ON {self._actual_table_name} (md5(text), (metadata_->>'notebook_id'))
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_{self._table_name}_unique_text_project
+                    ON {self._actual_table_name} (md5(text), (metadata_->>'project_id'))
                 """))
                 session.commit()
                 logger.debug("Metadata indexes ensured")
@@ -254,17 +254,17 @@ class PGVectorStore(IVectorStore):
     def add_nodes(
         self,
         nodes: List[BaseNode],
-        notebook_id: Optional[str] = None
+        project_id: Optional[str] = None
     ) -> int:
         """
         Add nodes to the vector store incrementally with duplicate detection.
 
         This is O(n) for n new nodes, NOT O(total) like ChromaDB rebuild.
-        Duplicates are detected using md5 hash of text + notebook_id.
+        Duplicates are detected using md5 hash of text + project_id.
 
         Args:
             nodes: List of nodes to add
-            notebook_id: Optional notebook ID to set on all nodes
+            project_id: Optional project ID to set on all nodes
 
         Returns:
             Number of nodes actually added (after deduplication)
@@ -273,14 +273,14 @@ class PGVectorStore(IVectorStore):
             return 0
 
         try:
-            # Add notebook_id to metadata if provided
-            if notebook_id:
+            # Add project_id to metadata if provided
+            if project_id:
                 for node in nodes:
                     if hasattr(node, 'metadata'):
-                        node.metadata["notebook_id"] = notebook_id
+                        node.metadata["project_id"] = project_id
 
             # Filter out duplicates by checking existing text hashes
-            unique_nodes = self._filter_duplicate_nodes(nodes, notebook_id)
+            unique_nodes = self._filter_duplicate_nodes(nodes, project_id)
 
             if not unique_nodes:
                 logger.info(f"All {len(nodes)} nodes already exist, skipping add")
@@ -322,7 +322,7 @@ class PGVectorStore(IVectorStore):
         Args:
             query_embedding: Query vector embedding
             similarity_top_k: Maximum number of results to return
-            filters: Optional metadata filters to apply (e.g., {"notebook_id": "..."})
+            filters: Optional metadata filters to apply (e.g., {"project_id": "..."})
 
         Returns:
             List of (node, similarity_score) tuples, sorted by relevance
@@ -580,7 +580,7 @@ class PGVectorStore(IVectorStore):
     def _filter_duplicate_nodes(
         self,
         nodes: List[BaseNode],
-        notebook_id: Optional[str] = None
+        project_id: Optional[str] = None
     ) -> List[BaseNode]:
         """
         Filter out nodes that already exist in the database.
@@ -589,7 +589,7 @@ class PGVectorStore(IVectorStore):
 
         Args:
             nodes: List of nodes to check
-            notebook_id: Notebook ID to check within
+            project_id: Project ID to check within
 
         Returns:
             List of nodes that don't exist in the database
@@ -610,13 +610,13 @@ class PGVectorStore(IVectorStore):
             # Query existing hashes in one batch
             session = self._session_factory()
             try:
-                if notebook_id:
+                if project_id:
                     result = session.execute(text(f"""
                         SELECT md5(text) as text_hash
                         FROM {self._actual_table_name}
-                        WHERE metadata_->>'notebook_id' = :notebook_id
+                        WHERE metadata_->>'project_id' = :project_id
                         AND md5(text) = ANY(:hashes)
-                    """), {"notebook_id": notebook_id, "hashes": list(node_hashes.keys())})
+                    """), {"project_id": project_id, "hashes": list(node_hashes.keys())})
                 else:
                     result = session.execute(text(f"""
                         SELECT md5(text) as text_hash
@@ -671,10 +671,10 @@ class PGVectorStore(IVectorStore):
             for node in nodes:
                 metadata = node.metadata or {}
 
-                # Check notebook_id filter (for notebook-based architecture)
+                # Check project_id filter (for project-based architecture)
                 if offering_ids:
-                    node_notebook_id = metadata.get("notebook_id")
-                    if node_notebook_id and node_notebook_id in offering_ids:
+                    node_project_id = metadata.get("project_id")
+                    if node_project_id and node_project_id in offering_ids:
                         filtered_nodes.append(node)
                         continue
 
@@ -697,13 +697,13 @@ class PGVectorStore(IVectorStore):
             if not filtered_nodes:
                 logger.warning(
                     f"No nodes found matching filters: "
-                    f"offerings/notebooks={offering_ids}, practices={practice_names}"
+                    f"offerings/projects={offering_ids}, practices={practice_names}"
                 )
                 return None
 
             logger.info(
                 f"Filtered {len(filtered_nodes)} nodes from {len(nodes)} total "
-                f"(offerings/notebooks={offering_ids}, practices={practice_names})"
+                f"(offerings/projects={offering_ids}, practices={practice_names})"
             )
 
         return self.get_index(filtered_nodes, force_rebuild=force_rebuild)
@@ -765,103 +765,103 @@ class PGVectorStore(IVectorStore):
             logger.warning(f"Error clearing table: {e}")
 
     # =========================================================================
-    # Notebook-Specific Methods (NotebookLM Architecture)
+    # Project-Specific Methods (ProjectLM Architecture)
     # =========================================================================
 
-    def get_nodes_by_notebook(
+    def get_nodes_by_project(
         self,
         nodes: List[BaseNode],
-        notebook_id: str
+        project_id: str
     ) -> List[BaseNode]:
         """
-        Filter nodes by notebook_id for NotebookLM-style isolation.
+        Filter nodes by project_id for ProjectLM-style isolation.
 
         Args:
             nodes: List of nodes to filter
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
 
         Returns:
-            List of nodes belonging to the specified notebook
+            List of nodes belonging to the specified project
         """
-        return self.get_nodes_by_metadata(nodes, {"notebook_id": notebook_id})
+        return self.get_nodes_by_metadata(nodes, {"project_id": project_id})
 
-    def get_index_by_notebook(
+    def get_index_by_project(
         self,
         nodes: List[BaseNode],
-        notebook_id: str,
+        project_id: str,
         force_rebuild: bool = False
     ) -> Optional[VectorStoreIndex]:
         """
-        Get or create filtered vector index for a specific notebook.
+        Get or create filtered vector index for a specific project.
 
         Args:
             nodes: List of all available nodes
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
             force_rebuild: Force rebuild even if cached
 
         Returns:
-            VectorStoreIndex with notebook-filtered nodes, or None if no matching nodes
+            VectorStoreIndex with project-filtered nodes, or None if no matching nodes
         """
-        filtered_nodes = self.get_nodes_by_notebook(nodes, notebook_id)
+        filtered_nodes = self.get_nodes_by_project(nodes, project_id)
 
         if not filtered_nodes:
-            logger.warning(f"No nodes found for notebook: {notebook_id}")
+            logger.warning(f"No nodes found for project: {project_id}")
             return None
 
         logger.info(
-            f"Filtered {len(filtered_nodes)} nodes for notebook {notebook_id} "
+            f"Filtered {len(filtered_nodes)} nodes for project {project_id} "
             f"from {len(nodes)} total"
         )
 
         return self.get_index(filtered_nodes, force_rebuild=force_rebuild)
 
-    def delete_notebook_nodes(
+    def delete_project_nodes(
         self,
         nodes: List[BaseNode],
-        notebook_id: str
+        project_id: str
     ) -> List[BaseNode]:
         """
-        Filter out nodes belonging to a specific notebook.
+        Filter out nodes belonging to a specific project.
 
         Args:
             nodes: List of all nodes
-            notebook_id: Notebook UUID to remove
+            project_id: Project UUID to remove
 
         Returns:
-            List of nodes NOT belonging to the specified notebook
+            List of nodes NOT belonging to the specified project
         """
         remaining_nodes = [
             node for node in nodes
-            if node.metadata.get("notebook_id") != notebook_id
+            if node.metadata.get("project_id") != project_id
         ]
 
         removed_count = len(nodes) - len(remaining_nodes)
         logger.info(
-            f"Removed {removed_count} nodes for notebook {notebook_id}, "
+            f"Removed {removed_count} nodes for project {project_id}, "
             f"{len(remaining_nodes)} nodes remaining"
         )
 
         return remaining_nodes
 
-    def get_notebook_document_count(
+    def get_project_document_count(
         self,
         nodes: List[BaseNode],
-        notebook_id: str
+        project_id: str
     ) -> int:
         """
-        Get count of unique documents in a notebook.
+        Get count of unique documents in a project.
 
         Args:
             nodes: List of all nodes
-            notebook_id: Notebook UUID
+            project_id: Project UUID
 
         Returns:
-            Number of unique documents (source_ids) in the notebook
+            Number of unique documents (source_ids) in the project
         """
-        notebook_nodes = self.get_nodes_by_notebook(nodes, notebook_id)
+        project_nodes = self.get_nodes_by_project(nodes, project_id)
 
         source_ids = set()
-        for node in notebook_nodes:
+        for node in project_nodes:
             source_id = node.metadata.get("source_id")
             if source_id:
                 source_ids.add(source_id)
@@ -979,29 +979,29 @@ class PGVectorStore(IVectorStore):
             logger.error(f"Error deleting document nodes from pgvector: {e}")
             return False
 
-    def delete_notebook_nodes_sql(self, notebook_id: str) -> bool:
+    def delete_project_nodes_sql(self, project_id: str) -> bool:
         """
-        Delete all nodes for a specific notebook using SQL.
+        Delete all nodes for a specific project using SQL.
 
         O(1) operation using SQL DELETE with WHERE clause.
 
         Args:
-            notebook_id: UUID of the notebook whose nodes should be deleted
+            project_id: UUID of the project whose nodes should be deleted
 
         Returns:
             True if deletion successful, False otherwise
         """
         try:
-            logger.info(f"Deleting nodes for notebook {notebook_id} from pgvector")
+            logger.info(f"Deleting nodes for project {project_id} from pgvector")
 
             session = self._session_factory()
             try:
                 result = session.execute(
                     text(f"""
                         DELETE FROM {self._actual_table_name}
-                        WHERE metadata_->>'notebook_id' = :notebook_id
+                        WHERE metadata_->>'project_id' = :project_id
                     """),
-                    {"notebook_id": notebook_id}
+                    {"project_id": project_id}
                 )
                 session.commit()
                 deleted_count = result.rowcount
@@ -1013,190 +1013,113 @@ class PGVectorStore(IVectorStore):
             self._cached_node_count = 0
 
             logger.info(
-                f"Deleted {deleted_count} nodes for notebook_id={notebook_id} "
+                f"Deleted {deleted_count} nodes for project_id={project_id} "
                 f"using SQL DELETE"
             )
             return True
 
         except Exception as e:
-            logger.error(f"Error deleting notebook nodes from pgvector: {e}")
+            logger.error(f"Error deleting project nodes from pgvector: {e}")
             return False
 
-    def get_nodes_by_notebook_sql(self, notebook_id: str) -> List[BaseNode]:
+    def get_nodes_by_project_sql(self, project_id: str) -> List[BaseNode]:
         """
-        Load nodes for a specific notebook using SQL filtering.
+        Load nodes for a specific project using SQL filtering.
 
         O(log n) operation using SQL WHERE with indexed column.
-        Only returns nodes from active sources (respects document toggle).
 
         Args:
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
 
         Returns:
-            List of nodes belonging to the specified notebook (active sources only)
+            List of nodes belonging to the specified project
         """
         try:
             session = self._session_factory()
             try:
-                # Join with notebook_sources to filter by active status
-                # This respects the eye icon toggle in the UI
                 result = session.execute(
                     text(f"""
                         SELECT e.id, e.text, e.metadata_, e.embedding
                         FROM {self._actual_table_name} e
-                        LEFT JOIN notebook_sources ns
-                            ON e.metadata_->>'source_id' = ns.source_id::text
-                        WHERE e.metadata_->>'notebook_id' = :notebook_id
-                        AND (ns.active = true OR ns.active IS NULL)
+                        WHERE e.metadata_->>'project_id' = :project_id
                     """),
-                    {"notebook_id": notebook_id}
+                    {"project_id": project_id}
                 )
                 rows = result.fetchall()
+                nodes = self._rows_to_nodes(rows)
 
-                nodes = []
-                for row in rows:
-                    node_id, text_content, metadata, embedding = row
-
-                    if isinstance(metadata, str):
-                        import json
-                        metadata = json.loads(metadata)
-
-                    # Parse embedding - pgvector returns as string representation
-                    parsed_embedding = None
-                    if embedding is not None:
-                        if isinstance(embedding, str):
-                            import json
-                            parsed_embedding = json.loads(embedding)
-                        elif hasattr(embedding, 'tolist'):
-                            parsed_embedding = embedding.tolist()
-                        else:
-                            parsed_embedding = list(embedding)
-
-                    node = TextNode(
-                        id_=str(node_id),
-                        text=text_content or "",
-                        metadata=metadata or {},
-                        embedding=parsed_embedding
-                    )
-                    nodes.append(node)
-
-                logger.debug(f"Loaded {len(nodes)} nodes for notebook {notebook_id}")
+                logger.debug(f"Loaded {len(nodes)} nodes for project {project_id}")
                 return nodes
             finally:
                 session.close()
 
         except Exception as e:
-            logger.error(f"Error loading notebook nodes from pgvector: {e}")
+            logger.error(f"Error loading project nodes from pgvector: {e}")
             return []
 
-    def get_nodes_by_notebook_and_types(
+    def get_nodes_by_project_and_types(
         self,
-        notebook_id: str,
+        project_id: str,
         node_types: Optional[List[str]] = None
     ) -> List[BaseNode]:
         """
-        Load nodes for a specific notebook, optionally filtered by node type.
+        Load nodes for a specific project, optionally filtered by node type.
 
         O(log n) operation using SQL WHERE with indexed columns.
-        Only returns nodes from active sources (respects document toggle).
-        For transformation nodes, checks parent_source_id for active status.
 
         Args:
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
             node_types: Optional list of node types to include
                        Valid types: 'chunk', 'summary', 'insight', 'question'
                        If None, returns all node types
 
         Returns:
-            List of nodes matching the criteria (active sources only)
+            List of nodes matching the criteria
         """
         try:
             session = self._session_factory()
             try:
                 if node_types:
-                    # Filter by both notebook_id and node_type
-                    # Join with notebook_sources to filter by active status
-                    # Use COALESCE to check parent_source_id for transformation nodes
                     placeholders = ", ".join([f":type_{i}" for i in range(len(node_types))])
-                    params = {"notebook_id": notebook_id}
+                    params = {"project_id": project_id}
                     for i, t in enumerate(node_types):
                         params[f"type_{i}"] = t
 
                     query = text(f"""
                         SELECT e.id, e.text, e.metadata_, e.embedding
                         FROM {self._actual_table_name} e
-                        LEFT JOIN notebook_sources ns
-                            ON COALESCE(
-                                e.metadata_->>'parent_source_id',
-                                e.metadata_->>'source_id'
-                            ) = ns.source_id::text
-                        WHERE e.metadata_->>'notebook_id' = :notebook_id
+                        WHERE e.metadata_->>'project_id' = :project_id
                         AND (
                             e.metadata_->>'node_type' IN ({placeholders})
                             OR e.metadata_->>'node_type' IS NULL
                         )
-                        AND (ns.active = true OR ns.active IS NULL)
                     """)
                 else:
-                    # No type filter - get all nodes
-                    # Join with notebook_sources to filter by active status
-                    params = {"notebook_id": notebook_id}
+                    params = {"project_id": project_id}
                     query = text(f"""
                         SELECT e.id, e.text, e.metadata_, e.embedding
                         FROM {self._actual_table_name} e
-                        LEFT JOIN notebook_sources ns
-                            ON COALESCE(
-                                e.metadata_->>'parent_source_id',
-                                e.metadata_->>'source_id'
-                            ) = ns.source_id::text
-                        WHERE e.metadata_->>'notebook_id' = :notebook_id
-                        AND (ns.active = true OR ns.active IS NULL)
+                        WHERE e.metadata_->>'project_id' = :project_id
                     """)
 
                 result = session.execute(query, params)
                 rows = result.fetchall()
-
-                nodes = []
-                for row in rows:
-                    node_id, text_content, metadata, embedding = row
-
-                    if isinstance(metadata, str):
-                        import json
-                        metadata = json.loads(metadata)
-
-                    # Parse embedding - pgvector returns as string representation
-                    parsed_embedding = None
-                    if embedding is not None:
-                        if isinstance(embedding, str):
-                            import json
-                            parsed_embedding = json.loads(embedding)
-                        elif hasattr(embedding, 'tolist'):
-                            parsed_embedding = embedding.tolist()
-                        else:
-                            parsed_embedding = list(embedding)
-
-                    node = TextNode(
-                        id_=str(node_id),
-                        text=text_content or "",
-                        metadata=metadata or {},
-                        embedding=parsed_embedding
-                    )
-                    nodes.append(node)
+                nodes = self._rows_to_nodes(rows)
 
                 type_str = str(node_types) if node_types else "all"
-                logger.debug(f"Loaded {len(nodes)} nodes for notebook {notebook_id} (types: {type_str})")
+                logger.debug(f"Loaded {len(nodes)} nodes for project {project_id} (types: {type_str})")
                 return nodes
             finally:
                 session.close()
 
         except Exception as e:
-            logger.error(f"Error loading notebook nodes by type from pgvector: {e}")
+            logger.error(f"Error loading project nodes by type from pgvector: {e}")
             return []
 
     def add_transformation_nodes(
         self,
         nodes: List[BaseNode],
-        notebook_id: str,
+        project_id: str,
         source_id: str
     ) -> int:
         """
@@ -1206,7 +1129,7 @@ class PGVectorStore(IVectorStore):
 
         Args:
             nodes: List of nodes with node_type in metadata
-            notebook_id: Notebook UUID for the nodes
+            project_id: Project UUID for the nodes
             source_id: Source document UUID
 
         Returns:
@@ -1218,11 +1141,11 @@ class PGVectorStore(IVectorStore):
         # Ensure metadata is set correctly
         for node in nodes:
             if hasattr(node, 'metadata'):
-                node.metadata["notebook_id"] = notebook_id
+                node.metadata["project_id"] = project_id
                 node.metadata["source_id"] = source_id
                 # node_type should already be set by caller
 
-        return self.add_nodes(nodes, notebook_id=notebook_id)
+        return self.add_nodes(nodes, project_id=project_id)
 
     # =========================================================================
     # RAPTOR Tree Methods (Hierarchical Retrieval Support)
@@ -1230,7 +1153,7 @@ class PGVectorStore(IVectorStore):
 
     def get_nodes_by_tree_level(
         self,
-        notebook_id: str,
+        project_id: str,
         tree_level: int,
         source_ids: Optional[List[str]] = None
     ) -> List[BaseNode]:
@@ -1242,7 +1165,7 @@ class PGVectorStore(IVectorStore):
         - 1+: Summary nodes at increasing abstraction levels
 
         Args:
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
             tree_level: Tree level to retrieve (0=chunks, 1+=summaries)
             source_ids: Optional list of source IDs to filter by
 
@@ -1260,9 +1183,9 @@ class PGVectorStore(IVectorStore):
                 )
 
                 if source_ids:
-                    # Filter by notebook, level, and specific sources
+                    # Filter by project, level, and specific sources
                     placeholders = ", ".join([f":src_{i}" for i in range(len(source_ids))])
-                    params = {"notebook_id": notebook_id, "tree_level": str(tree_level)}
+                    params = {"project_id": project_id, "tree_level": str(tree_level)}
                     for i, src in enumerate(source_ids):
                         params[f"src_{i}"] = src
 
@@ -1270,22 +1193,22 @@ class PGVectorStore(IVectorStore):
                         text(f"""
                             SELECT e.id, e.text, e.metadata_, e.embedding
                             FROM {self._actual_table_name} e
-                            WHERE e.metadata_->>'notebook_id' = :notebook_id
+                            WHERE e.metadata_->>'project_id' = :project_id
                             AND {level_condition}
                             AND e.metadata_->>'source_id' IN ({placeholders})
                         """),
                         params
                     )
                 else:
-                    # Filter by notebook and level only
+                    # Filter by project and level only
                     result = session.execute(
                         text(f"""
                             SELECT e.id, e.text, e.metadata_, e.embedding
                             FROM {self._actual_table_name} e
-                            WHERE e.metadata_->>'notebook_id' = :notebook_id
+                            WHERE e.metadata_->>'project_id' = :project_id
                             AND {level_condition}
                         """),
-                        {"notebook_id": notebook_id, "tree_level": str(tree_level)}
+                        {"project_id": project_id, "tree_level": str(tree_level)}
                     )
 
                 rows = result.fetchall()
@@ -1293,7 +1216,7 @@ class PGVectorStore(IVectorStore):
 
                 logger.debug(
                     f"Retrieved {len(nodes)} nodes at tree_level={tree_level} "
-                    f"for notebook {notebook_id}"
+                    f"for project {project_id}"
                 )
                 return nodes
 
@@ -1306,7 +1229,7 @@ class PGVectorStore(IVectorStore):
 
     def get_nodes_by_tree_levels(
         self,
-        notebook_id: str,
+        project_id: str,
         tree_levels: List[int],
         source_ids: Optional[List[str]] = None
     ) -> List[BaseNode]:
@@ -1314,7 +1237,7 @@ class PGVectorStore(IVectorStore):
         Get nodes at multiple tree levels for RAPTOR retrieval.
 
         Args:
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
             tree_levels: List of tree levels to retrieve
             source_ids: Optional list of source IDs to filter by
 
@@ -1326,7 +1249,7 @@ class PGVectorStore(IVectorStore):
             try:
                 # Build level filter - include NULL for level 0 (backward compatibility)
                 level_placeholders = ", ".join([f":lvl_{i}" for i in range(len(tree_levels))])
-                params = {"notebook_id": notebook_id}
+                params = {"project_id": project_id}
                 for i, lvl in enumerate(tree_levels):
                     params[f"lvl_{i}"] = str(lvl)
 
@@ -1339,7 +1262,7 @@ class PGVectorStore(IVectorStore):
                 )
 
                 if source_ids:
-                    # Filter by notebook, levels, and specific sources
+                    # Filter by project, levels, and specific sources
                     src_placeholders = ", ".join([f":src_{i}" for i in range(len(source_ids))])
                     for i, src in enumerate(source_ids):
                         params[f"src_{i}"] = src
@@ -1348,19 +1271,19 @@ class PGVectorStore(IVectorStore):
                         text(f"""
                             SELECT e.id, e.text, e.metadata_, e.embedding
                             FROM {self._actual_table_name} e
-                            WHERE e.metadata_->>'notebook_id' = :notebook_id
+                            WHERE e.metadata_->>'project_id' = :project_id
                             AND {level_condition}
                             AND e.metadata_->>'source_id' IN ({src_placeholders})
                         """),
                         params
                     )
                 else:
-                    # Filter by notebook and levels only
+                    # Filter by project and levels only
                     result = session.execute(
                         text(f"""
                             SELECT e.id, e.text, e.metadata_, e.embedding
                             FROM {self._actual_table_name} e
-                            WHERE e.metadata_->>'notebook_id' = :notebook_id
+                            WHERE e.metadata_->>'project_id' = :project_id
                             AND {level_condition}
                         """),
                         params
@@ -1371,7 +1294,7 @@ class PGVectorStore(IVectorStore):
 
                 logger.debug(
                     f"Retrieved {len(nodes)} nodes at levels {tree_levels} "
-                    f"for notebook {notebook_id}"
+                    f"for project {project_id}"
                 )
                 return nodes
 
@@ -1385,7 +1308,7 @@ class PGVectorStore(IVectorStore):
     def add_tree_nodes(
         self,
         nodes: List[BaseNode],
-        notebook_id: str,
+        project_id: str,
         source_id: str,
         tree_level: int,
         tree_root_id: Optional[str] = None
@@ -1395,7 +1318,7 @@ class PGVectorStore(IVectorStore):
 
         Args:
             nodes: List of nodes to add
-            notebook_id: Notebook UUID
+            project_id: Project UUID
             source_id: Source document UUID
             tree_level: Tree level (0=chunk, 1+=summary)
             tree_root_id: Optional root node ID for tree traversal
@@ -1409,14 +1332,14 @@ class PGVectorStore(IVectorStore):
         # Set tree metadata on all nodes
         for node in nodes:
             if hasattr(node, 'metadata'):
-                node.metadata["notebook_id"] = notebook_id
+                node.metadata["project_id"] = project_id
                 node.metadata["source_id"] = source_id
                 node.metadata["tree_level"] = tree_level
                 node.metadata["node_type"] = "raptor_summary" if tree_level > 0 else "chunk"
                 if tree_root_id:
                     node.metadata["tree_root_id"] = tree_root_id
 
-        return self.add_nodes(nodes, notebook_id=notebook_id)
+        return self.add_nodes(nodes, project_id=project_id)
 
     def delete_tree_nodes(
         self,
@@ -1578,7 +1501,7 @@ class PGVectorStore(IVectorStore):
 
     def get_top_raptor_summaries(
         self,
-        notebook_id: str,
+        project_id: str,
         query_embedding: List[float],
         top_k: int = 5,
     ) -> List[Tuple[BaseNode, float]]:
@@ -1589,7 +1512,7 @@ class PGVectorStore(IVectorStore):
         Bounded by top_k (default 5) to prevent context bloat.
 
         Args:
-            notebook_id: Notebook UUID to filter by
+            project_id: Project UUID to filter by
             query_embedding: Query vector for similarity search
             top_k: Maximum summaries to return (default: 5)
 
@@ -1610,13 +1533,13 @@ class PGVectorStore(IVectorStore):
                         SELECT id, text, metadata_, embedding,
                                1 - (embedding <=> '{embedding_str}'::vector) as similarity
                         FROM {self._actual_table_name}
-                        WHERE metadata_->>'notebook_id' = :notebook_id
+                        WHERE metadata_->>'project_id' = :project_id
                         AND (metadata_->>'tree_level')::int >= 1
                         ORDER BY embedding <=> '{embedding_str}'::vector
                         LIMIT :top_k
                     """),
                     {
-                        "notebook_id": notebook_id,
+                        "project_id": project_id,
                         "top_k": top_k
                     }
                 )
@@ -1641,7 +1564,7 @@ class PGVectorStore(IVectorStore):
                     )
                     results.append((node, float(similarity)))
 
-                logger.debug(f"Retrieved {len(results)} RAPTOR summaries for notebook {notebook_id}")
+                logger.debug(f"Retrieved {len(results)} RAPTOR summaries for project {project_id}")
                 return results
 
             finally:

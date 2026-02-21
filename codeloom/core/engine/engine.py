@@ -60,7 +60,7 @@ class LocalChatEngine:
         offering_filter: Optional[List[str]] = None,
         vector_store=None,
         chat_history: Optional[List] = None,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> Union[CondensePlusContextChatEngine, SimpleChatEngine]:
         """
         Create appropriate chat engine based on available documents.
@@ -72,7 +72,7 @@ class LocalChatEngine:
             offering_filter: List of offering names to filter by (Sales Pitch mode)
             vector_store: Optional LocalVectorStore for metadata filtering
             chat_history: Optional chat history to preserve when recreating engine
-            notebook_id: Notebook ID for RAPTOR-aware retrieval
+            project_id: Project ID for RAPTOR-aware retrieval
 
         Returns:
             Configured chat engine
@@ -125,20 +125,20 @@ class LocalChatEngine:
         filter_msg = f" (filtered by offerings: {offering_filter})" if offering_filter else ""
         logger.debug(f"Creating CondensePlusContextChatEngine with {len(nodes)} nodes{filter_msg}")
 
-        # Use RAPTOR-aware retrieval when notebook_id is available
+        # Use RAPTOR-aware retrieval when project_id is available
         # This enables hierarchical retrieval for better summary/detail query handling
-        if notebook_id and vector_store:
-            logger.info(f"Using RAPTOR-aware retrieval for notebook {notebook_id}")
+        if project_id and vector_store:
+            logger.info(f"Using RAPTOR-aware retrieval for project {project_id}")
             retriever = self._retriever.get_combined_raptor_retriever(
                 llm=llm,
                 language=language,
                 nodes=nodes,
                 vector_store=vector_store,
-                notebook_id=notebook_id,
-                source_ids=None,  # Will check all sources in notebook
+                project_id=project_id,
+                source_ids=None,  # Will check all sources in project
             )
         else:
-            logger.debug("Using standard retrieval (no notebook_id)")
+            logger.debug("Using standard retrieval (no project_id)")
             retriever = self._retriever.get_retrievers(
                 llm=llm,
                 language=language,

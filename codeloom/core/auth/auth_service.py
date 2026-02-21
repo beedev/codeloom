@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 import bcrypt
 
-from dbnotebook.core.db.models import User
+from codeloom.core.db.models import User
 
 logger = logging.getLogger(__name__)
 

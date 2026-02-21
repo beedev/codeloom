@@ -30,7 +30,7 @@ class RetrievalStrategy(ABC):
         Args:
             query: The search query string
             top_k: Number of top results to return
-            filters: Optional metadata filters (e.g., notebook_id)
+            filters: Optional metadata filters (e.g., project_id)
 
         Returns:
             List of NodeWithScore objects ranked by relevance

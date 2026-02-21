@@ -6,7 +6,7 @@ Provides consistent response format across all API endpoints:
 - Optional metadata
 
 Usage:
-    from dbnotebook.api.core import success_response, error_response
+    from codeloom.api.core import success_response, error_response
 
     @app.route("/api/example")
     def example():
@@ -168,18 +168,18 @@ def not_found(resource: str, resource_id: Optional[str] = None) -> Tuple:
     """Return a 404 not found response.
 
     Args:
-        resource: Type of resource (e.g., "Notebook", "User")
+        resource: Type of resource (e.g., "Project", "User")
         resource_id: Optional ID of the resource
 
     Returns:
         Tuple of (Response, 404)
 
     Examples:
-        return not_found("Notebook")
-        # {"success": false, "error": "Notebook not found"}
+        return not_found("Project")
+        # {"success": false, "error": "Project not found"}
 
-        return not_found("Notebook", "abc-123")
-        # {"success": false, "error": "Notebook not found: abc-123"}
+        return not_found("Project", "abc-123")
+        # {"success": false, "error": "Project not found: abc-123"}
     """
     if resource_id:
         message = f"{resource} not found: {resource_id}"

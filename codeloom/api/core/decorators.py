@@ -3,11 +3,11 @@
 Provides reusable decorators for:
 - API key authentication
 - Session-based authentication
-- Notebook access validation
+- Project access validation
 - Request validation
 
 Usage:
-    from dbnotebook.api.core.decorators import require_api_key, require_session
+    from codeloom.api.core.decorators import require_api_key, require_session
 
     @app.route("/api/protected")
     @require_api_key
@@ -15,9 +15,9 @@ Usage:
         user_id = request.api_user_id  # Set by decorator
         ...
 
-    @app.route("/api/notebook/<notebook_id>")
-    @require_notebook_access
-    def notebook_endpoint(notebook_id):
+    @app.route("/api/projects/<project_id>")
+    @require_project_access
+    def project_endpoint(project_id):
         ...
 """
 
@@ -68,7 +68,7 @@ def validate_api_key(provided_key: str) -> tuple[bool, Optional[str]]:
     # Check database first (if db_manager is available)
     if _db_manager:
         try:
-            from dbnotebook.core.db.models import User
+            from codeloom.core.db.models import User
 
             with _db_manager.get_session() as db_session:
                 user = db_session.query(User).filter(User.api_key == provided_key).first()
@@ -79,7 +79,7 @@ def validate_api_key(provided_key: str) -> tuple[bool, Optional[str]]:
 
     # Fallback to environment variable (backward compatibility)
     if _env_api_key and provided_key == _env_api_key:
-        from dbnotebook.core.constants import DEFAULT_USER_ID
+        from codeloom.core.constants import DEFAULT_USER_ID
         return True, DEFAULT_USER_ID
 
     return False, None
@@ -179,45 +179,45 @@ def require_auth(f: F) -> F:
     return cast(F, decorated)
 
 
-def require_notebook_access(
+def require_project_access(
     access_level: str = "viewer",
-    notebook_id_param: str = "notebook_id"
+    project_id_param: str = "project_id"
 ) -> Callable[[F], F]:
-    """Decorator factory to validate notebook access.
+    """Decorator factory to validate project access.
 
     Checks RBAC permissions for the authenticated user.
 
     Args:
         access_level: Required access level ("viewer", "editor", "owner")
-        notebook_id_param: Name of the route/request param containing notebook_id
+        project_id_param: Name of the route/request param containing project_id
 
     Usage:
-        @app.route("/api/notebook/<notebook_id>")
+        @app.route("/api/projects/<project_id>")
         @require_auth
-        @require_notebook_access(access_level="viewer")
-        def get_notebook(notebook_id):
+        @require_project_access(access_level="viewer")
+        def get_project(project_id):
             ...
 
-        @app.route("/api/notebook/<notebook_id>/edit")
+        @app.route("/api/projects/<project_id>/edit")
         @require_auth
-        @require_notebook_access(access_level="editor")
-        def edit_notebook(notebook_id):
+        @require_project_access(access_level="editor")
+        def edit_project(project_id):
             ...
     """
     def decorator(f: F) -> F:
         @wraps(f)
         def decorated(*args, **kwargs):
-            from dbnotebook.core.auth import check_notebook_access, AccessLevel
+            from codeloom.core.auth import check_project_access, AccessLevel
 
-            # Get notebook_id from route params or request body
-            notebook_id = kwargs.get(notebook_id_param)
-            if not notebook_id and request.is_json:
-                notebook_id = request.json.get(notebook_id_param)
-            if not notebook_id:
-                notebook_id = request.args.get(notebook_id_param)
+            # Get project_id from route params or request body
+            project_id = kwargs.get(project_id_param)
+            if not project_id and request.is_json:
+                project_id = request.json.get(project_id_param)
+            if not project_id:
+                project_id = request.args.get(project_id_param)
 
-            if not notebook_id:
-                return error_response(f"{notebook_id_param} is required", 400)
+            if not project_id:
+                return error_response(f"{project_id_param} is required", 400)
 
             # Get user_id from request context (set by auth decorator)
             user_id = getattr(request, 'auth_user_id', None) or \
@@ -237,14 +237,14 @@ def require_notebook_access(
             required_level = level_map.get(access_level, AccessLevel.VIEWER)
 
             # Check access
-            has_access, error_msg = check_notebook_access(
+            has_access, error_msg = check_project_access(
                 user_id=user_id,
-                notebook_id=notebook_id,
+                project_id=project_id,
                 access_level=required_level
             )
 
             if not has_access:
-                return forbidden(error_msg or "Access denied to this notebook")
+                return forbidden(error_msg or "Access denied to this project")
 
             return f(*args, **kwargs)
 
@@ -282,7 +282,7 @@ def require_admin(f: F) -> F:
             return error_response("Server configuration error", 500)
 
         try:
-            from dbnotebook.core.auth import RBACService
+            from codeloom.core.auth import RBACService
 
             with _db_manager.get_session() as db_session:
                 rbac_service = RBACService(db_session)
@@ -305,14 +305,14 @@ def validate_json(*required_fields: str) -> Callable[[F], F]:
         *required_fields: Names of required fields in request JSON
 
     Usage:
-        @app.route("/api/notebook", methods=["POST"])
+        @app.route("/api/projects", methods=["POST"])
         @validate_json("name")
-        def create_notebook():
+        def create_project():
             name = request.json["name"]  # Guaranteed to exist
             ...
 
         @app.route("/api/query", methods=["POST"])
-        @validate_json("notebook_id", "query")
+        @validate_json("project_id", "query")
         def query():
             ...
     """

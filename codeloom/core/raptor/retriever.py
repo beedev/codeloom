@@ -67,7 +67,7 @@ class RAPTORRetriever(BaseRetriever):
     def __init__(
         self,
         vector_store: "PGVectorStore",
-        notebook_id: str,
+        project_id: str,
         source_ids: Optional[List[str]] = None,
         config: Optional[RAPTORConfig] = None,
         similarity_top_k: int = 10,
@@ -76,14 +76,14 @@ class RAPTORRetriever(BaseRetriever):
 
         Args:
             vector_store: Vector store containing RAPTOR nodes
-            notebook_id: Notebook ID to retrieve from
+            project_id: Project ID to retrieve from
             source_ids: Optional list of source IDs to filter by
             config: RAPTOR configuration
             similarity_top_k: Number of results to return
         """
         super().__init__()
         self.vector_store = vector_store
-        self.notebook_id = notebook_id
+        self.project_id = project_id
         self.source_ids = source_ids
         self.config = config or DEFAULT_CONFIG
         self.retrieval_config = self.config.retrieval
@@ -184,7 +184,7 @@ class RAPTORRetriever(BaseRetriever):
         for level in levels:
             try:
                 level_nodes = self.vector_store.get_nodes_by_tree_level(
-                    notebook_id=self.notebook_id,
+                    project_id=self.project_id,
                     tree_level=level,
                     source_ids=self.source_ids
                 )
@@ -197,7 +197,7 @@ class RAPTORRetriever(BaseRetriever):
             logger.warning("No RAPTOR nodes found, falling back to level 0")
             # Fallback to level 0 (original chunks)
             all_nodes = self.vector_store.get_nodes_by_tree_level(
-                notebook_id=self.notebook_id,
+                project_id=self.project_id,
                 tree_level=0,
                 source_ids=self.source_ids
             )
@@ -325,7 +325,7 @@ class RAPTORRetriever(BaseRetriever):
 
 def create_raptor_retriever(
     vector_store: "PGVectorStore",
-    notebook_id: str,
+    project_id: str,
     source_ids: Optional[List[str]] = None,
     config: Optional[RAPTORConfig] = None,
     similarity_top_k: int = 10,
@@ -336,7 +336,7 @@ def create_raptor_retriever(
 
     Args:
         vector_store: Vector store containing RAPTOR nodes
-        notebook_id: Notebook ID to retrieve from
+        project_id: Project ID to retrieve from
         source_ids: Optional list of source IDs to filter by
         config: RAPTOR configuration
         similarity_top_k: Number of results to return
@@ -346,7 +346,7 @@ def create_raptor_retriever(
     """
     return RAPTORRetriever(
         vector_store=vector_store,
-        notebook_id=notebook_id,
+        project_id=project_id,
         source_ids=source_ids,
         config=config,
         similarity_top_k=similarity_top_k,
@@ -356,14 +356,14 @@ def create_raptor_retriever(
 def has_raptor_tree(
     vector_store: "PGVectorStore",
     source_id: str,
-    notebook_id: str,
+    project_id: str,
 ) -> bool:
     """Check if a source has a RAPTOR tree built.
 
     Args:
         vector_store: Vector store to check
         source_id: Source ID to check
-        notebook_id: Notebook containing the source
+        project_id: Project containing the source
 
     Returns:
         True if RAPTOR tree exists (has nodes at level > 0)

@@ -1,7 +1,7 @@
 """
 Dict-based Session Memory Service for cross-request conversation persistence.
 
-Simple in-process storage using dict, keyed by (user_id, notebook_id).
+Simple in-process storage using dict, keyed by (user_id, project_id).
 No external dependencies required.
 """
 
@@ -50,22 +50,22 @@ class SessionMemoryService:
         self._ttl_hours = session_ttl_hours
         logger.info(f"SessionMemoryService initialized: max_messages={max_messages_per_session}, ttl={session_ttl_hours}h")
 
-    def _get_key(self, user_id: str, notebook_id: str) -> Tuple[str, str]:
-        """Create session key from user_id and notebook_id."""
-        return (str(user_id), str(notebook_id))
+    def _get_key(self, user_id: str, project_id: str) -> Tuple[str, str]:
+        """Create session key from user_id and project_id."""
+        return (str(user_id), str(project_id))
 
-    def _get_or_create_session(self, user_id: str, notebook_id: str) -> SessionData:
+    def _get_or_create_session(self, user_id: str, project_id: str) -> SessionData:
         """Get existing session or create new one."""
-        key = self._get_key(user_id, notebook_id)
+        key = self._get_key(user_id, project_id)
         if key not in self._sessions:
             self._sessions[key] = SessionData()
-            logger.debug(f"Created new session for user={user_id}, notebook={notebook_id}")
+            logger.debug(f"Created new session for user={user_id}, project={project_id}")
         return self._sessions[key]
 
     def add_message(
         self,
         user_id: str,
-        notebook_id: str,
+        project_id: str,
         role: str,
         content: str
     ) -> None:
@@ -74,12 +74,12 @@ class SessionMemoryService:
 
         Args:
             user_id: User identifier
-            notebook_id: Notebook identifier
+            project_id: Project identifier
             role: Message role ('user' or 'assistant')
             content: Message content
         """
         with self._lock:
-            session = self._get_or_create_session(user_id, notebook_id)
+            session = self._get_or_create_session(user_id, project_id)
             session.messages.append({
                 "role": role,
                 "content": content
@@ -95,7 +95,7 @@ class SessionMemoryService:
     def add_exchange(
         self,
         user_id: str,
-        notebook_id: str,
+        project_id: str,
         user_message: str,
         assistant_message: str
     ) -> None:
@@ -104,17 +104,17 @@ class SessionMemoryService:
 
         Args:
             user_id: User identifier
-            notebook_id: Notebook identifier
+            project_id: Project identifier
             user_message: User's message
             assistant_message: Assistant's response
         """
-        self.add_message(user_id, notebook_id, "user", user_message)
-        self.add_message(user_id, notebook_id, "assistant", assistant_message)
+        self.add_message(user_id, project_id, "user", user_message)
+        self.add_message(user_id, project_id, "assistant", assistant_message)
 
     def get_history(
         self,
         user_id: str,
-        notebook_id: str,
+        project_id: str,
         limit: Optional[int] = None
     ) -> List[ChatMessage]:
         """
@@ -122,14 +122,14 @@ class SessionMemoryService:
 
         Args:
             user_id: User identifier
-            notebook_id: Notebook identifier
+            project_id: Project identifier
             limit: Maximum messages to return (None = all)
 
         Returns:
             List of ChatMessage objects for engine integration
         """
         with self._lock:
-            key = self._get_key(user_id, notebook_id)
+            key = self._get_key(user_id, project_id)
             if key not in self._sessions:
                 return []
 
@@ -151,7 +151,7 @@ class SessionMemoryService:
     def get_history_dicts(
         self,
         user_id: str,
-        notebook_id: str,
+        project_id: str,
         limit: Optional[int] = None
     ) -> List[Dict[str, str]]:
         """
@@ -159,14 +159,14 @@ class SessionMemoryService:
 
         Args:
             user_id: User identifier
-            notebook_id: Notebook identifier
+            project_id: Project identifier
             limit: Maximum messages to return (None = all)
 
         Returns:
             List of {role, content} dicts
         """
         with self._lock:
-            key = self._get_key(user_id, notebook_id)
+            key = self._get_key(user_id, project_id)
             if key not in self._sessions:
                 return []
 
@@ -179,29 +179,29 @@ class SessionMemoryService:
 
             return messages
 
-    def clear_session(self, user_id: str, notebook_id: str) -> bool:
+    def clear_session(self, user_id: str, project_id: str) -> bool:
         """
         Clear all messages for a session.
 
         Args:
             user_id: User identifier
-            notebook_id: Notebook identifier
+            project_id: Project identifier
 
         Returns:
             True if session existed and was cleared
         """
         with self._lock:
-            key = self._get_key(user_id, notebook_id)
+            key = self._get_key(user_id, project_id)
             if key in self._sessions:
                 del self._sessions[key]
-                logger.info(f"Cleared session for user={user_id}, notebook={notebook_id}")
+                logger.info(f"Cleared session for user={user_id}, project={project_id}")
                 return True
             return False
 
-    def get_message_count(self, user_id: str, notebook_id: str) -> int:
+    def get_message_count(self, user_id: str, project_id: str) -> int:
         """Get number of messages in session."""
         with self._lock:
-            key = self._get_key(user_id, notebook_id)
+            key = self._get_key(user_id, project_id)
             if key in self._sessions:
                 return len(self._sessions[key].messages)
             return 0
@@ -209,7 +209,7 @@ class SessionMemoryService:
     def get_context_string(
         self,
         user_id: str,
-        notebook_id: str,
+        project_id: str,
         limit: int = 10
     ) -> str:
         """
@@ -217,13 +217,13 @@ class SessionMemoryService:
 
         Args:
             user_id: User identifier
-            notebook_id: Notebook identifier
+            project_id: Project identifier
             limit: Maximum messages to include
 
         Returns:
             Formatted context string
         """
-        messages = self.get_history_dicts(user_id, notebook_id, limit)
+        messages = self.get_history_dicts(user_id, project_id, limit)
 
         if not messages:
             return ""

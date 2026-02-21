@@ -75,7 +75,7 @@ class QueryLogger:
 
     def log_query(
         self,
-        notebook_id: Optional[str],
+        project_id: Optional[str],
         user_id: str,
         query_text: str,
         model_name: str,
@@ -87,7 +87,7 @@ class QueryLogger:
         Log a query with token usage and timing information.
 
         Args:
-            notebook_id: Notebook identifier
+            project_id: Project identifier
             user_id: User identifier
             query_text: The query text
             model_name: LLM model used
@@ -104,7 +104,7 @@ class QueryLogger:
 
         log_entry = {
             "log_id": log_id,
-            "notebook_id": notebook_id,
+            "project_id": project_id,
             "user_id": user_id,
             "query_text": query_text,
             "model_name": model_name,
@@ -127,7 +127,7 @@ class QueryLogger:
 
                     query_log = QueryLog(
                         log_id=log_id,
-                        notebook_id=notebook_id,
+                        project_id=project_id,
                         user_id=user_id,
                         query_text=query_text,
                         model_name=model_name,
@@ -193,7 +193,7 @@ class QueryLogger:
 
     def get_usage_stats(
         self,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         user_id: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None
@@ -202,7 +202,7 @@ class QueryLogger:
         Get usage statistics with optional filtering.
 
         Args:
-            notebook_id: Filter by notebook ID
+            project_id: Filter by project ID
             user_id: Filter by user ID
             start_date: Filter by start date
             end_date: Filter by end date
@@ -218,8 +218,8 @@ class QueryLogger:
         # Filter logs based on criteria
         filtered_logs = self._in_memory_logs
 
-        if notebook_id:
-            filtered_logs = [log for log in filtered_logs if log["notebook_id"] == notebook_id]
+        if project_id:
+            filtered_logs = [log for log in filtered_logs if log["project_id"] == project_id]
 
         if user_id:
             filtered_logs = [log for log in filtered_logs if log["user_id"] == user_id]

@@ -1,5 +1,5 @@
 """
-Retrieval engine for DBNotebook RAG pipeline.
+Retrieval engine for CodeLoom RAG pipeline.
 
 This module provides the core retrieval logic, including:
 - TwoStageRetriever: Hybrid BM25 + vector retrieval with optional reranking
@@ -28,7 +28,7 @@ from llama_index.core.retrievers import (
 )
 from llama_index.core.callbacks.base import CallbackManager
 from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
-from dbnotebook.core.providers.reranker_provider import get_shared_reranker, is_reranker_enabled
+from codeloom.core.providers.reranker_provider import get_shared_reranker, is_reranker_enabled
 from llama_index.core.schema import BaseNode, NodeWithScore, QueryBundle, IndexNode
 from llama_index.core.llms.llm import LLM
 from llama_index.retrievers.bm25 import BM25Retriever
@@ -50,6 +50,8 @@ class QueryIntent(Enum):
     INSIGHTS = "insights"     # User wants key takeaways/insights
     QUESTIONS = "questions"   # User wants reflection questions
     SEARCH = "search"         # Default: semantic search across all content
+    FLOW = "flow"             # User wants execution flow/call chain info
+    DATA_LIFECYCLE = "data_lifecycle"  # User wants data entity lifecycle info
 
 
 # Intent detection patterns
@@ -82,6 +84,21 @@ INTENT_PATTERNS = {
         r'\bthink\s+(about|deeper)\b',
         r'\bexplore\s+further\b',
         r'\bdiscussion\s+questions?\b',
+    ],
+    QueryIntent.FLOW: [
+        r'\bhow\s+does\s+.*\s+work\b',
+        r'\bexecution\s+(flow|path|chain)\b',
+        r'\bcall\s+(chain|graph|tree|flow)\b',
+        r'\bwhat\s+happens\s+when\b',
+        r'\btrace\b.*\b(call|execution|request)\b',
+        r'\bend[- ]?to[- ]?end\b',
+    ],
+    QueryIntent.DATA_LIFECYCLE: [
+        r'\bdata\s+(flow|lifecycle|journey)\b',
+        r'\bwhere\s+is\s+.*\b(stored|saved|persisted)\b',
+        r'\bhow\s+is\s+.*\b(created|updated|deleted)\b',
+        r'\bentity\s+(lifecycle|flow)\b',
+        r'\bCRUD\b',
     ],
 }
 
@@ -196,13 +213,13 @@ class LocalRetriever:
         self._host = host
         self._index_cache: Optional[VectorStoreIndex] = None
         self._cached_node_count: int = 0
-        self._cached_notebook_id: Optional[str] = None
+        self._cached_project_id: Optional[str] = None
         # Query-time settings (updated per-request, cleared after use)
         self._query_settings: Optional[QueryTimeSettings] = None
 
         # Retriever cache for performance optimization
         # Cache format: {cache_key: (retriever, timestamp)}
-        # Cache key: f"{notebook_id}:{node_count}"
+        # Cache key: f"{project_id}:{node_count}"
         self._retriever_cache: Dict[str, Tuple[BaseRetriever, float]] = {}
         self._retriever_cache_ttl = 300  # 5 minutes TTL
 
@@ -300,7 +317,7 @@ class LocalRetriever:
         query: str,
         nodes: List[BaseNode],
         vector_store=None,
-        notebook_id: Optional[str] = None
+        project_id: Optional[str] = None
     ) -> Tuple[List[BaseNode], QueryIntent]:
         """
         Get nodes filtered/prioritized by detected query intent.
@@ -315,7 +332,7 @@ class LocalRetriever:
             query: The user's query string
             nodes: Base nodes (chunks) available for retrieval
             vector_store: Optional PGVectorStore for fetching transformation nodes
-            notebook_id: Notebook ID for filtering transformation nodes
+            project_id: Project ID for filtering transformation nodes
 
         Returns:
             Tuple of (filtered_nodes, detected_intent)
@@ -331,11 +348,11 @@ class LocalRetriever:
         logger.info(f"Intent-aware retrieval: {intent.value} → prioritizing {node_types}")
 
         # Try to get transformation nodes from vector store
-        if hasattr(vector_store, 'get_nodes_by_notebook_and_types') and notebook_id:
+        if hasattr(vector_store, 'get_nodes_by_project_and_types') and project_id:
             try:
-                # Get transformation nodes for this notebook
-                transformation_nodes = vector_store.get_nodes_by_notebook_and_types(
-                    notebook_id=notebook_id,
+                # Get transformation nodes for this project
+                transformation_nodes = vector_store.get_nodes_by_project_and_types(
+                    project_id=project_id,
                     node_types=node_types[:2]  # Primary types for this intent
                 )
 
@@ -358,37 +375,37 @@ class LocalRetriever:
     def _get_or_create_index(
         self,
         nodes: List[BaseNode],
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         force_rebuild: bool = False
     ) -> VectorStoreIndex:
         """Get cached index or create new one.
 
         Args:
             nodes: Document nodes to index
-            notebook_id: Notebook ID for cache isolation
+            project_id: Project ID for cache isolation
             force_rebuild: Force rebuild even if cached
 
         Returns:
             VectorStoreIndex for the nodes
         """
-        # Check if cache is valid (same notebook and node count)
+        # Check if cache is valid (same project and node count)
         cache_valid = (
             not force_rebuild and
             self._index_cache is not None and
             len(nodes) == self._cached_node_count and
-            notebook_id == self._cached_notebook_id
+            project_id == self._cached_project_id
         )
 
         if cache_valid:
-            logger.debug(f"Using cached vector index for notebook {notebook_id}")
+            logger.debug(f"Using cached vector index for project {project_id}")
             return self._index_cache
 
         # Build new index
         start_time = time.time()
-        logger.debug(f"Creating new vector index with {len(nodes)} nodes for notebook {notebook_id}")
+        logger.debug(f"Creating new vector index with {len(nodes)} nodes for project {project_id}")
         self._index_cache = VectorStoreIndex(nodes=nodes)
         self._cached_node_count = len(nodes)
-        self._cached_notebook_id = notebook_id
+        self._cached_project_id = project_id
         build_time_ms = int((time.time() - start_time) * 1000)
         logger.info(f"Built vector index: {len(nodes)} nodes in {build_time_ms}ms")
         return self._index_cache
@@ -477,13 +494,13 @@ class LocalRetriever:
         offering_filter: Optional[List[str]] = None,
         practice_filter: Optional[List[str]] = None,
         vector_store=None,
-        notebook_id: Optional[str] = None
+        project_id: Optional[str] = None
     ) -> BaseRetriever:
         """
         Get appropriate retriever based on collection size with optional filtering.
 
         Uses caching to avoid rebuilding retrievers for repeat queries.
-        Cache is invalidated after TTL (5 minutes) or when notebook/nodes change.
+        Cache is invalidated after TTL (5 minutes) or when project/nodes change.
 
         Args:
             llm: Language model for query generation
@@ -492,7 +509,7 @@ class LocalRetriever:
             offering_filter: List of offering IDs to filter by (OR operation)
             practice_filter: List of practice names to filter by (OR operation)
             vector_store: Optional LocalVectorStore instance for metadata filtering
-            notebook_id: Notebook ID for cache isolation
+            project_id: Project ID for cache isolation
 
         Returns:
             Configured retriever instance
@@ -500,8 +517,8 @@ class LocalRetriever:
         # Unwrap LLM wrappers (e.g., GroqWithBackoff) for LlamaIndex compatibility
         llm = unwrap_llm(llm)
 
-        # Check retriever cache first (only if notebook_id is valid)
-        cache_key = f"{notebook_id}:{len(nodes)}" if notebook_id else None
+        # Check retriever cache first (only if project_id is valid)
+        cache_key = f"{project_id}:{len(nodes)}" if project_id else None
         current_time = time.time()
 
         if cache_key and cache_key in self._retriever_cache:
@@ -528,17 +545,17 @@ class LocalRetriever:
 
             if filtered_index is None:
                 logger.warning("No nodes matched the filters, using unfiltered retriever")
-                vector_index = self._get_or_create_index(nodes, notebook_id=notebook_id)
+                vector_index = self._get_or_create_index(nodes, project_id=project_id)
             else:
                 vector_index = filtered_index
                 # Update filtered_nodes count for retriever selection
                 if offering_filter or practice_filter:
                     # Estimate filtered node count
-                    # Note: offering_filter contains notebook_id (legacy naming)
+                    # Note: offering_filter contains project_id (legacy naming)
                     if offering_filter:
-                        # Use notebook_id - the current architecture
+                        # Use project_id - the current architecture
                         filtered_nodes = vector_store.get_nodes_by_metadata(
-                            nodes, {"notebook_id": offering_filter[0]}
+                            nodes, {"project_id": offering_filter[0]}
                         )
                     elif practice_filter:
                         filtered_nodes = vector_store.get_nodes_by_metadata(
@@ -561,16 +578,16 @@ class LocalRetriever:
                 # Debug: Log metadata for each node (only at debug level to reduce noise)
                 logger.debug(f"Node: {metadata.get('file_name', 'unknown')}")
 
-                # Check offering filter (by name, id, or notebook_id)
+                # Check offering filter (by name, id, or project_id)
                 if offering_filter:
                     node_offering_id = metadata.get("offering_id")
                     node_offering_name = metadata.get("offering_name")
-                    node_notebook_id = metadata.get("notebook_id")
+                    node_project_id = metadata.get("project_id")
 
-                    # Match against offering_id, offering_name, OR notebook_id
+                    # Match against offering_id, offering_name, OR project_id
                     if (node_offering_id and node_offering_id in offering_filter) or \
                        (node_offering_name and node_offering_name in offering_filter) or \
-                       (node_notebook_id and node_notebook_id in offering_filter):
+                       (node_project_id and node_project_id in offering_filter):
                         logger.debug(f"✓ Node MATCHED: {metadata.get('file_name')}")
                         filtered_nodes.append(node)
                         continue
@@ -593,10 +610,10 @@ class LocalRetriever:
                 f"(offerings={offering_filter}, practices={practice_filter})"
             )
 
-            vector_index = self._get_or_create_index(filtered_nodes, notebook_id=notebook_id)
+            vector_index = self._get_or_create_index(filtered_nodes, project_id=project_id)
         else:
             # No filtering
-            vector_index = self._get_or_create_index(nodes, notebook_id=notebook_id)
+            vector_index = self._get_or_create_index(nodes, project_id=project_id)
 
         # Select retriever strategy based on node count
         node_count = len(filtered_nodes)
@@ -608,13 +625,13 @@ class LocalRetriever:
             logger.debug(f"Using simple retriever for {node_count} nodes")
             retriever = self._get_normal_retriever(vector_index, llm, language)
 
-        # Cache the retriever (only if notebook_id is valid)
+        # Cache the retriever (only if project_id is valid)
         build_time_ms = int((time.time() - start_time) * 1000)
         if cache_key:
             self._retriever_cache[cache_key] = (retriever, current_time)
             logger.info(f"Cached retriever for {cache_key} (built in {build_time_ms}ms)")
         else:
-            logger.debug(f"Skipping retriever cache (no notebook_id) - built in {build_time_ms}ms")
+            logger.debug(f"Skipping retriever cache (no project_id) - built in {build_time_ms}ms")
 
         return retriever
 
@@ -661,7 +678,7 @@ class LocalRetriever:
         """Clear all caches (index cache and retriever cache)."""
         self._index_cache = None
         self._cached_node_count = 0
-        self._cached_notebook_id = None
+        self._cached_project_id = None
         self._retriever_cache.clear()
         logger.debug("Retriever caches cleared (index + retriever)")
 
@@ -671,7 +688,7 @@ class LocalRetriever:
         language: str,
         nodes: List[BaseNode],
         vector_store=None,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         source_ids: Optional[List[str]] = None,
         raptor_config: Optional[RAPTORConfig] = None,
     ) -> BaseRetriever:
@@ -685,7 +702,7 @@ class LocalRetriever:
             language: Language code for prompts
             nodes: Document nodes to index
             vector_store: Vector store with RAPTOR nodes
-            notebook_id: Notebook ID for RAPTOR retrieval
+            project_id: Project ID for RAPTOR retrieval
             source_ids: Source IDs to check for RAPTOR trees
             raptor_config: Optional RAPTOR configuration
 
@@ -693,15 +710,15 @@ class LocalRetriever:
             RAPTOR-aware retriever if available, otherwise standard retriever
         """
         # Check if RAPTOR retrieval is possible
-        if not vector_store or not notebook_id:
-            logger.debug("RAPTOR not available: missing vector_store or notebook_id")
+        if not vector_store or not project_id:
+            logger.debug("RAPTOR not available: missing vector_store or project_id")
             return self.get_retrievers(llm, language, nodes, vector_store=vector_store)
 
         # Check if any sources have RAPTOR trees
         sources_with_raptor = []
         if source_ids:
             for source_id in source_ids:
-                if has_raptor_tree(vector_store, source_id, notebook_id):
+                if has_raptor_tree(vector_store, source_id, project_id):
                     sources_with_raptor.append(source_id)
 
         if not sources_with_raptor:
@@ -717,7 +734,7 @@ class LocalRetriever:
         # Use query-time similarity_top_k for initial retrieval
         return RAPTORRetriever(
             vector_store=vector_store,
-            notebook_id=notebook_id,
+            project_id=project_id,
             source_ids=sources_with_raptor,
             config=raptor_config,
             similarity_top_k=self._get_similarity_top_k(),
@@ -729,7 +746,7 @@ class LocalRetriever:
         language: str,
         nodes: List[BaseNode],
         vector_store=None,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         source_ids: Optional[List[str]] = None,
     ) -> BaseRetriever:
         """Get a retriever that combines RAPTOR and standard retrieval.
@@ -743,7 +760,7 @@ class LocalRetriever:
             language: Language code for prompts
             nodes: Document nodes to index
             vector_store: Vector store with RAPTOR nodes
-            notebook_id: Notebook ID for RAPTOR retrieval
+            project_id: Project ID for RAPTOR retrieval
             source_ids: Source IDs to retrieve from
 
         Returns:
@@ -752,7 +769,7 @@ class LocalRetriever:
         # Unwrap LLM wrappers (e.g., GroqWithBackoff) for LlamaIndex compatibility
         llm = unwrap_llm(llm)
 
-        if not vector_store or not notebook_id:
+        if not vector_store or not project_id:
             return self.get_retrievers(llm, language, nodes, vector_store=vector_store)
 
         # Split sources by RAPTOR availability
@@ -761,7 +778,7 @@ class LocalRetriever:
 
         if source_ids:
             for source_id in source_ids:
-                if has_raptor_tree(vector_store, source_id, notebook_id):
+                if has_raptor_tree(vector_store, source_id, project_id):
                     raptor_sources.append(source_id)
                 else:
                     standard_sources.append(source_id)
@@ -772,7 +789,7 @@ class LocalRetriever:
                 source_id = node.metadata.get("source_id")
                 if source_id and source_id not in seen_sources:
                     seen_sources.add(source_id)
-                    if has_raptor_tree(vector_store, source_id, notebook_id):
+                    if has_raptor_tree(vector_store, source_id, project_id):
                         raptor_sources.append(source_id)
                     else:
                         standard_sources.append(source_id)
@@ -785,7 +802,7 @@ class LocalRetriever:
         if raptor_sources and not standard_sources:
             return RAPTORRetriever(
                 vector_store=vector_store,
-                notebook_id=notebook_id,
+                project_id=project_id,
                 source_ids=raptor_sources,
                 similarity_top_k=self._get_similarity_top_k(),
             )
@@ -805,7 +822,7 @@ class LocalRetriever:
         language: str,
         nodes: List[BaseNode],
         vector_store=None,
-        notebook_id: Optional[str] = None,
+        project_id: Optional[str] = None,
         source_ids: Optional[List[str]] = None,
         use_reranker: bool = True,
         reranker_top_k: Optional[int] = None,
@@ -824,7 +841,7 @@ class LocalRetriever:
             language: Language code for prompts
             nodes: Document nodes to index
             vector_store: Optional vector store for metadata filtering
-            notebook_id: Notebook ID for cache isolation
+            project_id: Project ID for cache isolation
             source_ids: Optional source IDs to filter by
             use_reranker: Whether to apply reranking (default: True)
             reranker_top_k: Override for reranker top_k (default: from config)
@@ -836,7 +853,7 @@ class LocalRetriever:
         llm = unwrap_llm(llm)
 
         # Get or create index
-        vector_index = self._get_or_create_index(nodes, notebook_id=notebook_id)
+        vector_index = self._get_or_create_index(nodes, project_id=project_id)
 
         # Get settings
         similarity_top_k = self._get_similarity_top_k()

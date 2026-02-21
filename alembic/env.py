@@ -24,8 +24,18 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 # Import our database models for autogenerate support
-from dbnotebook.core.db.models import Base
+from codeloom.core.db.models import Base
 target_metadata = Base.metadata
+
+# Map custom UUID type to sa.UUID for autogenerate
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+import sqlalchemy as sa
+
+def render_item(type_, obj, autogen_context):
+    """Custom render for autogenerate to use sa.UUID() instead of module-qualified paths."""
+    if type_ == "type" and isinstance(obj, (PG_UUID, sa.UUID)):
+        return "sa.UUID()"
+    return False
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -51,6 +61,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        render_item=render_item,
     )
 
     with context.begin_transaction():
@@ -72,7 +83,9 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            render_item=render_item,
         )
 
         with context.begin_transaction():

@@ -7,9 +7,9 @@ This package provides:
 - Error handling middleware
 
 Usage:
-    from dbnotebook.api.core import success_response, error_response
-    from dbnotebook.api.core.exceptions import ValidationError
-    from dbnotebook.api.core.decorators import require_api_key
+    from codeloom.api.core import success_response, error_response
+    from codeloom.api.core.exceptions import ValidationError
+    from codeloom.api.core.decorators import require_api_key
 """
 
 from .response import (
@@ -25,7 +25,7 @@ from .response import (
 )
 
 from .exceptions import (
-    DBNotebookError,
+    CodeLoomError,
     ValidationError,
     AuthenticationError,
     AuthorizationError,
@@ -46,7 +46,7 @@ __all__ = [
     "rate_limited",
     "APIResponse",
     # Exceptions
-    "DBNotebookError",
+    "CodeLoomError",
     "ValidationError",
     "AuthenticationError",
     "AuthorizationError",

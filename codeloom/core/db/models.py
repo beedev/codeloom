@@ -1,28 +1,26 @@
 """
-SQLAlchemy ORM Models for Notebook Architecture
+SQLAlchemy ORM Models for CodeLoom
 
-This module defines the database models for the NotebookLM-style document chatbot:
-- Users: User accounts (multi-user ready, start with default user)
-- Notebooks: Document collections with isolated embeddings
-- NotebookSources: Files uploaded to notebooks with metadata
-- Conversations: Persistent conversation history per notebook
-- QueryLogs: Query logging for observability and cost tracking
-- AnalyticsSessions: Analytics dashboard sessions with uploaded Excel data
-- DatabaseConnection: External database connections for Chat with Data
-- SQLChatSession: Chat sessions for SQL queries
-- SQLQueryHistory: History of executed SQL queries
-- SQLFewShotExample: Few-shot examples from Gretel dataset
-- SQLQueryTelemetry: Telemetry data for SQL query observability
-
-RBAC (Role-Based Access Control):
-- Role: Role definitions (admin, user, viewer) with permissions
-- UserRole: Maps users to roles (many-to-many)
-- NotebookAccess: Grants users access to specific notebooks
-- SQLConnectionAccess: Grants users access to specific SQL connections
+Code intelligence and migration platform models:
+- Users: User accounts with auth and RBAC
+- Projects: Codebase projects (replaces projects)
+- CodeFile: Individual files within a project
+- CodeUnit: AST-parsed code units (functions, classes, methods)
+- CodeEdge: ASG relationship edges between code units
+- MigrationPlan: Migration configurations
+- MigrationPhase: Phase tracking and output
+- Conversation: Chat history per project
+- QueryLog: Query observability and cost tracking
+- EmbeddingConfig: Tracks active embedding model
+- Role, UserRole: RBAC core
+- ProjectAccess: Grants users access to specific projects
 """
 
-from sqlalchemy import Column, String, Integer, Text, TIMESTAMP, ForeignKey, BigInteger, Index, TypeDecorator, Boolean
-from sqlalchemy.orm import relationship, declarative_base, backref
+from sqlalchemy import (
+    Column, String, Integer, Float, Text, TIMESTAMP, ForeignKey, BigInteger,
+    Index, TypeDecorator, Boolean, UniqueConstraint,
+)
+from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQL_UUID, JSONB
 import uuid
 from datetime import datetime
@@ -68,114 +66,320 @@ class UUID(TypeDecorator):
                 return uuid.UUID(value)
 
 
+# =============================================================================
+# Core User Model
+# =============================================================================
+
 class User(Base):
-    """User model for multi-user support (start with single default user)"""
+    """User model for multi-user support."""
     __tablename__ = "users"
 
     user_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
     username = Column(String(255), unique=True, nullable=False)
     email = Column(String(255), unique=True)
-    password_hash = Column(String(255), nullable=True)  # bcrypt hashed password
-    api_key = Column(String(255), nullable=True)  # Per-user API key for programmatic access
+    password_hash = Column(String(255), nullable=True)
+    api_key = Column(String(255), nullable=True)
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     last_active = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     # Relationships
-    notebooks = relationship("Notebook", back_populates="user", cascade="all, delete-orphan")
+    projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
     conversations = relationship("Conversation", back_populates="user", cascade="all, delete-orphan")
     query_logs = relationship("QueryLog", back_populates="user", cascade="all, delete-orphan")
-    analytics_sessions = relationship("AnalyticsSession", back_populates="user", cascade="all, delete-orphan")
     user_roles = relationship("UserRole", foreign_keys="[UserRole.user_id]", back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
 
     def __repr__(self):
         return f"<User(user_id={self.user_id}, username='{self.username}')>"
 
 
-class Notebook(Base):
-    """Notebook model - collection of documents with isolated embeddings"""
-    __tablename__ = "notebooks"
+# =============================================================================
+# CodeLoom Project Models
+# =============================================================================
+
+class Project(Base):
+    """Codebase project - replaces projects for code context."""
+    __tablename__ = "projects"
     __table_args__ = (
-        Index('idx_user_notebooks', 'user_id', 'created_at'),
+        Index('idx_user_projects', 'user_id', 'created_at'),
     )
 
-    notebook_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
     name = Column(String(255), nullable=False)
     description = Column(Text)
+    primary_language = Column(String(50))           # python, javascript, java, csharp
+    languages = Column(JSONB, default=list)          # all detected languages
+    file_count = Column(Integer, default=0)
+    total_lines = Column(Integer, default=0)
+    ast_status = Column(String(20), default='pending', nullable=False)   # pending, parsing, complete, error
+    asg_status = Column(String(20), default='pending', nullable=False)
+    source_type = Column(String(20), default='zip')                      # zip, git, local
+    source_url = Column(String(2048), nullable=True)                     # git URL or local path
+    repo_branch = Column(String(255), nullable=True)                     # git branch
+    last_synced_at = Column(TIMESTAMP, nullable=True)                    # last ingestion time
+    deep_analysis_status = Column(String(20), default='none', nullable=False)  # none|pending|running|completed|failed
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    document_count = Column(Integer, default=0, nullable=False)
 
     # Relationships
-    user = relationship("User", back_populates="notebooks")
-    sources = relationship("NotebookSource", back_populates="notebook", cascade="all, delete-orphan")
-    conversations = relationship("Conversation", back_populates="notebook", cascade="all, delete-orphan")
-    query_logs = relationship("QueryLog", back_populates="notebook", cascade="all, delete-orphan")
-    analytics_sessions = relationship("AnalyticsSession", back_populates="notebook")
+    user = relationship("User", back_populates="projects")
+    files = relationship("CodeFile", back_populates="project", cascade="all, delete-orphan")
+    code_units = relationship("CodeUnit", back_populates="project", cascade="all, delete-orphan")
+    code_edges = relationship("CodeEdge", back_populates="project", cascade="all, delete-orphan")
+    conversations = relationship("Conversation", back_populates="project", cascade="all, delete-orphan")
+    query_logs = relationship("QueryLog", back_populates="project", cascade="all, delete-orphan")
+    migration_plans = relationship("MigrationPlan", back_populates="source_project", cascade="all, delete-orphan")
+    deep_analysis_jobs = relationship("DeepAnalysisJob", back_populates="project", cascade="all, delete-orphan")
+    deep_analyses = relationship("DeepAnalysis", back_populates="project", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<Notebook(notebook_id={self.notebook_id}, name='{self.name}', docs={self.document_count})>"
+        return f"<Project(project_id={self.project_id}, name='{self.name}', lang='{self.primary_language}', files={self.file_count})>"
 
 
-class NotebookSource(Base):
-    """Document sources (files) uploaded to notebooks"""
-    __tablename__ = "notebook_sources"
+class CodeFile(Base):
+    """Individual files within a project."""
+    __tablename__ = "code_files"
     __table_args__ = (
-        Index('idx_notebook_sources', 'notebook_id', 'upload_timestamp'),
-        Index('idx_source_hash', 'notebook_id', 'file_hash', unique=True),
+        Index('idx_code_files_project', 'project_id'),
+        UniqueConstraint('project_id', 'file_path', name='uq_project_file_path'),
     )
 
-    source_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    notebook_id = Column(UUID(), ForeignKey("notebooks.notebook_id", ondelete="CASCADE"), nullable=False)
-    file_name = Column(String(500), nullable=False)
-    file_hash = Column(String(64), nullable=False)  # SHA256 for duplicate detection
-    file_size = Column(BigInteger)  # File size in bytes
-    file_type = Column(String(50))  # PDF, DOCX, TXT, etc.
-    chunk_count = Column(Integer)  # Number of chunks/nodes created
-    upload_timestamp = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-    active = Column(Boolean, default=True, nullable=False)  # Toggle for including in RAG retrieval
-
-    # AI Transformations
-    dense_summary = Column(Text, nullable=True)  # 300-500 word comprehensive summary
-    key_insights = Column(JSONB, nullable=True)  # ["insight1", "insight2", ...] - 5-10 actionable insights
-    reflection_questions = Column(JSONB, nullable=True)  # ["q1", "q2", ...] - 5-7 thought-provoking questions
-
-    # Transformation processing status
-    transformation_status = Column(String(20), default='pending', nullable=False)  # pending|processing|completed|failed
-    transformation_error = Column(Text, nullable=True)  # Error message if transformation failed
-    transformed_at = Column(TIMESTAMP, nullable=True)  # When transformation completed
-
-    # RAPTOR (Recursive Abstractive Processing for Tree-Organized Retrieval) status
-    raptor_status = Column(String(20), default='pending', nullable=False)  # pending|building|completed|failed
-    raptor_error = Column(Text, nullable=True)  # Error message if RAPTOR build failed
-    raptor_built_at = Column(TIMESTAMP, nullable=True)  # When RAPTOR tree was built
+    file_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
+    file_path = Column(String(1024), nullable=False)    # relative path within project
+    language = Column(String(50))
+    file_hash = Column(String(64))                      # MD5 for change detection
+    line_count = Column(Integer)
+    size_bytes = Column(Integer)
+    raptor_status = Column(String(20), default='pending')       # pending|building|completed|failed
+    raptor_error = Column(Text, nullable=True)
+    raptor_built_at = Column(TIMESTAMP, nullable=True)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
 
     # Relationships
-    notebook = relationship("Notebook", back_populates="sources")
+    project = relationship("Project", back_populates="files")
+    code_units = relationship("CodeUnit", back_populates="file", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<NotebookSource(source_id={self.source_id}, file_name='{self.file_name}', chunks={self.chunk_count}, active={self.active}, transform_status='{self.transformation_status}')>"
+        return f"<CodeFile(file_id={self.file_id}, path='{self.file_path}', lang='{self.language}')>"
 
+
+class CodeUnit(Base):
+    """AST-parsed code units (functions, classes, methods, modules)."""
+    __tablename__ = "code_units"
+    __table_args__ = (
+        Index('idx_code_units_file', 'file_id'),
+        Index('idx_code_units_project', 'project_id'),
+        Index('idx_code_units_type', 'unit_type'),
+        Index('idx_code_units_name', 'name'),
+    )
+
+    unit_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    file_id = Column(UUID(), ForeignKey("code_files.file_id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
+    unit_type = Column(String(50), nullable=False)          # function, class, method, module, interface
+    name = Column(String(255), nullable=False)
+    qualified_name = Column(String(1024))                   # module.class.method
+    language = Column(String(50))
+    start_line = Column(Integer)
+    end_line = Column(Integer)
+    signature = Column(Text)
+    docstring = Column(Text)
+    source = Column(Text)
+    unit_metadata = Column("metadata", JSONB, default=dict)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    file = relationship("CodeFile", back_populates="code_units")
+    project = relationship("Project", back_populates="code_units")
+    outgoing_edges = relationship("CodeEdge", foreign_keys="[CodeEdge.source_unit_id]", back_populates="source_unit", cascade="all, delete-orphan")
+    incoming_edges = relationship("CodeEdge", foreign_keys="[CodeEdge.target_unit_id]", back_populates="target_unit", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<CodeUnit(unit_id={self.unit_id}, type='{self.unit_type}', name='{self.name}')>"
+
+
+class CodeEdge(Base):
+    """ASG relationship edges between code units."""
+    __tablename__ = "code_edges"
+    __table_args__ = (
+        Index('idx_code_edges_project', 'project_id'),
+        Index('idx_code_edges_source', 'source_unit_id'),
+        Index('idx_code_edges_target', 'target_unit_id'),
+        Index('idx_code_edges_type', 'edge_type'),
+        UniqueConstraint('project_id', 'source_unit_id', 'target_unit_id', 'edge_type', name='uq_code_edge'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
+    source_unit_id = Column(UUID(), ForeignKey("code_units.unit_id", ondelete="CASCADE"), nullable=False)
+    target_unit_id = Column(UUID(), ForeignKey("code_units.unit_id", ondelete="CASCADE"), nullable=False)
+    edge_type = Column(String(50), nullable=False)      # contains, imports, calls, inherits, implements, overrides
+    edge_metadata = Column("metadata", JSONB, default=dict)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    project = relationship("Project", back_populates="code_edges")
+    source_unit = relationship("CodeUnit", foreign_keys=[source_unit_id], back_populates="outgoing_edges")
+    target_unit = relationship("CodeUnit", foreign_keys=[target_unit_id], back_populates="incoming_edges")
+
+    def __repr__(self):
+        return f"<CodeEdge(id={self.id}, type='{self.edge_type}', {self.source_unit_id} -> {self.target_unit_id})>"
+
+
+# =============================================================================
+# Migration Models
+# =============================================================================
+
+class MigrationPlan(Base):
+    """Migration plan configuration."""
+    __tablename__ = "migration_plans"
+    __table_args__ = (
+        Index('idx_migration_plans_user', 'user_id'),
+        Index('idx_migration_plans_project', 'source_project_id'),
+    )
+
+    plan_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
+    source_project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="SET NULL"))
+    target_brief = Column(Text, nullable=False)             # Target architecture description
+    target_stack = Column(JSONB, nullable=False)             # {languages, frameworks, versions}
+    constraints = Column(JSONB, default=dict)                # {timeline, team_size, risk_tolerance}
+    status = Column(String(20), default='draft', nullable=False)  # draft, in_progress, complete, abandoned
+    current_phase = Column(Integer, default=0, nullable=False)
+    discovery_metadata = Column(JSONB, default=dict)         # {clustering_params, sp_analysis, total_mvps}
+    framework_docs = Column(JSONB, nullable=True)            # {framework_name: {content, source, fetched_at}}
+    migration_type = Column(String(30), default='framework_migration', nullable=False)  # version_upgrade, framework_migration, rewrite
+    pipeline_version = Column(Integer, default=2, nullable=False)  # 1=old 6-phase, 2=new 4-phase
+    asset_strategies = Column(JSONB, nullable=True)               # {lang: {strategy, target}} per-file-type migration strategies
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationships
+    user = relationship("User")
+    source_project = relationship("Project", back_populates="migration_plans")
+    phases = relationship("MigrationPhase", back_populates="plan", cascade="all, delete-orphan")
+    mvps = relationship("FunctionalMVP", back_populates="plan", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<MigrationPlan(plan_id={self.plan_id}, status='{self.status}', phase={self.current_phase})>"
+
+
+class MigrationPhase(Base):
+    """Migration phase tracking and output.
+
+    Phase numbering:
+    - Phases 1-2: Plan-level (Discovery, Architecture) — mvp_id is NULL
+    - Phases 3-6: Per-MVP (Analyze, Design, Transform, Test) — mvp_id set
+    """
+    __tablename__ = "migration_phases"
+    __table_args__ = (
+        Index('idx_migration_phases_plan', 'plan_id'),
+        Index('idx_migration_phases_mvp', 'mvp_id'),
+        UniqueConstraint('plan_id', 'phase_number', 'mvp_id', name='uq_plan_phase_mvp'),
+    )
+
+    phase_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    plan_id = Column(UUID(), ForeignKey("migration_plans.plan_id", ondelete="CASCADE"), nullable=False)
+    mvp_id = Column(Integer, ForeignKey("functional_mvps.mvp_id", ondelete="CASCADE"), nullable=True)  # NULL for plan-level phases
+    phase_number = Column(Integer, nullable=False)           # 1-6
+    phase_type = Column(String(50), nullable=False)          # discovery, architecture, analyze, design, transform, testing
+    status = Column(String(20), default='pending', nullable=False)
+    input_summary = Column(Text)
+    output = Column(Text)                                     # LLM-generated output (markdown)
+    output_files = Column(JSONB, default=list)               # Generated code files
+    approved = Column(Boolean, default=False, nullable=False)
+    approved_at = Column(TIMESTAMP)
+    phase_metadata = Column("metadata", JSONB, default=dict)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    plan = relationship("MigrationPlan", back_populates="phases")
+    mvp = relationship("FunctionalMVP", back_populates="phases")
+
+    def __repr__(self):
+        return f"<MigrationPhase(phase_id={self.phase_id}, phase={self.phase_number}, type='{self.phase_type}', mvp={self.mvp_id}, status='{self.status}')>"
+
+
+class FunctionalMVP(Base):
+    """Functional MVP — a vertical slice of related code units for incremental migration.
+
+    Discovered by the clustering algorithm in Phase 1 (Discovery),
+    then refined by the user on the graph UI before per-MVP migration begins.
+    """
+    __tablename__ = "functional_mvps"
+    __table_args__ = (
+        Index('idx_functional_mvps_plan', 'plan_id'),
+    )
+
+    mvp_id = Column(Integer, primary_key=True, autoincrement=True)
+    plan_id = Column(UUID(), ForeignKey("migration_plans.plan_id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(255), nullable=False)               # "User Authentication", "Order Processing"
+    description = Column(Text, nullable=True)
+    status = Column(String(50), default="discovered")        # discovered, refined, in_progress, migrated, verified
+    priority = Column(Integer, default=0)                     # Lower = higher priority (migration order)
+
+    # What's in this MVP
+    file_ids = Column(JSONB, default=list)                   # [file_id, ...]
+    unit_ids = Column(JSONB, default=list)                   # [unit_id, ...] — more granular than files
+
+    # Dependencies on other MVPs
+    depends_on_mvp_ids = Column(JSONB, default=list)         # [mvp_id, ...] — must migrate first
+
+    # Stored procedure references
+    sp_references = Column(JSONB, default=list)              # [{"sp_name": "usp_GetUser", "file_id": "...", "call_sites": [...]}]
+
+    # Clustering metrics
+    metrics = Column(JSONB, default=dict)                    # {"cohesion": 0.85, "coupling": 0.2, "size": 42, "readiness": 0.7}
+
+    # Per-MVP phase tracking
+    current_phase = Column(Integer, default=0)               # 0=not started, 3-6=per-MVP phases
+
+    # On-demand deep analysis (merges old Analyze + Design for V2 pipeline)
+    analysis_output = Column(JSONB, nullable=True)           # Combined register + traceability from Deep Analyze
+    analysis_at = Column(TIMESTAMP, nullable=True)           # When analysis was last run
+
+    # Background analysis status tracking
+    analysis_status = Column(String(20), default="pending")  # pending|analyzing|completed|failed
+    analysis_error = Column(Text, nullable=True)             # Error message if failed
+
+    # Cached UML diagrams (PlantUML + SVG) — behavioral diagrams are LLM-generated
+    diagrams = Column(JSONB, nullable=True)                  # {"sequence": {"puml": "...", "svg": "...", "title": "...", "generated_at": "..."}, ...}
+
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    plan = relationship("MigrationPlan", back_populates="mvps")
+    phases = relationship("MigrationPhase", back_populates="mvp", cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<FunctionalMVP(mvp_id={self.mvp_id}, name='{self.name}', status='{self.status}', priority={self.priority})>"
+
+
+# =============================================================================
+# Chat & Observability (Reused from DBProject, FK updated)
+# =============================================================================
 
 class Conversation(Base):
-    """Persistent conversation history per notebook"""
+    """Persistent conversation history per project."""
     __tablename__ = "conversations"
     __table_args__ = (
-        Index('idx_notebook_conversations', 'notebook_id', 'timestamp'),
+        Index('idx_project_conversations', 'project_id', 'timestamp'),
         Index('idx_user_conversations', 'user_id', 'timestamp'),
         Index('idx_session_conversations', 'session_id', 'timestamp'),
     )
 
     conversation_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    notebook_id = Column(UUID(), ForeignKey("notebooks.notebook_id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
     user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    session_id = Column(UUID(), nullable=True)  # Groups messages into conversations (NULL = UI legacy)
-    role = Column(String(20), nullable=False)  # 'user' or 'assistant'
+    session_id = Column(UUID(), nullable=True)
+    role = Column(String(20), nullable=False)       # 'user' or 'assistant'
     content = Column(Text, nullable=False)
     timestamp = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
 
     # Relationships
-    notebook = relationship("Notebook", back_populates="conversations")
+    project = relationship("Project", back_populates="conversations")
     user = relationship("User", back_populates="conversations")
 
     def __repr__(self):
@@ -183,236 +387,46 @@ class Conversation(Base):
 
 
 class QueryLog(Base):
-    """Query logs for observability and cost tracking"""
+    """Query logs for observability and cost tracking."""
     __tablename__ = "query_logs"
     __table_args__ = (
         Index('idx_query_logs_timestamp', 'timestamp'),
-        Index('idx_query_logs_notebook', 'notebook_id', 'timestamp'),
+        Index('idx_query_logs_project', 'project_id', 'timestamp'),
         Index('idx_query_logs_user', 'user_id', 'timestamp'),
     )
 
     log_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    notebook_id = Column(UUID(), ForeignKey("notebooks.notebook_id", ondelete="SET NULL"))
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="SET NULL"))
     user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
     query_text = Column(Text, nullable=False)
     model_name = Column(String(100))
     prompt_tokens = Column(Integer)
     completion_tokens = Column(Integer)
     total_tokens = Column(Integer)
-    response_time_ms = Column(Integer)  # Response time in milliseconds
+    response_time_ms = Column(Integer)
     timestamp = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
 
     # Relationships
-    notebook = relationship("Notebook", back_populates="query_logs")
+    project = relationship("Project", back_populates="query_logs")
     user = relationship("User", back_populates="query_logs")
 
     def __repr__(self):
         return f"<QueryLog(log_id={self.log_id}, model='{self.model_name}', tokens={self.total_tokens}, time={self.response_time_ms}ms)>"
 
 
-class GeneratedContent(Base):
-    """Generated content from Content Studio (infographics, mind maps, etc.)"""
-    __tablename__ = "generated_content"
-    __table_args__ = (
-        Index('idx_generated_content_user', 'user_id', 'created_at'),
-        Index('idx_generated_content_notebook', 'source_notebook_id', 'created_at'),
-        Index('idx_generated_content_type', 'content_type', 'created_at'),
-    )
-
-    content_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    source_notebook_id = Column(UUID(), ForeignKey("notebooks.notebook_id", ondelete="SET NULL"), nullable=True)
-    content_type = Column(String(50), nullable=False)  # 'infographic', 'mindmap', 'summary', etc.
-    title = Column(String(500))
-    prompt_used = Column(Text)  # The prompt used to generate the content
-    file_path = Column(String(1000))  # Path to the generated file (e.g., outputs/studio/xxx.png)
-    thumbnail_path = Column(String(1000))  # Optional thumbnail for gallery preview
-    content_metadata = Column(JSONB)  # Additional generation params, model used, etc.
-    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-
-    # Relationships
-    user = relationship("User", backref="generated_content")
-    source_notebook = relationship("Notebook", backref="generated_content")
-
-    def __repr__(self):
-        return f"<GeneratedContent(content_id={self.content_id}, type='{self.content_type}', title='{self.title}')>"
-
-
 class EmbeddingConfig(Base):
-    """Tracks active embedding model to prevent mixing incompatible embeddings.
-
-    CRITICAL: Different embedding models produce incompatible vector spaces even with
-    the same dimensions. This table ensures only one model is used across all documents.
-    Switching models requires re-embedding all documents.
-    """
+    """Tracks active embedding model to prevent mixing incompatible embeddings."""
     __tablename__ = "embedding_config"
 
     id = Column(Integer, primary_key=True)
-    model_name = Column(String(255), nullable=False)  # e.g., "text-embedding-3-small", "nomic-embed-text-v1.5"
-    provider = Column(String(50), nullable=False)  # e.g., "openai", "huggingface"
-    dimensions = Column(Integer, nullable=False)  # Vector dimensions (768, 1536, etc.)
+    model_name = Column(String(255), nullable=False)
+    provider = Column(String(50), nullable=False)
+    dimensions = Column(Integer, nullable=False)
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     def __repr__(self):
         return f"<EmbeddingConfig(provider='{self.provider}', model='{self.model_name}', dim={self.dimensions})>"
-
-
-class AnalyticsSession(Base):
-    """Analytics dashboard session with uploaded Excel data."""
-    __tablename__ = "analytics_sessions"
-    __table_args__ = (
-        Index("idx_analytics_sessions_user", "user_id"),
-        Index("idx_analytics_sessions_notebook", "notebook_id"),
-        Index("idx_analytics_sessions_created", "created_at"),
-    )
-
-    session_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    notebook_id = Column(UUID(), ForeignKey("notebooks.notebook_id", ondelete="SET NULL"), nullable=True)
-    filename = Column(String(255), nullable=False)
-    file_hash = Column(String(64), nullable=False)  # MD5 for deduplication
-    row_count = Column(Integer)
-    column_count = Column(Integer)
-    column_info = Column(JSONB)  # Column names, types, stats
-    data_json = Column(JSONB)  # Parsed Excel data (for smaller datasets)
-    profile_report_path = Column(String(500))  # Path to ydata HTML report
-    dashboard_config = Column(JSONB)  # AI-generated dashboard configuration
-    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-
-    # Relationships
-    user = relationship("User", back_populates="analytics_sessions")
-    notebook = relationship("Notebook", back_populates="analytics_sessions")
-
-    def __repr__(self):
-        return f"<AnalyticsSession(session_id={self.session_id}, filename='{self.filename}', rows={self.row_count}, cols={self.column_count})>"
-
-
-# =============================================================================
-# SQL Chat (Chat with Data) Models
-# =============================================================================
-
-class DatabaseConnection(Base):
-    """External database connections for Chat with Data feature."""
-    __tablename__ = "database_connections"
-    __table_args__ = (
-        Index("idx_db_connections_user", "user_id"),
-    )
-
-    id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    user_id = Column(String(100), nullable=False)
-    name = Column(String(200), nullable=False)
-    db_type = Column(String(20), nullable=False)  # postgresql, mysql, sqlite
-    host = Column(String(255), nullable=True)
-    port = Column(Integer, nullable=True)
-    database_name = Column(String(200), nullable=True)
-    username = Column(String(100), nullable=True)
-    password_encrypted = Column(Text, nullable=True)  # Fernet encrypted
-    masking_policy = Column(JSONB, nullable=True)  # {mask_columns, redact_columns, hash_columns}
-    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-    last_used_at = Column(TIMESTAMP, nullable=True)
-
-    # Relationships
-    sessions = relationship("SQLChatSession", back_populates="connection", cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<DatabaseConnection(id={self.id}, name='{self.name}', type='{self.db_type}')>"
-
-
-class SQLChatSession(Base):
-    """Chat sessions for SQL queries against external databases."""
-    __tablename__ = "sql_chat_sessions"
-    __table_args__ = (
-        Index("idx_sql_sessions_user", "user_id"),
-        Index("idx_sql_sessions_connection", "connection_id"),
-    )
-
-    id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    user_id = Column(String(100), nullable=False)
-    connection_id = Column(UUID(), ForeignKey("database_connections.id", ondelete="CASCADE"), nullable=False)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-    last_query_at = Column(TIMESTAMP, nullable=True)
-
-    # Relationships
-    connection = relationship("DatabaseConnection", back_populates="sessions")
-    query_history = relationship("SQLQueryHistory", back_populates="session", cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<SQLChatSession(id={self.id}, connection_id={self.connection_id})>"
-
-
-class SQLQueryHistory(Base):
-    """History of executed SQL queries in chat sessions."""
-    __tablename__ = "sql_query_history"
-    __table_args__ = (
-        Index("idx_sql_history_session", "session_id"),
-        Index("idx_sql_history_created", "created_at"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(UUID(), ForeignKey("sql_chat_sessions.id", ondelete="CASCADE"), nullable=False)
-    user_query = Column(Text, nullable=False)
-    generated_sql = Column(Text, nullable=False)
-    execution_time_ms = Column(Integer, nullable=True)
-    row_count = Column(Integer, nullable=True)
-    success = Column(Boolean, default=True, nullable=False)
-    error_message = Column(Text, nullable=True)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-
-    # Relationships
-    session = relationship("SQLChatSession", back_populates="query_history")
-
-    def __repr__(self):
-        return f"<SQLQueryHistory(id={self.id}, success={self.success}, rows={self.row_count})>"
-
-
-class SQLFewShotExample(Base):
-    """Few-shot examples from Gretel dataset for Text-to-SQL learning."""
-    __tablename__ = "sql_few_shot_examples"
-    __table_args__ = (
-        Index("idx_few_shot_domain", "domain"),
-        Index("idx_few_shot_complexity", "complexity"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    sql_prompt = Column(Text, nullable=False)
-    sql_query = Column(Text, nullable=False)
-    sql_context = Column(Text, nullable=True)
-    complexity = Column(String(50), nullable=True)  # basic SQL, joins, aggregation, subqueries, window functions
-    domain = Column(String(100), nullable=True)  # finance, healthcare, retail, etc.
-    # Note: embedding column is added via migration (vector type not available in SQLAlchemy)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-
-    def __repr__(self):
-        return f"<SQLFewShotExample(id={self.id}, domain='{self.domain}', complexity='{self.complexity}')>"
-
-
-class SQLQueryTelemetry(Base):
-    """Telemetry data for SQL query execution observability."""
-    __tablename__ = "sql_query_telemetry"
-    __table_args__ = (
-        Index("idx_telemetry_session", "session_id"),
-        Index("idx_telemetry_created", "created_at"),
-        Index("idx_telemetry_intent", "intent"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    session_id = Column(UUID(), nullable=False)
-    user_query = Column(Text, nullable=True)
-    generated_sql = Column(Text, nullable=True)
-    intent = Column(String(50), nullable=True)  # lookup, aggregation, comparison, trend, top_k
-    confidence_score = Column(Integer, nullable=True)  # Stored as int (score * 100)
-    retry_count = Column(Integer, default=0, nullable=True)
-    execution_time_ms = Column(Integer, nullable=True)
-    row_count = Column(Integer, nullable=True)
-    cost_estimate = Column(Integer, nullable=True)  # Stored as int (cost * 100)
-    success = Column(Boolean, default=True, nullable=False)
-    error_message = Column(Text, nullable=True)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-
-    def __repr__(self):
-        return f"<SQLQueryTelemetry(id={self.id}, intent='{self.intent}', success={self.success})>"
 
 
 # =============================================================================
@@ -424,15 +438,15 @@ class Role(Base):
 
     Built-in roles:
     - admin: Full access to all features and user management
-    - user: Standard access to own notebooks and assigned resources
-    - viewer: Read-only access to assigned notebooks
+    - user: Standard access to own projects and assigned resources
+    - viewer: Read-only access to assigned projects
     """
     __tablename__ = "roles"
 
     role_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    name = Column(String(50), unique=True, nullable=False)  # admin, user, viewer
+    name = Column(String(50), unique=True, nullable=False)
     description = Column(String(255), nullable=True)
-    permissions = Column(JSONB, nullable=False, default=list)  # List of permission strings
+    permissions = Column(JSONB, nullable=False, default=list)
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -465,135 +479,154 @@ class UserRole(Base):
         return f"<UserRole(user_id={self.user_id}, role_id={self.role_id})>"
 
 
-class NotebookAccess(Base):
-    """Grants users access to specific notebooks.
+class ProjectAccess(Base):
+    """Grants users access to specific projects.
 
     Access levels:
     - owner: Full control including delete and share
-    - editor: Can edit documents and chat
-    - viewer: Read-only access, can view documents and chat history
+    - editor: Can edit code and chat
+    - viewer: Read-only access
     """
-    __tablename__ = "notebook_access"
+    __tablename__ = "project_access"
     __table_args__ = (
-        Index("idx_notebook_access_notebook", "notebook_id"),
-        Index("idx_notebook_access_user", "user_id"),
+        Index("idx_project_access_project", "project_id"),
+        Index("idx_project_access_user", "user_id"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    notebook_id = Column(UUID(), ForeignKey("notebooks.notebook_id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
     user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    access_level = Column(String(20), nullable=False, default="viewer")  # owner, editor, viewer
+    access_level = Column(String(20), nullable=False, default="viewer")
     granted_by = Column(UUID(), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True)
     granted_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
 
     # Relationships
-    notebook = relationship("Notebook", backref="access_grants")
-    user = relationship("User", foreign_keys=[user_id], backref="notebook_access")
+    project = relationship("Project", backref="access_grants")
+    user = relationship("User", foreign_keys=[user_id], backref="project_access")
     granted_by_user = relationship("User", foreign_keys=[granted_by])
 
     def __repr__(self):
-        return f"<NotebookAccess(notebook_id={self.notebook_id}, user_id={self.user_id}, level='{self.access_level}')>"
-
-
-class SQLConnectionAccess(Base):
-    """Grants users access to specific SQL connections.
-
-    Access levels:
-    - owner: Full control including delete and share
-    - user: Can query the database
-    - viewer: Read-only access to query history
-    """
-    __tablename__ = "sql_connection_access"
-    __table_args__ = (
-        Index("idx_sql_access_connection", "connection_id"),
-        Index("idx_sql_access_user", "user_id"),
-    )
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    connection_id = Column(UUID(), ForeignKey("database_connections.id", ondelete="CASCADE"), nullable=False)
-    user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    access_level = Column(String(20), nullable=False, default="user")  # owner, user, viewer
-    granted_by = Column(UUID(), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True)
-    granted_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-
-    # Relationships
-    connection = relationship("DatabaseConnection", backref="access_grants")
-    user = relationship("User", foreign_keys=[user_id], backref="sql_connection_access")
-    granted_by_user = relationship("User", foreign_keys=[granted_by])
-
-    def __repr__(self):
-        return f"<SQLConnectionAccess(connection_id={self.connection_id}, user_id={self.user_id}, level='{self.access_level}')>"
+        return f"<ProjectAccess(project_id={self.project_id}, user_id={self.user_id}, level='{self.access_level}')>"
 
 
 # =============================================================================
-# Quiz Models
+# Deep Understanding Models
 # =============================================================================
 
-class Quiz(Base):
-    """Quiz configuration created by admin/user.
+class DeepAnalysisJob(Base):
+    """Job queue for deep understanding analysis.
 
-    Quizzes are generated from notebook content and can be shared via link.
-    Supports adaptive difficulty that adjusts based on user performance.
-    Supports extended questions (beyond notebook content) and code-based questions.
+    Each row represents one analysis run for a project.
+    Workers claim jobs via FOR UPDATE SKIP LOCKED with worker_id lease ownership.
+    Exponential backoff via next_attempt_at column.
     """
-    __tablename__ = "quizzes"
+    __tablename__ = "deep_analysis_jobs"
     __table_args__ = (
-        Index("idx_quizzes_user", "user_id"),
-        Index("idx_quizzes_notebook", "notebook_id"),
-        Index("idx_quizzes_created", "created_at"),
+        Index('idx_deep_jobs_project_status', 'project_id', 'status'),
+        Index('idx_deep_jobs_status_created', 'status', 'created_at'),
     )
 
-    id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    notebook_id = Column(UUID(), ForeignKey("notebooks.notebook_id", ondelete="CASCADE"), nullable=False)
+    job_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
     user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
-    title = Column(String(255), nullable=False)
-    num_questions = Column(Integer, default=10, nullable=False)
-    difficulty_mode = Column(String(20), default='adaptive', nullable=False)  # adaptive|easy|medium|hard
-    time_limit_minutes = Column(Integer, nullable=True)  # Optional time limit
-    llm_model = Column(String(100), nullable=True)  # Optional LLM model for question generation
-    is_active = Column(Boolean, default=True, nullable=False)
+    status = Column(String(20), default='pending', nullable=False)  # pending|running|completed|failed
+    worker_id = Column(String(100), nullable=True)
+    retry_count = Column(Integer, default=0, nullable=False)
+    next_attempt_at = Column(TIMESTAMP, nullable=True)
+
+    # Progress tracking
+    total_entry_points = Column(Integer, nullable=True)
+    completed_entry_points = Column(Integer, default=0, nullable=False)
+
+    # Timestamps
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
-
-    # Extended question generation options
-    question_source = Column(String(20), default='notebook_only', nullable=False)  # notebook_only|extended
-    include_code_questions = Column(Boolean, default=False, nullable=False)  # Enable code-based questions
-
-    # Relationships - passive_deletes=True lets database CASCADE handle deletion
-    notebook = relationship("Notebook", backref=backref("quizzes", passive_deletes=True))
-    creator = relationship("User", backref=backref("created_quizzes", passive_deletes=True))
-    attempts = relationship("QuizAttempt", back_populates="quiz", cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<Quiz(id={self.id}, title='{self.title}', questions={self.num_questions}, mode='{self.difficulty_mode}')>"
-
-
-class QuizAttempt(Base):
-    """Individual quiz attempt by a test-taker.
-
-    Tracks progress through the quiz, answers given, and final score.
-    For adaptive quizzes, current_difficulty adjusts based on performance.
-    """
-    __tablename__ = "quiz_attempts"
-    __table_args__ = (
-        Index("idx_quiz_attempts_quiz", "quiz_id"),
-        Index("idx_quiz_attempts_started", "started_at"),
-        Index("idx_quiz_attempts_email", "taker_email"),
-    )
-
-    id = Column(UUID(), primary_key=True, default=uuid.uuid4)
-    quiz_id = Column(UUID(), ForeignKey("quizzes.id", ondelete="CASCADE"), nullable=False)
-    taker_name = Column(String(255), nullable=False)
-    taker_email = Column(String(255), nullable=True)  # Optional email for session resumption
-    score = Column(Integer, default=0, nullable=False)
-    total_questions = Column(Integer, nullable=False)
-    answers_json = Column(JSONB, nullable=True)  # [{question, user_answer, correct_answer, correct, topic, explanation}]
-    started_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+    started_at = Column(TIMESTAMP, nullable=True)
+    heartbeat_at = Column(TIMESTAMP, nullable=True)
     completed_at = Column(TIMESTAMP, nullable=True)
-    current_question = Column(Integer, default=0, nullable=False)  # 0-indexed question number
-    current_difficulty = Column(Integer, default=2, nullable=False)  # 1=easy, 2=medium, 3=hard
+
+    # Error details (JSON array of {entry_point, error})
+    error_details = Column(JSONB, nullable=True)
 
     # Relationships
-    quiz = relationship("Quiz", back_populates="attempts")
+    project = relationship("Project", back_populates="deep_analysis_jobs")
+    analyses = relationship("DeepAnalysis", back_populates="job", cascade="all, delete-orphan")
 
     def __repr__(self):
-        return f"<QuizAttempt(id={self.id}, taker='{self.taker_name}', score={self.score}/{self.total_questions})>"
+        return f"<DeepAnalysisJob(job_id={self.job_id}, status='{self.status}', project={self.project_id})>"
+
+
+class DeepAnalysis(Base):
+    """Analysis result for a single entry point.
+
+    Stores the complete DeepContextBundle as JSON plus a
+    human-readable narrative for chat injection.
+    Upsert on (project_id, entry_unit_id, schema_version).
+    """
+    __tablename__ = "deep_analyses"
+    __table_args__ = (
+        UniqueConstraint('project_id', 'entry_unit_id', 'schema_version',
+                         name='uq_deep_analysis_entry'),
+        Index('idx_deep_analyses_project', 'project_id'),
+        Index('idx_deep_analyses_entry', 'entry_unit_id'),
+    )
+
+    analysis_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    job_id = Column(UUID(), ForeignKey("deep_analysis_jobs.job_id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
+    entry_unit_id = Column(UUID(), ForeignKey("code_units.unit_id", ondelete="CASCADE"), nullable=False)
+
+    entry_type = Column(String(50), nullable=False)     # EntryPointType value
+    tier = Column(String(20), nullable=False)            # AnalysisTier value
+    total_units = Column(Integer, nullable=False)
+    total_tokens = Column(Integer, nullable=False)
+    confidence_score = Column(Float, nullable=True)      # 0..1 extraction confidence
+    coverage_pct = Column(Float, nullable=True)          # 0..100 chain coverage estimate
+
+    # Full structured analysis output (DeepContextBundle shape)
+    result_json = Column(JSONB, nullable=False)
+    # Human-readable narrative (injected into chat context)
+    narrative = Column(Text, nullable=True)
+
+    # Versioning
+    schema_version = Column(Integer, default=1, nullable=False)
+    prompt_version = Column(String(20), default='v1.0', nullable=False)
+
+    analyzed_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    job = relationship("DeepAnalysisJob", back_populates="analyses")
+    project = relationship("Project", back_populates="deep_analyses")
+    entry_unit = relationship("CodeUnit")
+    analysis_units = relationship("AnalysisUnit", back_populates="analysis",
+                                  cascade="all, delete-orphan")
+
+    def __repr__(self):
+        return f"<DeepAnalysis(analysis_id={self.analysis_id}, entry={self.entry_unit_id}, tier='{self.tier}')>"
+
+
+class AnalysisUnit(Base):
+    """Junction table linking analyses to the code units they cover.
+
+    Enables:
+    1. "What analyses cover this unit?" (for chat enrichment)
+    2. "What units does this analysis cover?" (for coverage calculation)
+    """
+    __tablename__ = "analysis_units"
+    __table_args__ = (
+        Index('idx_analysis_units_project_unit', 'project_id', 'unit_id'),
+    )
+
+    analysis_id = Column(UUID(), ForeignKey("deep_analyses.analysis_id", ondelete="CASCADE"),
+                         primary_key=True, nullable=False)
+    unit_id = Column(UUID(), ForeignKey("code_units.unit_id", ondelete="CASCADE"),
+                     primary_key=True, nullable=False)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
+    min_depth = Column(Integer, nullable=False, default=0)
+    path_count = Column(Integer, nullable=False, default=1)
+
+    # Relationships
+    analysis = relationship("DeepAnalysis", back_populates="analysis_units")
+    unit = relationship("CodeUnit")
+
+    def __repr__(self):
+        return f"<AnalysisUnit(analysis={self.analysis_id}, unit={self.unit_id}, depth={self.min_depth})>"
