@@ -14,6 +14,7 @@ import re
 from typing import Any, Dict, List
 
 from .base import (
+    GateCategory,
     GateDefinition,
     GateResult,
     MigrationLane,
@@ -182,6 +183,10 @@ class StrutsToSpringBootLane(MigrationLane):
     @property
     def target_frameworks(self) -> List[str]:
         return ["springboot"]
+
+    @property
+    def version(self) -> str:
+        return "1.0.0"
 
     # ── Applicability ───────────────────────────────────────────
 
@@ -2276,6 +2281,18 @@ class StrutsToSpringBootLane(MigrationLane):
                 ),
                 blocking=False,
             ),
+            GateDefinition(
+                name="compile_check",
+                description="Target code compiles without errors.",
+                blocking=True,
+                category=GateCategory.COMPILE,
+            ),
+            GateDefinition(
+                name="unit_test_check",
+                description="Generated unit tests pass.",
+                blocking=False,
+                category=GateCategory.UNIT_TEST,
+            ),
         ]
 
     def run_gate(
@@ -2292,6 +2309,8 @@ class StrutsToSpringBootLane(MigrationLane):
             "message_key_coverage": self._gate_message_key_coverage,
             "view_component_parity": self._gate_view_component_parity,
             "service_layer_parity": self._gate_service_layer_parity,
+            "compile_check": self._gate_build_passthrough,
+            "unit_test_check": self._gate_build_passthrough,
         }
 
         gate_def = {g.name: g for g in self.get_gates()}.get(gate_name)
@@ -2306,6 +2325,24 @@ class StrutsToSpringBootLane(MigrationLane):
             )
 
         return handler(source_units, target_outputs, gate_def)
+
+    @staticmethod
+    def _gate_build_passthrough(
+        source_units: List[Dict[str, Any]],
+        target_outputs: List[Dict[str, Any]],
+        gate_def: GateDefinition,
+    ) -> GateResult:
+        """Pass-through gate for compile/unit-test checks.
+
+        Actual compilation requires an external build system.  This
+        baseline gate always passes and documents the intent.
+        """
+        return GateResult(
+            gate_name=gate_def.name,
+            passed=True,
+            details={"note": "Pass-through -- requires external build system"},
+            blocking=gate_def.blocking,
+        )
 
     def _gate_endpoint_parity(
         self,

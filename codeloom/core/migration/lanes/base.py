@@ -8,7 +8,38 @@ domain knowledge for a specific migration path.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+
+# ── Gate Categories ──────────────────────────────────────────────────
+
+
+class GateCategory(str, Enum):
+    """Categories for quality gates.
+
+    Every lane must provide at least ``COMPILE`` and ``UNIT_TEST`` gates
+    (even if they return pass-through results when no external build
+    system is available).
+    """
+
+    PARITY = "parity"
+    """Structural migration completeness (e.g. endpoint parity)."""
+
+    COMPILE = "compile"
+    """Target code compiles / builds without errors."""
+
+    UNIT_TEST = "unit_test"
+    """Generated unit tests pass."""
+
+    INTEGRATION = "integration"
+    """Integration test validation."""
+
+    CONTRACT = "contract"
+    """API/interface contract verification."""
+
+    REGRESSION = "regression"
+    """Regression detection against known baselines."""
 
 
 # ── Dataclasses ──────────────────────────────────────────────────────
@@ -65,6 +96,9 @@ class GateDefinition:
     blocking: bool = True
     """When ``True`` the migration cannot proceed on failure."""
 
+    category: GateCategory = GateCategory.PARITY
+    """Gate category for taxonomy and reporting."""
+
 
 @dataclass
 class GateResult:
@@ -120,6 +154,33 @@ class MigrationLane(ABC):
         """Framework identifiers this lane migrates TO,
         e.g. ``["springboot"]``."""
         ...
+
+    @property
+    @abstractmethod
+    def version(self) -> str:
+        """Semantic version of this lane, e.g. ``"1.0.0"``.
+
+        Recorded per-run in ``MigrationPlan.lane_versions`` for
+        reproducibility.  Bump when transform rules or gate logic change.
+        """
+        ...
+
+    # ── Lifecycle ─────────────────────────────────────────────────
+
+    @property
+    def deprecated(self) -> bool:
+        """When ``True``, :meth:`LaneRegistry.detect_lane` skips this lane."""
+        return False
+
+    @property
+    def min_source_version(self) -> Optional[str]:
+        """Minimum source framework version supported (inclusive)."""
+        return None
+
+    @property
+    def max_source_version(self) -> Optional[str]:
+        """Maximum source framework version supported (inclusive)."""
+        return None
 
     @abstractmethod
     def detect_applicability(
@@ -219,3 +280,47 @@ class MigrationLane(ABC):
                 {"struts-config.xml": {"strategy": "convert", "priority": "high"}}
         """
         ...
+
+
+# ── Confidence Model ─────────────────────────────────────────────────
+
+CONFIDENCE_HIGH = 0.90
+"""Transforms at or above this score are flagged as high-confidence."""
+
+CONFIDENCE_STANDARD = 0.75
+"""Transforms between STANDARD and HIGH require normal review."""
+
+
+def confidence_tier(score: float) -> str:
+    """Map a confidence score to a human-readable tier label.
+
+    Returns:
+        ``"high"`` (>= 0.90), ``"standard"`` (>= 0.75), or ``"low"``.
+    """
+    if score >= CONFIDENCE_HIGH:
+        return "high"
+    if score >= CONFIDENCE_STANDARD:
+        return "standard"
+    return "low"
+
+
+def aggregate_confidence(
+    transform_results: List[Dict[str, Any]],
+    weights: Optional[Dict[str, float]] = None,
+) -> float:
+    """Compute weighted-average confidence from transform result dicts.
+
+    Each dict must have a ``"confidence"`` key (float).  The optional
+    *weights* dict maps ``rule_name`` to a weight (default 1.0).
+
+    Returns 0.0 when *transform_results* is empty.
+    """
+    if not transform_results:
+        return 0.0
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for r in transform_results:
+        w = (weights or {}).get(r.get("rule_name", ""), 1.0)
+        weighted_sum += r["confidence"] * w
+        total_weight += w
+    return weighted_sum / total_weight if total_weight > 0 else 0.0

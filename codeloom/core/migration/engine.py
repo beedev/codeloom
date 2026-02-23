@@ -18,8 +18,9 @@ import io
 import logging
 import os
 import re
+import time
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID, uuid4
 
@@ -27,6 +28,7 @@ from ..db import DatabaseManager
 from ..db.models import CodeFile, CodeUnit, FunctionalMVP, MigrationPlan, MigrationPhase, Project
 from .context_builder import MigrationContextBuilder
 from .doc_enricher import DocEnricher
+from .lanes.base import aggregate_confidence, confidence_tier
 from .mvp_clusterer import MvpClusterer, _MAX_CLUSTER_SIZE
 from .phases import execute_phase, execute_mvp_analysis, get_phase_type, _describe_mvp, _evaluate_mvp_coherence
 
@@ -57,6 +59,11 @@ def _plan_phases(v: int) -> tuple:
 
 def _mvp_phases(v: int) -> tuple:
     return MVP_PHASES_V2 if v == 2 else MVP_PHASES_V1
+
+
+# ── Enterprise reliability constants ─────────────────────────────
+MAX_RETRIES = 3
+BASE_BACKOFF_SECONDS = 5
 
 
 class MigrationEngine:
@@ -745,6 +752,60 @@ class MigrationEngine:
             if lane:
                 lanes.append(lane)
         return lanes
+
+    @staticmethod
+    def _run_gates(
+        active_lanes: list,
+        unit_dicts: List[Dict],
+        transform_results: List[Dict],
+        context: Dict[str, Any],
+    ) -> List[Dict]:
+        """Run all quality gates from all active lanes.
+
+        Args:
+            active_lanes: Lane instances to check.
+            unit_dicts: Source CodeUnit dicts (for parity checks).
+            transform_results: Deterministic transform output dicts.
+            context: Migration context (target_stack, etc.).
+
+        Returns:
+            List of gate result dicts with keys: gate_name, lane_id,
+            passed, blocking, category, details.
+        """
+        results = []
+        for lane in active_lanes:
+            for gate_def in lane.get_gates():
+                try:
+                    gr = lane.run_gate(
+                        gate_def.name,
+                        unit_dicts,
+                        transform_results,
+                        context,
+                    )
+                    results.append({
+                        "gate_name": gate_def.name,
+                        "lane_id": lane.lane_id,
+                        "passed": gr.passed,
+                        "blocking": gate_def.blocking,
+                        "category": gate_def.category.value,
+                        "details": gr.details,
+                    })
+                except Exception:
+                    logger.warning(
+                        "Gate %s from lane %s failed",
+                        gate_def.name,
+                        lane.lane_id,
+                        exc_info=True,
+                    )
+                    results.append({
+                        "gate_name": gate_def.name,
+                        "lane_id": lane.lane_id,
+                        "passed": False,
+                        "blocking": gate_def.blocking,
+                        "category": gate_def.category.value,
+                        "details": {"error": "Gate execution failed"},
+                    })
+        return results
 
     # ── Discovery ──────────────────────────────────────────────────────
 
@@ -1479,7 +1540,9 @@ class MigrationEngine:
         """Execute a migration phase.
 
         Version-aware: reads plan.pipeline_version to determine context_type
-        and enrichment triggers.
+        and enrichment triggers.  Enterprise features: run_id tracking,
+        execution metrics, quality gates, confidence aggregation, retry
+        with exponential backoff, and transform checkpoints.
 
         V1: Phase 1=Discovery, 2=Architecture, 3-6=per-MVP
         V2: Phase 1=Architecture, 2=Discovery, 3-4=per-MVP
@@ -1516,10 +1579,30 @@ class MigrationEngine:
                     f"{'for MVP ' + str(mvp_id) if mvp_id else '(plan-level)'}"
                 )
 
-            # Set status to running
+            # ── Enterprise: check terminal failure (max retries exhausted) ──
+            existing_meta = dict(phase.phase_metadata or {})
+            if existing_meta.get("terminal_failure"):
+                raise ValueError(
+                    f"Phase {phase_number} has exhausted all retries "
+                    f"({MAX_RETRIES}). Reject and re-execute to reset."
+                )
+
+            # ── Enterprise: assign run_id for this execution attempt ──
+            run_id = uuid4()
+            phase.run_id = run_id
             phase.status = "running"
             plan.status = "in_progress"
             plan.current_phase = phase_number
+
+            # ── Enterprise: record lane versions on first execution ──
+            active_lanes_snapshot = self._get_active_lanes(
+                {"asset_strategies": plan.asset_strategies or {},
+                 "migration_lane_id": plan.migration_lane_id}
+            )
+            if plan.lane_versions is None and active_lanes_snapshot:
+                plan.lane_versions = {
+                    lane.lane_id: lane.version for lane in active_lanes_snapshot
+                }
 
             # Collect previous phase outputs for context chaining
             previous_outputs = self._collect_previous_outputs(session, pid, phase_number, mvp_id)
@@ -1576,6 +1659,10 @@ class MigrationEngine:
         # Determine context_type for semantic dispatch (V2 decouples phase# from executor)
         context_type = get_phase_type(phase_number, version) if version == 2 else None
 
+        # ── Enterprise: execution timing ──
+        started_at = datetime.utcnow()
+        execution_start = time.monotonic()
+
         # Execute outside the session (LLM call can be slow)
         try:
             ctx_builder = MigrationContextBuilder(self._db, project_id)
@@ -1589,10 +1676,13 @@ class MigrationEngine:
             # ── Multi-lane injection ──────────────────────────────
             # Collect active lanes from asset_strategies (or legacy fallback)
             active_lanes = self._get_active_lanes(plan_data)
-            if active_lanes:
-                # Determine the semantic phase type for prompt augmentation
-                phase_type = context_type or get_phase_type(phase_number, version)
+            phase_type = context_type or get_phase_type(phase_number, version)
 
+            # Hoist unit_dicts + all_transforms to method scope for gate access
+            unit_dicts: List[Dict] = []
+            all_transforms: List[Dict] = []
+
+            if active_lanes:
                 # Merge prompt augmentations from all active lanes
                 augmentations = []
                 lane_ctx = {"target_stack": plan_data.get("target_stack", {})}
@@ -1608,10 +1698,14 @@ class MigrationEngine:
 
                 # Apply deterministic transforms for transform phase
                 if phase_type == "transform" and mvp_data:
-                    all_transforms = []
-                    unit_dicts = []
                     with self._db.get_session() as s:
+                        # ── Enterprise: checkpoint resume — skip already-processed units ──
+                        checkpoint = existing_meta.get("checkpoint", {})
+                        processed_ids = set(checkpoint.get("processed_unit_ids", []))
+
                         for uid in (mvp_data.get("unit_ids") or []):
+                            if str(uid) in processed_ids:
+                                continue
                             cu = s.query(CodeUnit).filter(CodeUnit.unit_id == uid).first()
                             if cu:
                                 unit_dicts.append({
@@ -1627,6 +1721,12 @@ class MigrationEngine:
                             try:
                                 results = lane.apply_transforms(unit_dicts, lane_ctx)
                                 for r in results:
+                                    # Look up requires_review from the matching TransformRule
+                                    rule_requires_review = False
+                                    for rule in lane.get_transform_rules():
+                                        if rule.name == r.rule_name:
+                                            rule_requires_review = rule.requires_review
+                                            break
                                     all_transforms.append({
                                         "source_unit_id": r.source_unit_id,
                                         "target_code": r.target_code,
@@ -1634,9 +1734,25 @@ class MigrationEngine:
                                         "rule_name": r.rule_name,
                                         "confidence": r.confidence,
                                         "notes": r.notes,
+                                        "requires_review": rule_requires_review,
                                     })
                             except Exception as e:
                                 logger.warning("Lane %s transforms failed: %s", lane.lane_id, e)
+                                # ── Enterprise: save checkpoint on mid-transform failure ──
+                                processed_so_far = [
+                                    t["source_unit_id"] for t in all_transforms
+                                ]
+                                with self._db.get_session() as s:
+                                    ph = self._get_phase(s, pid, phase_number, mvp_id)
+                                    if ph:
+                                        meta = dict(ph.phase_metadata or {})
+                                        meta["checkpoint"] = {
+                                            "processed_unit_ids": processed_so_far,
+                                            "total_units": len(mvp_data.get("unit_ids") or []),
+                                            "last_error": str(e),
+                                            "timestamp": datetime.utcnow().isoformat(),
+                                        }
+                                        ph.phase_metadata = meta
                     if all_transforms:
                         plan_data["_deterministic_transforms"] = all_transforms
                         logger.info(
@@ -1653,12 +1769,65 @@ class MigrationEngine:
                 context_type=context_type,
             )
 
+            # ── Enterprise: execution metrics ──
+            duration_ms = int((time.monotonic() - execution_start) * 1000)
+            completed_at = datetime.utcnow()
+
+            execution_metrics = {
+                "run_id": str(run_id),
+                "started_at": started_at.isoformat(),
+                "completed_at": completed_at.isoformat(),
+                "duration_ms": duration_ms,
+                "llm_model": os.environ.get("LLM_PROVIDER", "unknown"),
+                "llm_temperature": None,  # Placeholder: requires LLM callback
+                "token_usage": None,  # Placeholder: requires LLM callback
+            }
+
+            # ── Enterprise: confidence aggregation for transform phase ──
+            phase_confidence_score = None
+            phase_confidence_tier = None
+            requires_manual_review = False
+
+            if phase_type == "transform" and all_transforms:
+                phase_confidence_score = aggregate_confidence(all_transforms)
+                phase_confidence_tier = confidence_tier(phase_confidence_score)
+                requires_manual_review = any(
+                    t.get("requires_review", False) for t in all_transforms
+                )
+
+            # ── Enterprise: run quality gates for transform phase ──
+            gate_results: List[Dict] = []
+            if phase_type == "transform" and active_lanes:
+                gate_results = self._run_gates(
+                    active_lanes, unit_dicts, all_transforms, lane_ctx,
+                )
+
+            gates_all_passed = all(
+                g["passed"] for g in gate_results if g["blocking"]
+            ) if gate_results else True
+
             # Persist result
             with self._db.get_session() as session:
                 phase = self._get_phase(session, pid, phase_number, mvp_id)
                 phase.status = "complete"
                 phase.output = result.get("output", "")
                 phase.output_files = result.get("output_files", [])
+
+                # ── Enterprise: store metrics, gates, confidence in phase_metadata ──
+                meta = dict(phase.phase_metadata or {})
+                meta["execution_metrics"] = execution_metrics
+                meta["retry_count"] = 0  # Success resets retry count
+                if gate_results:
+                    meta["gate_results"] = gate_results
+                    meta["gates_all_passed"] = gates_all_passed
+                if phase_confidence_score is not None:
+                    meta["phase_confidence"] = phase_confidence_score
+                    meta["confidence_tier"] = phase_confidence_tier
+                if requires_manual_review:
+                    meta["requires_manual_review"] = True
+                # Clear checkpoint on success
+                meta.pop("checkpoint", None)
+                phase.phase_metadata = meta
 
                 if mvp_id:
                     mvp = session.query(FunctionalMVP).filter(
@@ -1699,15 +1868,46 @@ class MigrationEngine:
                 f"Phase {phase_number} complete for plan {plan_id}"
                 + (f" MVP {mvp_id}" if mvp_id else "")
                 + (f" → {disk_path}" if disk_path else "")
+                + (f" (confidence={phase_confidence_tier})" if phase_confidence_tier else "")
             )
 
         except Exception as e:
             logger.error(f"Phase {phase_number} failed: {e}")
+            # ── Enterprise: retry tracking with exponential backoff ──
             with self._db.get_session() as session:
                 phase = self._get_phase(session, pid, phase_number, mvp_id)
                 if phase:
-                    phase.status = "error"
-                    phase.output = f"Error: {str(e)}"
+                    meta = dict(phase.phase_metadata or {})
+                    retry_count = meta.get("retry_count", 0) + 1
+                    meta["retry_count"] = retry_count
+                    meta["last_error"] = str(e)
+                    meta["last_error_at"] = datetime.utcnow().isoformat()
+
+                    if retry_count >= MAX_RETRIES:
+                        meta["terminal_failure"] = True
+                        meta["retryable"] = False
+                        phase.status = "error"
+                        phase.output = (
+                            f"Error (terminal after {MAX_RETRIES} retries): {str(e)}"
+                        )
+                        logger.error(
+                            "Phase %d terminal failure after %d retries",
+                            phase_number, MAX_RETRIES,
+                        )
+                    else:
+                        backoff = BASE_BACKOFF_SECONDS * (2 ** retry_count)
+                        meta["retryable"] = True
+                        meta["next_retry_after"] = (
+                            datetime.utcnow() + timedelta(seconds=backoff)
+                        ).isoformat()
+                        phase.status = "error"
+                        phase.output = f"Error (retry {retry_count}/{MAX_RETRIES}): {str(e)}"
+                        logger.warning(
+                            "Phase %d failed (retry %d/%d), backoff %ds",
+                            phase_number, retry_count, MAX_RETRIES, backoff,
+                        )
+
+                    phase.phase_metadata = meta
             raise
 
         return self.get_phase_output(str(pid), phase_number, mvp_id)
@@ -1746,6 +1946,18 @@ class MigrationEngine:
             if phase.status != "complete":
                 raise ValueError(f"Phase {phase_number} is not complete (status: {phase.status})")
 
+            # ── Enterprise: block approval if blocking gates failed ──
+            gate_results = (phase.phase_metadata or {}).get("gate_results", [])
+            blocking_failures = [
+                g["gate_name"] for g in gate_results
+                if g.get("blocking") and not g.get("passed")
+            ]
+            if blocking_failures:
+                raise ValueError(
+                    f"Cannot approve: blocking quality gates failed: "
+                    f"{', '.join(blocking_failures)}"
+                )
+
             phase.approved = True
             phase.approved_at = datetime.utcnow()
 
@@ -1781,6 +1993,9 @@ class MigrationEngine:
     ) -> Dict:
         """Reject a completed phase. Allows re-execution with optional feedback.
 
+        Rejection is a full reset: clears output_files, checkpoint, and
+        retry_count so the next execution starts from scratch (idempotent).
+
         Returns:
             Updated phase output dict.
         """
@@ -1793,10 +2008,18 @@ class MigrationEngine:
 
             phase.status = "rejected"
             phase.approved = False
+            phase.output_files = []
+
+            # ── Enterprise: clean rejection resets retry state + checkpoint ──
+            meta = dict(phase.phase_metadata or {})
+            meta.pop("checkpoint", None)
+            meta.pop("terminal_failure", None)
+            meta.pop("retryable", None)
+            meta.pop("next_retry_after", None)
+            meta["retry_count"] = 0
             if feedback:
-                meta = phase.phase_metadata or {}
                 meta["rejection_feedback"] = feedback
-                phase.phase_metadata = meta
+            phase.phase_metadata = meta
 
         return self.get_phase_output(str(pid), phase_number, mvp_id)
 
@@ -1898,6 +2121,7 @@ class MigrationEngine:
                     + (f" for MVP {mvp_id}" if mvp_id else "")
                 )
 
+            meta = phase.phase_metadata or {}
             return {
                 "phase_id": str(phase.phase_id),
                 "phase_number": phase.phase_number,
@@ -1909,7 +2133,90 @@ class MigrationEngine:
                 "approved_at": phase.approved_at.isoformat() if phase.approved_at else None,
                 "input_summary": phase.input_summary,
                 "mvp_id": phase.mvp_id,
-                "phase_metadata": phase.phase_metadata,
+                "phase_metadata": meta,
+                # Enterprise: surfaced for quick UI access
+                "confidence_tier": meta.get("confidence_tier"),
+                "phase_confidence": meta.get("phase_confidence"),
+                "gates_all_passed": meta.get("gates_all_passed", True),
+                "requires_manual_review": meta.get("requires_manual_review", False),
+            }
+
+    def get_migration_scorecard(self, plan_id: str) -> Dict:
+        """Aggregate migration quality metrics across all phases.
+
+        Returns a scorecard dict with completion, gate pass rate,
+        confidence, timing, and rework metrics.
+        """
+        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+
+        with self._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not plan:
+                raise ValueError(f"Plan {plan_id} not found")
+
+            phases = session.query(MigrationPhase).filter(
+                MigrationPhase.plan_id == pid
+            ).all()
+
+            total_phases = len(phases)
+            phases_complete = sum(1 for p in phases if p.status == "complete")
+            phases_approved = sum(1 for p in phases if p.approved)
+            phases_rejected = sum(1 for p in phases if p.status == "rejected")
+
+            # Aggregate from phase_metadata
+            confidences = []
+            gate_passed = 0
+            gate_total = 0
+            total_duration_ms = 0
+            total_tokens = 0
+            total_cost = 0.0
+
+            for p in phases:
+                meta = p.phase_metadata or {}
+                if meta.get("phase_confidence") is not None:
+                    confidences.append(meta["phase_confidence"])
+                for g in meta.get("gate_results", []):
+                    gate_total += 1
+                    if g.get("passed"):
+                        gate_passed += 1
+                metrics = meta.get("execution_metrics", {})
+                total_duration_ms += metrics.get("duration_ms", 0)
+                if metrics.get("token_usage"):
+                    total_tokens += metrics["token_usage"].get("total", 0)
+
+            avg_confidence = (
+                sum(confidences) / len(confidences) if confidences else None
+            )
+            gate_pass_rate = (
+                gate_passed / gate_total if gate_total > 0 else None
+            )
+            rework_rate = (
+                phases_rejected / (phases_complete + phases_rejected)
+                if (phases_complete + phases_rejected) > 0
+                else 0.0
+            )
+            time_per_phase_ms = (
+                total_duration_ms / total_phases if total_phases > 0 else 0
+            )
+
+            return {
+                "plan_id": str(pid),
+                "total_phases": total_phases,
+                "phases_complete": phases_complete,
+                "phases_approved": phases_approved,
+                "phases_rejected": phases_rejected,
+                "avg_confidence": round(avg_confidence, 4) if avg_confidence else None,
+                "avg_confidence_tier": confidence_tier(avg_confidence) if avg_confidence else None,
+                "gate_pass_rate": round(gate_pass_rate, 4) if gate_pass_rate is not None else None,
+                "total_tokens": total_tokens,
+                "total_cost": round(total_cost, 4),
+                "rework_rate": round(rework_rate, 4),
+                "total_duration_ms": total_duration_ms,
+                "time_per_phase_ms": round(time_per_phase_ms, 1),
+                "lane_versions": plan.lane_versions,
+                "pipeline_version": plan.pipeline_version or 1,
             }
 
     def get_mvp_detail(self, plan_id: str, mvp_id: int) -> Dict:
@@ -2602,6 +2909,7 @@ class MigrationEngine:
 
     def _phase_summary(self, phase: MigrationPhase) -> Dict:
         """Convert a phase row to a summary dict."""
+        meta = phase.phase_metadata or {}
         return {
             "phase_id": str(phase.phase_id),
             "phase_number": phase.phase_number,
@@ -2614,6 +2922,9 @@ class MigrationEngine:
                 (phase.output[:200] + "...") if phase.output and len(phase.output) > 200
                 else phase.output
             ),
+            # Enterprise: surfaced for plan status overview
+            "confidence_tier": meta.get("confidence_tier"),
+            "gates_all_passed": meta.get("gates_all_passed", True),
         }
 
     @staticmethod

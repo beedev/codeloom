@@ -253,6 +253,7 @@ class MigrationPlan(Base):
     pipeline_version = Column(Integer, default=2, nullable=False)  # 1=old 6-phase, 2=new 4-phase
     asset_strategies = Column(JSONB, nullable=True)               # {lang: {strategy, target}} per-file-type migration strategies
     migration_lane_id = Column(String(100), nullable=True)       # auto-detected lane, e.g. "struts_to_springboot"
+    lane_versions = Column(JSONB, nullable=True)                 # {"struts_to_springboot": "1.0.0"} — recorded on first execution
     batch_executions = Column(JSONB, default=list)                # [{batch_id, status, mvp_results, ...}]
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -282,6 +283,7 @@ class MigrationPhase(Base):
     )
 
     phase_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    run_id = Column(UUID(), nullable=True)                       # Unique per execution attempt — distinguishes re-runs
     plan_id = Column(UUID(), ForeignKey("migration_plans.plan_id", ondelete="CASCADE"), nullable=False)
     mvp_id = Column(Integer, ForeignKey("functional_mvps.mvp_id", ondelete="CASCADE"), nullable=True)  # NULL for plan-level phases
     phase_number = Column(Integer, nullable=False)           # 1-6

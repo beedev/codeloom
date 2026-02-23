@@ -47,6 +47,8 @@ class LaneRegistry:
         best_score = 0.0
 
         for lane in cls._lanes.values():
+            if lane.deprecated:
+                continue
             try:
                 score = lane.detect_applicability(source_framework, target_stack)
                 if score > best_score:
@@ -80,6 +82,10 @@ class LaneRegistry:
                 "display_name": lane.display_name,
                 "source_frameworks": lane.source_frameworks,
                 "target_frameworks": lane.target_frameworks,
+                "version": lane.version,
+                "deprecated": lane.deprecated,
+                "min_source_version": lane.min_source_version,
+                "max_source_version": lane.max_source_version,
             }
             for lane in cls._lanes.values()
         ]

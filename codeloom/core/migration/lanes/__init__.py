@@ -6,11 +6,16 @@ lanes.
 """
 
 from .base import (
+    CONFIDENCE_HIGH,
+    CONFIDENCE_STANDARD,
+    GateCategory,
     GateDefinition,
     GateResult,
     MigrationLane,
     TransformResult,
     TransformRule,
+    aggregate_confidence,
+    confidence_tier,
 )
 from .registry import LaneRegistry
 
@@ -18,11 +23,16 @@ from .registry import LaneRegistry
 
 from .struts_to_springboot import StrutsToSpringBootLane
 from .storedproc_to_orm import StoredProcToOrmLane
+from .vbnet_to_dotnetcore import VbNetToDotNetCoreLane
 
 LaneRegistry.register(StrutsToSpringBootLane())
 LaneRegistry.register(StoredProcToOrmLane())
+LaneRegistry.register(VbNetToDotNetCoreLane())
 
 __all__ = [
+    "CONFIDENCE_HIGH",
+    "CONFIDENCE_STANDARD",
+    "GateCategory",
     "GateDefinition",
     "GateResult",
     "LaneRegistry",
@@ -31,4 +41,7 @@ __all__ = [
     "StrutsToSpringBootLane",
     "TransformResult",
     "TransformRule",
+    "VbNetToDotNetCoreLane",
+    "aggregate_confidence",
+    "confidence_tier",
 ]
