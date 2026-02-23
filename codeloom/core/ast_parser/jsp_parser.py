@@ -9,6 +9,8 @@ Extracts a single CodeUnit per JSP file with rich metadata about:
 - EL expressions (${...})
 - Struts 1.x tag usage (html:*, bean:*, logic:*, nested:*)
 - Struts 2.x tag usage (s:*)
+- Angular / AngularJS patterns (ng-*, *ngFor, app-* components)
+- Form field details (property/name attributes for React mapping)
 
 Does NOT use tree-sitter. Follows the regex/fallback parser pattern
 with parse_file/parse_source interface.
@@ -67,6 +69,39 @@ _STRUTS1_TAG_RE = re.compile(r"<((?:html|bean|logic|nested):\w+)", re.IGNORECASE
 
 # Struts 2.x tags: <s:...>
 _STRUTS2_TAG_RE = re.compile(r"<(s:\w+)", re.IGNORECASE)
+
+# ── Angular / AngularJS detection ──────────────────────────────────
+# AngularJS 1.x attributes: ng-app, ng-controller, ng-model, etc.
+_ANGULARJS_ATTR_RE = re.compile(
+    r'\b(ng-(?:app|controller|model|repeat|if|show|hide|click|submit|'
+    r'class|style|src|href|bind|init|options|switch|cloak|include|view))'
+    r'\s*=\s*"([^"]*)"',
+    re.IGNORECASE,
+)
+
+# Angular 2+ binding patterns: [(ngModel)], *ngFor, *ngIf, etc.
+_ANGULAR2_BINDING_RE = re.compile(
+    r"(\[\(ngModel\)\]|\*ngFor|\*ngIf|\*ngSwitch|\[routerLink\]"
+    r"|\(click\)|\(submit\)|\[class\.\w+\]|\[ngClass\]|\[ngStyle\])",
+    re.IGNORECASE,
+)
+
+# Angular 2+ custom elements: <app-header>, <app-sidebar>, etc.
+_ANGULAR2_COMPONENT_RE = re.compile(r"<(app-\w+)", re.IGNORECASE)
+
+# Angular module/component imports in <script> tags
+_ANGULAR_SCRIPT_IMPORT_RE = re.compile(
+    r"(?:angular\.module|@Component|@NgModule"
+    r"|import\s+\{[^}]*\}\s+from\s+['\"]@angular/)",
+    re.IGNORECASE,
+)
+
+# ── Struts form field property extraction ──────────────────────────
+# <html:text property="username"> or <s:textfield name="username">
+_STRUTS_FIELD_PROPERTY_RE = re.compile(
+    r"<(?:html|s):(\w+)\s+[^>]*(?:property|name)\s*=\s*\"([^\"]*)\"",
+    re.IGNORECASE,
+)
 
 
 class JspParser:
@@ -172,6 +207,48 @@ class JspParser:
         for m in _STRUTS2_TAG_RE.finditer(source_text):
             struts2_tags.add(m.group(1).lower())
 
+        # --- Angular / AngularJS detection ---
+        angular_patterns: List[Dict[str, Any]] = []
+
+        # AngularJS 1.x directives
+        angularjs_attrs: Dict[str, List[str]] = {}
+        for m in _ANGULARJS_ATTR_RE.finditer(source_text):
+            directive = m.group(1).lower()
+            angularjs_attrs.setdefault(directive, []).append(m.group(2))
+        if angularjs_attrs:
+            angular_patterns.append({
+                "type": "angularjs",
+                "directives": angularjs_attrs,
+            })
+
+        # Angular 2+ bindings and components
+        angular2_bindings: Set[str] = set()
+        for m in _ANGULAR2_BINDING_RE.finditer(source_text):
+            angular2_bindings.add(m.group(1))
+        angular2_components: Set[str] = set()
+        for m in _ANGULAR2_COMPONENT_RE.finditer(source_text):
+            angular2_components.add(m.group(1).lower())
+        angular_imports: Set[str] = set()
+        for m in _ANGULAR_SCRIPT_IMPORT_RE.finditer(source_text):
+            angular_imports.add(m.group(0).strip())
+        if angular2_bindings or angular2_components or angular_imports:
+            angular_patterns.append({
+                "type": "angular2+",
+                "bindings": sorted(angular2_bindings),
+                "components": sorted(angular2_components),
+                "imports": sorted(angular_imports),
+            })
+
+        # --- Form field details (Struts property/name attributes) ---
+        form_fields: List[Dict[str, str]] = []
+        seen_props: Set[str] = set()
+        for m in _STRUTS_FIELD_PROPERTY_RE.finditer(source_text):
+            tag_name = m.group(1).lower()
+            prop_name = m.group(2)
+            if prop_name and prop_name not in seen_props:
+                form_fields.append({"tag": tag_name, "property": prop_name})
+                seen_props.add(prop_name)
+
         metadata: Dict[str, Any] = {
             "taglibs": taglibs,
             "bean_refs": sorted(bean_refs),
@@ -181,6 +258,8 @@ class JspParser:
             "el_refs": sorted(el_refs),
             "struts_tags": sorted(struts_tags),
             "struts2_tags": sorted(struts2_tags),
+            "angular_patterns": angular_patterns,
+            "form_fields": form_fields,
         }
 
         # Build a concise signature
