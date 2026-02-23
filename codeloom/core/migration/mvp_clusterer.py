@@ -69,22 +69,59 @@ class MvpClusterer:
         """
         pid = UUID(project_id) if isinstance(project_id, str) else project_id
 
-        # Partition languages by strategy
+        # Partition languages by strategy (supports sub-type granularity)
         active_langs = None   # None = all languages (backward compat)
         passive_langs = []
+        # Track sub-type level overrides: {lang: {unit_type: strategy}}
+        _sub_type_strategies: Dict[str, Dict[str, str]] = {}
         if asset_strategies:
-            active_langs = [
-                lang for lang, s in asset_strategies.items()
-                if s.get("strategy") in ("version_upgrade", "framework_migration", "rewrite")
-            ]
-            passive_langs = [
-                lang for lang, s in asset_strategies.items()
-                if s.get("strategy") in ("keep_as_is", "convert")
-            ]
-            # no_change languages are excluded entirely
+            _active = {"version_upgrade", "framework_migration", "rewrite", "convert"}
+            _passive = {"keep_as_is"}
+
+            active_langs = []
+            for lang, s in asset_strategies.items():
+                sub_types = s.get("sub_types")
+                if sub_types:
+                    # Language has sub-type level strategies — include in active
+                    # if ANY sub-type has an active strategy
+                    has_active = any(
+                        st.get("strategy", s.get("strategy", "")) in _active
+                        for st in sub_types.values()
+                    )
+                    if has_active:
+                        active_langs.append(lang)
+                    # Also check if any sub-types are passive (for synthetic MVPs later)
+                    has_passive = any(
+                        st.get("strategy") in _passive
+                        for st in sub_types.values()
+                    )
+                    if has_passive:
+                        passive_langs.append(lang)
+                    # Store per-sub-type strategies for unit-level filtering
+                    _sub_type_strategies[lang] = {
+                        ut: st.get("strategy", s.get("strategy", ""))
+                        for ut, st in sub_types.items()
+                    }
+                elif s.get("strategy") in _active:
+                    active_langs.append(lang)
+                elif s.get("strategy") in _passive:
+                    passive_langs.append(lang)
+                # no_change languages are excluded entirely
 
         # Load units and edges (needed for both paths)
         units = self._load_units(pid, languages=active_langs)
+
+        # Filter out units whose sub-type strategy is passive or no_change
+        if _sub_type_strategies:
+            _passive_strats = {"keep_as_is", "no_change"}
+            units = [
+                u for u in units
+                if u["language"] not in _sub_type_strategies
+                or _sub_type_strategies[u["language"]].get(
+                    u.get("unit_type", ""), "convert"
+                ) not in _passive_strats
+            ]
+
         edges = self._load_edges(pid)
 
         if not units:
@@ -129,10 +166,25 @@ class MvpClusterer:
                 cluster["name"] = self._generate_name(cluster)
             cluster["priority"] = i + 1  # Reserve 0 for Foundation MVP
 
-        # Create synthetic MVPs for passive languages (keep_as_is, convert)
+        # Create synthetic MVPs for passive languages/sub-types (keep_as_is)
         passive_count = 0
         if passive_langs:
             passive_units = self._load_units(pid, languages=passive_langs)
+
+            # For languages with sub-type strategies, filter to only passive units
+            if _sub_type_strategies:
+                _passive_strats = {"keep_as_is"}
+                filtered = []
+                for u in passive_units:
+                    lang = u["language"]
+                    if lang in _sub_type_strategies:
+                        ut = u.get("unit_type", "")
+                        if _sub_type_strategies[lang].get(ut, "") in _passive_strats:
+                            filtered.append(u)
+                    else:
+                        filtered.append(u)
+                passive_units = filtered
+
             by_lang: Dict[str, List[Dict]] = defaultdict(list)
             for u in passive_units:
                 by_lang[u["language"]].append(u)
@@ -141,7 +193,7 @@ class MvpClusterer:
                 lang_units = by_lang.get(lang, [])
                 if not lang_units:
                     continue
-                strategy = asset_strategies[lang]["strategy"]
+                strategy = asset_strategies[lang].get("strategy", "keep_as_is")
                 target = asset_strategies[lang].get("target")
                 label = strategy.replace("_", " ").title()
                 name = f"{lang.title()} — {label}"

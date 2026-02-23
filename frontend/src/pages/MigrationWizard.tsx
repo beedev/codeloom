@@ -26,6 +26,7 @@ import { MvpDiscoveryPanel } from '../components/migration/MvpDiscoveryPanel.tsx
 import { MvpTimeline } from '../components/migration/MvpTimeline.tsx';
 import { MvpInfoBar } from '../components/migration/MvpInfoBar.tsx';
 import { AssetInventory } from '../components/migration/AssetInventory.tsx';
+import { BatchExecutionPanel } from '../components/migration/BatchExecutionPanel.tsx';
 import * as api from '../services/api.ts';
 import type { MigrationPlan, MigrationPhaseOutput } from '../types/index.ts';
 
@@ -87,7 +88,8 @@ export function MigrationWizard() {
   // ── View mode ──
   // 'plan' = plan-level phases (1, 2)
   // 'mvp' = per-MVP phases (3-6) with MVP sidebar
-  const [viewMode, setViewMode] = useState<'plan' | 'mvp'>('plan');
+  // 'batch' = batch execution & monitoring panel
+  const [viewMode, setViewMode] = useState<'plan' | 'mvp' | 'batch'>('plan');
 
   // ── Version-aware constants ──
   const version = plan?.pipeline_version ?? 1;
@@ -502,8 +504,8 @@ export function MigrationWizard() {
               </>
             )}
             <span className="text-text-dim/40">&gt;</span>
-            <span className={`font-medium ${viewMode === 'mvp' ? 'text-text-muted hover:text-text cursor-pointer' : 'text-text'}`}
-              onClick={viewMode === 'mvp' ? handleBackToPlan : undefined}
+            <span className={`font-medium ${viewMode !== 'plan' ? 'text-text-muted hover:text-text cursor-pointer' : 'text-text'}`}
+              onClick={viewMode !== 'plan' ? handleBackToPlan : undefined}
             >
               {isNewPlan ? 'New Migration' : (plan?.target_brief ?? 'Migration')}
             </span>
@@ -519,6 +521,12 @@ export function MigrationWizard() {
                 <span className="text-text-muted">
                   Phase {activePhase}: {activePhaseInfo.phase_type}
                 </span>
+              </>
+            )}
+            {viewMode === 'batch' && (
+              <>
+                <span className="text-text-dim/40">&gt;</span>
+                <span className="text-glow">Batch Execution</span>
               </>
             )}
             {viewMode === 'mvp' && selectedMvp && (
@@ -726,18 +734,48 @@ export function MigrationWizard() {
                     Execute {Object.values(mvpPhaseLabels).join(' \u2192 ')} for each.
                   </p>
                 </div>
-                <button
-                  onClick={() => {
-                    const firstMvp = [...plan.mvps].sort((a, b) => a.priority - b.priority)[0];
-                    if (firstMvp) handleSelectMvp(firstMvp.mvp_id);
-                  }}
-                  className="flex items-center gap-1.5 rounded-lg bg-glow px-4 py-2 text-xs font-medium text-white hover:bg-glow/90"
-                >
-                  Start MVP Execution
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setViewMode('batch')}
+                    className="flex items-center gap-1.5 rounded-lg bg-glow px-4 py-2 text-xs font-medium text-white hover:bg-glow/90"
+                  >
+                    Batch Execute All
+                  </button>
+                  <button
+                    onClick={() => {
+                      const firstMvp = [...plan.mvps].sort((a, b) => a.priority - b.priority)[0];
+                      if (firstMvp) handleSelectMvp(firstMvp.mvp_id);
+                    }}
+                    className="rounded-lg border border-glow/30 px-4 py-2 text-xs font-medium text-glow hover:bg-glow/5"
+                  >
+                    Execute Individually
+                  </button>
+                </div>
               </div>
             )}
           </>
+        )}
+
+        {/* Existing plan — Batch execution view */}
+        {!isNewPlan && plan && viewMode === 'batch' && (
+          <div className="flex flex-1 flex-col overflow-y-auto">
+            {/* Back button */}
+            <div className="border-b border-void-surface px-4 py-2">
+              <button
+                onClick={handleBackToPlan}
+                className="flex items-center gap-1.5 text-xs text-text-dim hover:text-text"
+              >
+                <ArrowLeft className="h-3 w-3" />
+                Plan Overview
+              </button>
+            </div>
+            <BatchExecutionPanel
+              planId={planId!}
+              totalMvps={plan.mvps.length}
+              onMvpClick={(mvpId) => handleSelectMvp(mvpId)}
+              onBatchComplete={() => refreshPlan()}
+            />
+          </div>
         )}
 
         {/* Existing plan — MVP execution view */}

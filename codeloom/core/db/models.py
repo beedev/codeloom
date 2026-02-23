@@ -252,6 +252,8 @@ class MigrationPlan(Base):
     migration_type = Column(String(30), default='framework_migration', nullable=False)  # version_upgrade, framework_migration, rewrite
     pipeline_version = Column(Integer, default=2, nullable=False)  # 1=old 6-phase, 2=new 4-phase
     asset_strategies = Column(JSONB, nullable=True)               # {lang: {strategy, target}} per-file-type migration strategies
+    migration_lane_id = Column(String(100), nullable=True)       # auto-detected lane, e.g. "struts_to_springboot"
+    batch_executions = Column(JSONB, default=list)                # [{batch_id, status, mvp_results, ...}]
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

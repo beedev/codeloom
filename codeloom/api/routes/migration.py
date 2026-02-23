@@ -86,6 +86,28 @@ class SaveAssetStrategiesRequest(BaseModel):
     strategies: dict  # {lang: {strategy, target}}
 
 
+class BatchExecuteRequest(BaseModel):
+    phase_number: int | None = None          # None = start from first pending MVP phase
+    mvp_ids: list[int] | None = None         # None = all eligible
+    approval_policy: str = "manual"          # "manual" | "auto" | "auto_non_blocking"
+    run_all: bool = False                    # transform → approve → test for each MVP
+
+
+class BatchRetryRequest(BaseModel):
+    mvp_ids: list[int] | None = None         # None = all failed MVPs from that batch
+
+
+# ── Lane Catalog ───────────────────────────────────────────────────────
+
+@router.get("/lanes")
+async def list_migration_lanes(
+    user: dict = Depends(get_current_user),
+):
+    """List all registered migration lanes with metadata."""
+    from codeloom.core.migration.lanes import LaneRegistry
+    return LaneRegistry.list_lanes()
+
+
 # ── Plan Endpoints ──────────────────────────────────────────────────────
 
 @router.post("/plan")
@@ -588,3 +610,115 @@ async def download_phase_files(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── Batch Execution ──────────────────────────────────────────────────
+
+@router.post("/{plan_id}/batch/execute")
+async def batch_execute(
+    plan_id: str,
+    data: BatchExecuteRequest,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(require_editor),
+    engine=Depends(get_migration_engine),
+):
+    """Launch batch execution across multiple MVPs.
+
+    Returns immediately with a batch_id. The worker runs in background.
+    Poll GET /{plan_id}/batch/{batch_id} for progress.
+    """
+    try:
+        result = engine.prepare_batch_execution(
+            plan_id=plan_id,
+            phase_number=data.phase_number,
+            mvp_ids=data.mvp_ids,
+            approval_policy=data.approval_policy,
+            run_all=data.run_all,
+        )
+        batch_id = result["batch_id"]
+        background_tasks.add_task(engine.execute_batch_worker, batch_id)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Batch execution launch failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Batch launch failed: {str(e)}")
+
+
+@router.get("/{plan_id}/batch/{batch_id}")
+async def get_batch_status(
+    plan_id: str,
+    batch_id: str,
+    user: dict = Depends(get_current_user),
+    engine=Depends(get_migration_engine),
+):
+    """Poll batch progress (active or persisted)."""
+    result = engine.get_batch_status(batch_id, plan_id=plan_id)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+    return result
+
+
+@router.get("/{plan_id}/batch")
+async def list_batches(
+    plan_id: str,
+    user: dict = Depends(get_current_user),
+    engine=Depends(get_migration_engine),
+):
+    """List all batch runs for a plan."""
+    try:
+        return engine.list_batch_executions(plan_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{plan_id}/batch/{batch_id}/retry")
+async def retry_batch(
+    plan_id: str,
+    batch_id: str,
+    data: BatchRetryRequest | None = None,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    user: dict = Depends(require_editor),
+    engine=Depends(get_migration_engine),
+):
+    """Re-execute failed MVPs from a completed batch.
+
+    Creates a new batch_id targeting only the failed MVPs.
+    """
+    try:
+        # Lookup the original batch to find failed MVPs
+        original = engine.get_batch_status(batch_id, plan_id=plan_id)
+        if not original:
+            raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+
+        if original.get("status") == "running":
+            raise HTTPException(status_code=409, detail="Batch is still running")
+
+        # Determine which MVPs to retry
+        retry_mvp_ids = data.mvp_ids if data and data.mvp_ids else None
+        if not retry_mvp_ids:
+            retry_mvp_ids = [
+                r["mvp_id"]
+                for r in original.get("mvp_results", [])
+                if r.get("status") == "failed"
+            ]
+        if not retry_mvp_ids:
+            raise HTTPException(status_code=400, detail="No failed MVPs to retry")
+
+        # Launch new batch with same settings
+        result = engine.prepare_batch_execution(
+            plan_id=plan_id,
+            phase_number=original.get("starting_phase"),
+            mvp_ids=retry_mvp_ids,
+            approval_policy=original.get("approval_policy", "manual"),
+            run_all=original.get("run_all", False),
+        )
+        background_tasks.add_task(engine.execute_batch_worker, result["batch_id"])
+        return result
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Batch retry failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Batch retry failed: {str(e)}")

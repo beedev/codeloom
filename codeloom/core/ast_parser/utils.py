@@ -20,6 +20,10 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".cs": "csharp",
     ".sql": "sql",
     ".vb": "vbnet",
+    ".xml": "xml_config",
+    ".jsp": "jsp",
+    ".jspf": "jsp",
+    ".properties": "properties",
 }
 
 # Directories to skip during file walking
@@ -100,6 +104,15 @@ def get_parser(language: str) -> "BaseLanguageParser":
         elif language == "vbnet":
             from .vbnet_parser import VbNetParser
             _parser_registry["vbnet"] = VbNetParser()
+        elif language == "xml_config":
+            from .xml_config_parser import XmlConfigParser
+            _parser_registry["xml_config"] = XmlConfigParser()
+        elif language == "jsp":
+            from .jsp_parser import JspParser
+            _parser_registry["jsp"] = JspParser()
+        elif language == "properties":
+            from .properties_parser import PropertiesParser
+            _parser_registry["properties"] = PropertiesParser()
         else:
             raise ValueError(
                 f"Unsupported language: {language}. "

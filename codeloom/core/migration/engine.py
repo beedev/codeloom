@@ -211,15 +211,106 @@ class MigrationEngine:
         # Sort by unit count descending (primary language first)
         inventory.sort(key=lambda x: x["unit_count"], reverse=True)
 
+        # -- Sub-type breakdown for expandable languages --------
+        EXPANDABLE_LANGUAGES = {"sql", "xml", "yaml"}
+        with self._db.get_session() as session:
+            from sqlalchemy import func as sa_func
+            for item in inventory:
+                lang = item["language"]
+                if lang.lower() not in EXPANDABLE_LANGUAGES:
+                    continue
+                # Group units by unit_type within this language
+                sub_rows = (
+                    session.query(
+                        CodeUnit.unit_type,
+                        sa_func.count(CodeUnit.unit_id).label("unit_count"),
+                        sa_func.count(sa_func.distinct(CodeUnit.file_id)).label("file_count"),
+                    )
+                    .filter(
+                        CodeUnit.project_id == project_id,
+                        CodeUnit.language == lang,
+                        CodeUnit.unit_type.isnot(None),
+                    )
+                    .group_by(CodeUnit.unit_type)
+                    .all()
+                )
+                sub_types = []
+                for sr in sub_rows:
+                    # Fetch up to 3 sample unit names per sub-type
+                    samples = (
+                        session.query(CodeUnit.name)
+                        .filter(
+                            CodeUnit.project_id == project_id,
+                            CodeUnit.language == lang,
+                            CodeUnit.unit_type == sr.unit_type,
+                        )
+                        .limit(3)
+                        .all()
+                    )
+                    sub_types.append({
+                        "unit_type": sr.unit_type,
+                        "unit_count": sr.unit_count,
+                        "file_count": sr.file_count,
+                        "sample_names": [s[0] for s in samples if s[0]],
+                    })
+                if sub_types:
+                    # Sort by unit_count descending
+                    sub_types.sort(key=lambda x: x["unit_count"], reverse=True)
+                    item["sub_types"] = sub_types
+
+
         suggested = self._rule_based_strategies(
             migration_type, source_languages, target_stack
         )
 
+        # -- Lane suggestions per language/sub-type -------------
+        from .lanes import LaneRegistry
+        all_lanes = LaneRegistry.list_lanes()
+        suggested_lanes: Dict[str, Any] = {}
+        for item in inventory:
+            lang = item["language"]
+            # Check each registered lane's applicability for this language
+            best_lane = None
+            best_score = 0.0
+            for lane_info in all_lanes:
+                lane = LaneRegistry.get_lane(lane_info["lane_id"])
+                if lane:
+                    score = lane.detect_applicability(lang, target_stack)
+                    if score > best_score:
+                        best_score = score
+                        best_lane = lane_info
+            if best_lane and best_score > 0.0:
+                suggested_lanes[lang] = {
+                    **best_lane,
+                    "confidence": round(best_score, 2),
+                }
+            # Also check sub-types if present
+            for st in item.get("sub_types", []):
+                key = f"{lang}:{st['unit_type']}"
+                best_lane_st = None
+                best_score_st = 0.0
+                for lane_info in all_lanes:
+                    lane = LaneRegistry.get_lane(lane_info["lane_id"])
+                    if lane:
+                        # Use both the language and virtual framework IDs
+                        for source_fw in [lang, "sql_stored_procs", st["unit_type"]]:
+                            score = lane.detect_applicability(source_fw, target_stack)
+                            if score > best_score_st:
+                                best_score_st = score
+                                best_lane_st = lane_info
+                if best_lane_st and best_score_st > 0.0:
+                    suggested_lanes[key] = {
+                        **best_lane_st,
+                        "confidence": round(best_score_st, 2),
+                    }
+
         return {
             "inventory": inventory,
             "suggested_strategies": suggested,
+            "suggested_lanes": suggested_lanes,
             "llm_refined": False,
         }
+
 
     @staticmethod
     def _rule_based_strategies(
@@ -385,7 +476,8 @@ class MigrationEngine:
         }
         pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
 
-        # Validate
+        # Validate top-level and sub-type strategies
+        from .lanes import LaneRegistry
         for lang, spec in strategies.items():
             if not isinstance(spec, dict) or "strategy" not in spec:
                 raise ValueError(f"Invalid strategy spec for '{lang}': must have 'strategy' key")
@@ -394,6 +486,28 @@ class MigrationEngine:
                     f"Invalid strategy '{spec['strategy']}' for '{lang}'. "
                     f"Must be one of: {', '.join(sorted(valid_strategies))}"
                 )
+            # Validate lane_id if present
+            if spec.get("lane_id") and not LaneRegistry.get_lane(spec["lane_id"]):
+                raise ValueError(
+                    f"Unknown lane_id '{spec['lane_id']}' for '{lang}'"
+                )
+            # Validate sub_types if present
+            for st_key, st_spec in (spec.get("sub_types") or {}).items():
+                if not isinstance(st_spec, dict):
+                    raise ValueError(
+                        f"Invalid sub_type spec for '{lang}:{st_key}'"
+                    )
+                st_strategy = st_spec.get("strategy")
+                if st_strategy and st_strategy not in valid_strategies:
+                    raise ValueError(
+                        f"Invalid strategy '{st_strategy}' for '{lang}:{st_key}'. "
+                        f"Must be one of: {', '.join(sorted(valid_strategies))}"
+                    )
+                if st_spec.get("lane_id") and not LaneRegistry.get_lane(st_spec["lane_id"]):
+                    raise ValueError(
+                        f"Unknown lane_id '{st_spec['lane_id']}' for '{lang}:{st_key}'"
+                    )
+
 
         with self._db.get_session() as session:
             plan = session.query(MigrationPlan).filter(
@@ -555,10 +669,13 @@ class MigrationEngine:
         """Derive target_stack languages/frameworks from confirmed asset strategies.
 
         Extracts target labels from strategy entries:
-        - rewrite targets → languages
-        - framework_migration targets → frameworks
-        - version_upgrade → keeps the source language name
+        - rewrite targets -> languages
+        - framework_migration targets -> frameworks
+        - version_upgrade -> keeps the source language name
+        - lane_id references -> adds lane's target_frameworks
         """
+        from .lanes import LaneRegistry
+
         languages: set = set()
         frameworks: set = set()
         for lang, info in strategies.items():
@@ -570,10 +687,64 @@ class MigrationEngine:
                 frameworks.add(target.lower())
             elif strategy == "version_upgrade":
                 languages.add(lang.lower())
+            # Extract frameworks from lane_id (top-level)
+            lid = info.get("lane_id")
+            if lid:
+                lane = LaneRegistry.get_lane(lid)
+                if lane:
+                    frameworks.update(f.lower() for f in lane.target_frameworks)
+            # Extract frameworks from sub_type lane_ids
+            for st_spec in (info.get("sub_types") or {}).values():
+                st_lid = st_spec.get("lane_id")
+                if st_lid:
+                    lane = LaneRegistry.get_lane(st_lid)
+                    if lane:
+                        frameworks.update(f.lower() for f in lane.target_frameworks)
         return {
             "languages": sorted(languages) if languages else [],
             "frameworks": sorted(frameworks) if frameworks else [],
         }
+
+    # ── Multi-Lane Support ─────────────────────────────────────────────
+
+    @staticmethod
+    def _get_active_lanes(plan) -> list:
+        """Extract all unique migration lanes from asset_strategies.
+
+        Collects lane_ids from both top-level strategy entries and
+        sub_type entries, then resolves each to a lane instance.
+        """
+        from .lanes import LaneRegistry
+
+        asset_strategies = (
+            plan.asset_strategies if hasattr(plan, "asset_strategies")
+            else plan.get("asset_strategies") or {}
+        ) or {}
+
+        lane_ids: set = set()
+        for spec in asset_strategies.values():
+            if isinstance(spec, dict):
+                if spec.get("lane_id"):
+                    lane_ids.add(spec["lane_id"])
+                for st in (spec.get("sub_types") or {}).values():
+                    if isinstance(st, dict) and st.get("lane_id"):
+                        lane_ids.add(st["lane_id"])
+
+        # Fallback: if asset_strategies has no lanes but plan has legacy migration_lane_id
+        if not lane_ids:
+            legacy_id = (
+                plan.migration_lane_id if hasattr(plan, "migration_lane_id")
+                else plan.get("migration_lane_id")
+            )
+            if legacy_id:
+                lane_ids.add(legacy_id)
+
+        lanes = []
+        for lid in lane_ids:
+            lane = LaneRegistry.get_lane(lid)
+            if lane:
+                lanes.append(lane)
+        return lanes
 
     # ── Discovery ──────────────────────────────────────────────────────
 
@@ -1371,6 +1542,8 @@ class MigrationEngine:
                 "discovery_metadata": plan.discovery_metadata or {},
                 "framework_docs": plan.framework_docs or {},
                 "_project_name": project_name,
+                "asset_strategies": plan.asset_strategies or {},
+                "migration_lane_id": plan.migration_lane_id,
             }
             project_id = str(plan.source_project_id)
 
@@ -1412,6 +1585,64 @@ class MigrationEngine:
             arch_phase = 1 if version == 2 else 2
             if phase_number == arch_phase:
                 self._enrich_for_phase_2(plan_data, ctx_builder, pid)
+
+            # ── Multi-lane injection ──────────────────────────────
+            # Collect active lanes from asset_strategies (or legacy fallback)
+            active_lanes = self._get_active_lanes(plan_data)
+            if active_lanes:
+                # Determine the semantic phase type for prompt augmentation
+                phase_type = context_type or get_phase_type(phase_number, version)
+
+                # Merge prompt augmentations from all active lanes
+                augmentations = []
+                lane_ctx = {"target_stack": plan_data.get("target_stack", {})}
+                for lane in active_lanes:
+                    try:
+                        aug = lane.augment_prompt(phase_type, "", lane_ctx)
+                        if aug:
+                            augmentations.append(aug)
+                    except Exception as e:
+                        logger.warning("Lane %s prompt augmentation failed: %s", lane.lane_id, e)
+                if augmentations:
+                    plan_data["_lane_prompt_augmentation"] = "\n\n".join(augmentations)
+
+                # Apply deterministic transforms for transform phase
+                if phase_type == "transform" and mvp_data:
+                    all_transforms = []
+                    unit_dicts = []
+                    with self._db.get_session() as s:
+                        for uid in (mvp_data.get("unit_ids") or []):
+                            cu = s.query(CodeUnit).filter(CodeUnit.unit_id == uid).first()
+                            if cu:
+                                unit_dicts.append({
+                                    "id": str(cu.unit_id),
+                                    "name": cu.name,
+                                    "unit_type": cu.unit_type,
+                                    "language": cu.language,
+                                    "source": cu.source_code or "",
+                                    "metadata": cu.metadata_ or {},
+                                })
+                    if unit_dicts:
+                        for lane in active_lanes:
+                            try:
+                                results = lane.apply_transforms(unit_dicts, lane_ctx)
+                                for r in results:
+                                    all_transforms.append({
+                                        "source_unit_id": r.source_unit_id,
+                                        "target_code": r.target_code,
+                                        "target_path": r.target_path,
+                                        "rule_name": r.rule_name,
+                                        "confidence": r.confidence,
+                                        "notes": r.notes,
+                                    })
+                            except Exception as e:
+                                logger.warning("Lane %s transforms failed: %s", lane.lane_id, e)
+                    if all_transforms:
+                        plan_data["_deterministic_transforms"] = all_transforms
+                        logger.info(
+                            "Injected %d deterministic transforms from %d lane(s)",
+                            len(all_transforms), len(active_lanes),
+                        )
 
             result = execute_phase(
                 phase_number=phase_number,

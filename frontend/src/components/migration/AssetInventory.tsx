@@ -8,7 +8,7 @@
  * Design reference: Stitch project 9709894738079143127 screen 11973a412bb04d5db9a3d04705426622
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   FileCode,
   Box,
@@ -17,6 +17,9 @@ import {
   Sparkles,
   Loader2,
   ArrowRight,
+  ChevronDown,
+  ChevronRight,
+  Info,
 } from 'lucide-react';
 import * as api from '../../services/api.ts';
 import type {
@@ -25,6 +28,7 @@ import type {
   AssetStrategySpec,
   AssetInventoryResponse,
   MigrationPlan,
+  MigrationLane,
 } from '../../types/index.ts';
 
 interface AssetInventoryProps {
@@ -86,6 +90,9 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
   const [isSaving, setIsSaving] = useState(false);
   const [llmRefined, setLlmRefined] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
+  const [lanes, setLanes] = useState<MigrationLane[]>([]);
+  const [suggestedLanes, setSuggestedLanes] = useState<Record<string, MigrationLane>>({});
 
   // Load asset inventory on mount
   useEffect(() => {
@@ -97,11 +104,19 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
         setInventory(data.inventory);
         setStrategies(data.suggested_strategies);
         setLlmRefined(data.llm_refined);
+        if (data.suggested_lanes) setSuggestedLanes(data.suggested_lanes);
       })
       .catch(err => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load asset inventory');
       })
       .finally(() => { if (!cancelled) setIsLoading(false); });
+
+    api.listMigrationLanes()
+      .then((data) => {
+        if (!cancelled) setLanes(data);
+      })
+      .catch(() => {}); // Non-critical — lanes are optional
+
     return () => { cancelled = true; };
   }, [planId]);
 
@@ -182,10 +197,56 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
     }
   }, [planId, strategies, onConfirm]);
 
+  const toggleExpand = useCallback((lang: string) => {
+    setExpandedRows(prev => ({ ...prev, [lang]: !prev[lang] }));
+  }, []);
+
+  const updateLaneId = useCallback((lang: string, laneId: string | null) => {
+    setStrategies(prev => ({
+      ...prev,
+      [lang]: { ...prev[lang], lane_id: laneId },
+    }));
+  }, []);
+
+  const updateSubTypeStrategy = useCallback((lang: string, unitType: string, strategy: AssetStrategy) => {
+    setStrategies(prev => {
+      const current = prev[lang] || { strategy: 'convert', target: null, reason: null };
+      const subTypes = { ...(current.sub_types || {}) };
+      subTypes[unitType] = { ...subTypes[unitType], strategy };
+      return { ...prev, [lang]: { ...current, sub_types: subTypes } };
+    });
+  }, []);
+
+  const updateSubTypeLaneId = useCallback((lang: string, unitType: string, laneId: string | null) => {
+    setStrategies(prev => {
+      const current = prev[lang] || { strategy: 'convert', target: null, reason: null };
+      const subTypes = { ...(current.sub_types || {}) };
+      subTypes[unitType] = { ...subTypes[unitType], lane_id: laneId || undefined };
+      return { ...prev, [lang]: { ...current, sub_types: subTypes } };
+    });
+  }, []);
+
   // Migration context label
   const migrationLabel = plan.migration_type
     ? plan.migration_type.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
     : 'Migration';
+
+  // Derive primary target framework from strategies for cross-row lane hints
+  const primaryTargetFramework = useMemo(() => {
+    for (const [, spec] of Object.entries(strategies)) {
+      if (spec.strategy === 'framework_migration' && spec.target) {
+        return spec.target.toLowerCase();
+      }
+    }
+    return null;
+  }, [strategies]);
+
+  const TARGET_HINTS: Record<string, string> = {
+    springboot: 'Spring Data JPA repositories + Spring services',
+    spring: 'Spring Data JPA repositories + Spring services',
+    dotnet_core: '.NET Core EF Core DbContext + services (coming soon)',
+    django: 'Django models + service layer (coming soon)',
+  };
 
   if (isLoading) {
     return (
@@ -230,6 +291,23 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
         </div>
       )}
 
+      {/* Instructional banner */}
+      <div className="rounded-lg border border-nebula/20 bg-nebula/5 px-5 py-4">
+        <div className="flex items-start gap-3">
+          <Info className="h-5 w-5 text-nebula-bright shrink-0 mt-0.5" />
+          <div className="text-xs text-text-muted space-y-1.5">
+            <p className="font-medium text-text-dim text-sm">How Asset Inventory Works</p>
+            <p>CodeLoom analyzed your codebase and detected the file types below. For each type:</p>
+            <ul className="list-disc pl-4 space-y-0.5">
+              <li>Choose a <span className="font-medium text-text-dim">Migration Strategy</span> (Framework Migration, Convert, Keep As-Is, etc.)</li>
+              <li>For SQL and XML files, expand the row to see sub-categories — each can have a different strategy</li>
+              <li>When a <span className="font-medium text-text-dim">Migration Lane</span> is available, it provides deterministic transforms and quality gates</li>
+              <li>Files without a lane are migrated by the AI engine using your target stack context</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
       {/* Data table */}
       <div className="flex flex-col rounded-lg border border-void-surface bg-void-light overflow-hidden">
         {/* Table header bar */}
@@ -248,12 +326,14 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
             <thead>
               <tr className="border-b border-void-surface bg-void/50 text-[11px] uppercase tracking-wider text-text-dim">
                 <th className="w-10 p-3 text-center" />
+                <th className="w-8 p-3" />
                 <th className="p-3 font-medium">Language</th>
                 <th className="p-3 font-medium">Files</th>
                 <th className="p-3 font-medium">Units</th>
                 <th className="p-3 font-medium">Lines</th>
                 <th className="p-3 font-medium min-w-[180px]">Migration Strategy</th>
                 <th className="p-3 font-medium min-w-[140px]">Target</th>
+                <th className="p-3 font-medium min-w-[180px]">Lane</th>
                 <th className="p-3 font-medium">Sample Paths</th>
               </tr>
             </thead>
@@ -263,75 +343,198 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
                 const isActive = spec?.strategy !== 'no_change';
                 const color = getLangColor(item.language);
                 const targetEnabled = TARGET_ENABLED_STRATEGIES.has(spec?.strategy);
+                const hasSubTypes = (item.sub_types?.length ?? 0) > 0;
+                const isExpanded = expandedRows[item.language] ?? false;
+                const langLane = suggestedLanes[item.language];
+                const selectedLaneId = spec?.lane_id ?? langLane?.lane_id ?? null;
 
                 return (
-                  <tr
-                    key={item.language}
-                    className="group transition-colors hover:bg-void/40"
-                  >
-                    {/* Checkbox */}
-                    <td className="p-3 text-center">
-                      <input
-                        type="checkbox"
-                        checked={isActive}
-                        onChange={() => toggleActive(item.language)}
-                        className="h-4 w-4 rounded border-void-surface bg-void text-glow focus:ring-glow/50 focus:ring-offset-void-light cursor-pointer"
-                      />
-                    </td>
-
-                    {/* Language badge */}
-                    <td className="p-3">
-                      <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${color.bg} ${color.text} ${color.border}`}>
-                        {item.language}
-                      </span>
-                    </td>
-
-                    {/* Counts */}
-                    <td className="p-3 text-text-muted">{formatNumber(item.file_count)}</td>
-                    <td className="p-3 text-text-muted">{formatNumber(item.unit_count)}</td>
-                    <td className="p-3 text-text-muted">{formatNumber(item.total_lines)}</td>
-
-                    {/* Strategy dropdown */}
-                    <td className="p-3">
-                      <select
-                        value={spec?.strategy ?? 'no_change'}
-                        onChange={e => updateStrategy(item.language, e.target.value as AssetStrategy)}
-                        className={`w-full rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-glow cursor-pointer ${
-                          isActive
-                            ? 'border-glow/60 bg-void text-text'
-                            : 'border-void-surface bg-void/50 text-text-dim'
-                        }`}
-                      >
-                        {STRATEGY_OPTIONS.map(opt => (
-                          <option key={opt.value} value={opt.value}>{opt.label}</option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {/* Target input */}
-                    <td className="p-3">
-                      {targetEnabled && isActive ? (
+                  <React.Fragment key={item.language}>
+                    <tr className="group transition-colors hover:bg-void/40">
+                      {/* Checkbox */}
+                      <td className="p-3 text-center">
                         <input
-                          type="text"
-                          value={spec?.target ?? ''}
-                          onChange={e => updateTarget(item.language, e.target.value)}
-                          placeholder="Target..."
-                          className="w-full rounded-md border border-void-surface bg-void px-2.5 py-1.5 text-sm text-text placeholder:text-text-dim focus:border-glow/50 focus:outline-none focus:ring-1 focus:ring-glow"
+                          type="checkbox"
+                          checked={isActive}
+                          onChange={() => toggleActive(item.language)}
+                          className="h-4 w-4 rounded border-void-surface bg-void text-glow focus:ring-glow/50 focus:ring-offset-void-light cursor-pointer"
                         />
-                      ) : (
-                        <span className="px-2.5 py-1.5 text-sm text-text-dim">—</span>
-                      )}
-                    </td>
+                      </td>
 
-                    {/* Sample paths */}
-                    <td className="p-3">
-                      {item.sample_paths.length > 0 && (
-                        <code className="block max-w-[200px] truncate rounded border border-void-surface bg-void/50 px-2 py-1 font-code text-[11px] text-text-dim">
-                          {item.sample_paths[0]}
-                        </code>
-                      )}
-                    </td>
-                  </tr>
+                      {/* Expand chevron */}
+                      <td className="p-3">
+                        {hasSubTypes ? (
+                          <button
+                            onClick={() => toggleExpand(item.language)}
+                            className="text-text-dim hover:text-text transition-colors"
+                          >
+                            {isExpanded ? (
+                              <ChevronDown className="h-4 w-4" />
+                            ) : (
+                              <ChevronRight className="h-4 w-4" />
+                            )}
+                          </button>
+                        ) : null}
+                      </td>
+
+                      {/* Language badge */}
+                      <td className="p-3">
+                        <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${color.bg} ${color.text} ${color.border}`}>
+                          {item.language}
+                        </span>
+                      </td>
+
+                      {/* Counts */}
+                      <td className="p-3 text-text-muted">{formatNumber(item.file_count)}</td>
+                      <td className="p-3 text-text-muted">{formatNumber(item.unit_count)}</td>
+                      <td className="p-3 text-text-muted">{formatNumber(item.total_lines)}</td>
+
+                      {/* Strategy dropdown */}
+                      <td className="p-3">
+                        <select
+                          value={spec?.strategy ?? 'no_change'}
+                          onChange={e => updateStrategy(item.language, e.target.value as AssetStrategy)}
+                          className={`w-full rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-glow cursor-pointer ${
+                            isActive
+                              ? 'border-glow/60 bg-void text-text'
+                              : 'border-void-surface bg-void/50 text-text-dim'
+                          }`}
+                        >
+                          {STRATEGY_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                          ))}
+                        </select>
+                      </td>
+
+                      {/* Target input */}
+                      <td className="p-3">
+                        {targetEnabled && isActive ? (
+                          <input
+                            type="text"
+                            value={spec?.target ?? ''}
+                            onChange={e => updateTarget(item.language, e.target.value)}
+                            placeholder="Target..."
+                            className="w-full rounded-md border border-void-surface bg-void px-2.5 py-1.5 text-sm text-text placeholder:text-text-dim focus:border-glow/50 focus:outline-none focus:ring-1 focus:ring-glow"
+                          />
+                        ) : (
+                          <span className="px-2.5 py-1.5 text-sm text-text-dim">&mdash;</span>
+                        )}
+                      </td>
+
+                      {/* Lane selector */}
+                      <td className="p-3">
+                        {isActive && lanes.length > 0 ? (
+                          <select
+                            value={selectedLaneId ?? ''}
+                            onChange={e => updateLaneId(item.language, e.target.value || null)}
+                            className="w-full rounded-md border border-void-surface bg-void px-2.5 py-1.5 text-sm text-text focus:outline-none focus:ring-1 focus:ring-glow cursor-pointer"
+                          >
+                            <option value="">No lane</option>
+                            {lanes.map(l => (
+                              <option key={l.lane_id} value={l.lane_id}>
+                                {l.display_name}
+                                {suggestedLanes[item.language]?.lane_id === l.lane_id ? ' (suggested)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="px-2.5 py-1.5 text-sm text-text-dim">&mdash;</span>
+                        )}
+                      </td>
+
+                      {/* Sample paths */}
+                      <td className="p-3">
+                        {item.sample_paths.length > 0 && (
+                          <code className="block max-w-[200px] truncate rounded border border-void-surface bg-void/50 px-2 py-1 font-code text-[11px] text-text-dim">
+                            {item.sample_paths[0]}
+                          </code>
+                        )}
+                      </td>
+                    </tr>
+
+                    {/* Expanded sub-type rows */}
+                    {isExpanded && item.sub_types?.map(st => {
+                      const stKey = `${item.language}:${st.unit_type}`;
+                      const stSpec = spec?.sub_types?.[st.unit_type];
+                      const stStrategy = stSpec?.strategy ?? spec?.strategy ?? 'convert';
+                      const stLaneSuggestion = suggestedLanes[stKey];
+                      const stLaneId = stSpec?.lane_id ?? stLaneSuggestion?.lane_id ?? null;
+                      const stIsActive = stStrategy !== 'no_change';
+                      const targetHint = stLaneId && primaryTargetFramework
+                        ? TARGET_HINTS[primaryTargetFramework]
+                        : null;
+
+                      return (
+                        <tr
+                          key={stKey}
+                          className="bg-void/20 text-xs border-t border-void-surface/50"
+                        >
+                          <td className="p-2" />
+                          <td className="p-2" />
+                          <td className="p-2 pl-8">
+                            <span className="inline-flex items-center gap-1.5 text-text-dim">
+                              <span className="w-3 border-t border-l border-void-surface h-3 rounded-bl" />
+                              <code className="rounded bg-void-surface/50 px-1.5 py-0.5 text-[10px] font-code">
+                                {st.unit_type}
+                              </code>
+                            </span>
+                          </td>
+                          <td className="p-2 text-text-dim">{st.file_count}</td>
+                          <td className="p-2 text-text-dim">{st.unit_count}</td>
+                          <td className="p-2" />
+                          <td className="p-2">
+                            <select
+                              value={stStrategy}
+                              onChange={e => updateSubTypeStrategy(item.language, st.unit_type, e.target.value as AssetStrategy)}
+                              className={`w-full rounded px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-glow cursor-pointer ${
+                                stIsActive
+                                  ? 'border-glow/40 bg-void text-text'
+                                  : 'border-void-surface bg-void/50 text-text-dim'
+                              }`}
+                            >
+                              {STRATEGY_OPTIONS.map(opt => (
+                                <option key={opt.value} value={opt.value}>{opt.label}</option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="p-2" />
+                          <td className="p-2">
+                            {stIsActive && lanes.length > 0 ? (
+                              <div>
+                                <select
+                                  value={stLaneId ?? ''}
+                                  onChange={e => updateSubTypeLaneId(item.language, st.unit_type, e.target.value || null)}
+                                  className="w-full rounded border border-void-surface bg-void px-2 py-1 text-xs text-text focus:outline-none focus:ring-1 focus:ring-glow cursor-pointer"
+                                >
+                                  <option value="">No lane</option>
+                                  {lanes.map(l => (
+                                    <option key={l.lane_id} value={l.lane_id}>
+                                      {l.display_name}
+                                      {stLaneSuggestion?.lane_id === l.lane_id ? ' (suggested)' : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                                {targetHint && (
+                                  <p className="mt-1 text-[10px] text-text-dim">
+                                    Target: {targetHint}
+                                  </p>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-text-dim">&mdash;</span>
+                            )}
+                          </td>
+                          <td className="p-2">
+                            {st.sample_names.length > 0 && (
+                              <code className="text-[10px] text-text-dim font-code">
+                                {st.sample_names.slice(0, 2).join(', ')}
+                              </code>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
                 );
               })}
             </tbody>

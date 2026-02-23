@@ -3,7 +3,7 @@
  *
  * Single point of contact for all backend communication.
  * Uses cookie-based sessions (credentials: 'include').
- * All paths are relative -- Vite proxies /api to Flask on :7860.
+ * All paths are relative -- Vite proxies /api to FastAPI on :9005.
  */
 
 import type {
@@ -337,6 +337,7 @@ import type {
   DiscoveryResult,
   AssetInventoryResponse,
   AssetStrategySpec,
+  MigrationLane,
 } from '../types/index.ts';
 
 // ── Plan CRUD ──
@@ -393,6 +394,10 @@ export async function saveAssetStrategies(
     method: 'POST',
     body: JSON.stringify({ strategies }),
   });
+}
+
+export async function listMigrationLanes(): Promise<MigrationLane[]> {
+  return request<MigrationLane[]>('/api/migration/lanes');
 }
 
 // ── Discovery + MVP Management ──
@@ -611,6 +616,84 @@ export async function enrichFrameworkDocs(
   planId: string,
 ): Promise<{ enriched: string[]; failed: string[]; total_tokens: number }> {
   return request(`/api/migration/${planId}/enrich-docs`, { method: 'POST' });
+}
+
+// ── Batch Execution ──
+
+export interface BatchExecuteParams {
+  phase_number?: number | null;
+  mvp_ids?: number[] | null;
+  approval_policy?: 'manual' | 'auto' | 'auto_non_blocking';
+  run_all?: boolean;
+}
+
+export interface BatchMvpResult {
+  mvp_id: number;
+  name: string;
+  status: 'pending' | 'processing' | 'executed' | 'approved' | 'needs_review' | 'failed' | 'skipped';
+  current_phase: number;
+  error: string | null;
+  completed_at: string | null;
+  gate_results: Array<{ gate_name: string; passed: boolean; blocking: boolean; details?: string }>;
+}
+
+export interface BatchStatus {
+  batch_id: string;
+  plan_id: string;
+  status: 'running' | 'complete' | 'partial_failure' | 'needs_review';
+  approval_policy: string;
+  run_all: boolean;
+  starting_phase: number;
+  total_mvps: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  needs_review: number;
+  started_at: string;
+  completed_at: string | null;
+  mvp_results: BatchMvpResult[];
+}
+
+export interface BatchLaunchResult {
+  batch_id: string;
+  plan_id: string;
+  total_mvps: number;
+  mvp_list: Array<{ mvp_id: number; name: string }>;
+  pipeline_version: number;
+}
+
+export async function launchBatchExecution(
+  planId: string,
+  params: BatchExecuteParams,
+): Promise<BatchLaunchResult> {
+  return request<BatchLaunchResult>(`/api/migration/${planId}/batch/execute`, {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function getBatchStatus(
+  planId: string,
+  batchId: string,
+): Promise<BatchStatus> {
+  return request<BatchStatus>(`/api/migration/${planId}/batch/${batchId}`);
+}
+
+export async function listBatchExecutions(
+  planId: string,
+): Promise<BatchStatus[]> {
+  return request<BatchStatus[]>(`/api/migration/${planId}/batch`);
+}
+
+export async function retryBatchExecution(
+  planId: string,
+  batchId: string,
+  mvpIds?: number[],
+): Promise<BatchLaunchResult> {
+  return request<BatchLaunchResult>(`/api/migration/${planId}/batch/${batchId}/retry`, {
+    method: 'POST',
+    body: JSON.stringify(mvpIds ? { mvp_ids: mvpIds } : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------

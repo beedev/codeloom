@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 from ...db import DatabaseManager
 from .base import FrameworkContext
+from .struts import StrutsAnalyzer
 from .spring import SpringAnalyzer
 from .aspnet import AspNetAnalyzer
 
@@ -12,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Registry of framework analyzers (order = detection priority)
 _ANALYZERS = [
+    StrutsAnalyzer,
     SpringAnalyzer,
     AspNetAnalyzer,
 ]

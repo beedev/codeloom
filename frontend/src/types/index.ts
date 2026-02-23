@@ -347,23 +347,42 @@ export type AssetStrategy =
   | 'keep_as_is'
   | 'no_change';
 
+export interface AssetSubType {
+  unit_type: string;
+  unit_count: number;
+  file_count: number;
+  sample_names: string[];
+}
+
 export interface AssetInventoryItem {
   language: string;
   file_count: number;
   unit_count: number;
   total_lines: number;
   sample_paths: string[];
+  sub_types?: AssetSubType[];
 }
 
 export interface AssetStrategySpec {
   strategy: AssetStrategy;
   target: string | null;
   reason: string | null;
+  lane_id?: string | null;
+  sub_types?: Record<string, { strategy: AssetStrategy; lane_id?: string }>;
+}
+
+export interface MigrationLane {
+  lane_id: string;
+  display_name: string;
+  source_frameworks: string[];
+  target_frameworks: string[];
+  confidence?: number;
 }
 
 export interface AssetInventoryResponse {
   inventory: AssetInventoryItem[];
   suggested_strategies: Record<string, AssetStrategySpec>;
+  suggested_lanes?: Record<string, MigrationLane>;
   llm_refined: boolean;
 }
 
