@@ -273,53 +273,60 @@ export function PhaseViewer({
           </div>
         )}
 
-        {/* ── Transform phase: DiffViewer (full width) ── */}
+        {/* ── Transform phase: DiffViewer with file sidebar ── */}
         {isTransform && hasFiles && (
-          <div className="flex flex-1 flex-col overflow-hidden">
-            {/* File selector tabs */}
-            <div className="flex items-center gap-1 overflow-x-auto border-b border-void-surface px-2">
-              {phase!.output_files!.map((file: MigrationFile, idx: number) => (
-                <button
-                  key={idx}
-                  onClick={() => setActiveFileIdx(idx)}
-                  className={`flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-xs ${
-                    idx === activeFileIdx
-                      ? 'border-b-2 border-glow text-glow'
-                      : 'text-text-dim hover:text-text-muted'
-                  }`}
-                >
-                  <FileCode className="h-3 w-3" />
-                  {file.file_path.split('/').pop()}
+          <div className="flex flex-1 overflow-hidden">
+            {/* File sidebar */}
+            <div className="flex w-48 flex-shrink-0 flex-col border-r border-void-surface">
+              <div className="px-3 py-2 text-[10px] font-medium uppercase tracking-wider text-text-dim">
+                Files ({phase!.output_files!.length})
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {phase!.output_files!.map((file: MigrationFile, idx: number) => (
                   <button
-                    onClick={(e) => { e.stopPropagation(); handleDownloadFile(file.file_path); }}
-                    className="ml-1 rounded p-0.5 text-text-dim/50 hover:text-text-muted"
-                    title="Download file"
+                    key={idx}
+                    onClick={() => setActiveFileIdx(idx)}
+                    className={`group flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                      idx === activeFileIdx
+                        ? 'bg-glow/10 text-glow border-l-2 border-glow'
+                        : 'text-text-dim hover:bg-void-surface/50 hover:text-text-muted border-l-2 border-transparent'
+                    }`}
                   >
-                    <Download className="h-2.5 w-2.5" />
+                    <FileCode className="h-3 w-3 flex-shrink-0" />
+                    <span className="truncate" title={file.file_path}>
+                      {file.file_path.split('/').pop()}
+                    </span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDownloadFile(file.file_path); }}
+                      className="ml-auto flex-shrink-0 rounded p-0.5 text-text-dim/0 group-hover:text-text-dim/50 hover:!text-text-muted"
+                      title="Download file"
+                    >
+                      <Download className="h-2.5 w-2.5" />
+                    </button>
                   </button>
-                </button>
-              ))}
+                ))}
+              </div>
             </div>
 
-            {/* Diff loading */}
-            {isDiffLoading && (
-              <div className="flex flex-1 items-center justify-center">
-                <Loader2 className="h-5 w-5 animate-spin text-glow" />
-                <span className="ml-2 text-xs text-text-dim">Loading diff context...</span>
-              </div>
-            )}
-
-            {/* DiffViewer */}
-            {!isDiffLoading && activeMigratedFile && (
-              <div className="flex-1 overflow-hidden">
-                <DiffViewer
-                  sourceFile={matchedSourceFile}
-                  migratedFile={activeMigratedFile}
-                  sourceLanguage={matchedSourceFile?.language ?? activeMigratedFile.language}
-                  targetLanguage={activeMigratedFile.language}
-                />
-              </div>
-            )}
+            {/* Diff area */}
+            <div className="flex flex-1 flex-col overflow-hidden">
+              {isDiffLoading && (
+                <div className="flex flex-1 items-center justify-center">
+                  <Loader2 className="h-5 w-5 animate-spin text-glow" />
+                  <span className="ml-2 text-xs text-text-dim">Loading diff context...</span>
+                </div>
+              )}
+              {!isDiffLoading && activeMigratedFile && (
+                <div className="flex-1 overflow-hidden">
+                  <DiffViewer
+                    sourceFile={matchedSourceFile}
+                    migratedFile={activeMigratedFile}
+                    sourceLanguage={matchedSourceFile?.language ?? activeMigratedFile.language}
+                    targetLanguage={activeMigratedFile.language}
+                  />
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -364,26 +371,34 @@ export function PhaseViewer({
             {/* Right: Generated files (40%) */}
             {hasFiles && (
               <div className="flex w-2/5 flex-col overflow-hidden">
-                <div className="flex items-center gap-1 overflow-x-auto border-b border-void-surface px-2">
-                  {phase!.output_files!.map((file: MigrationFile, idx: number) => (
-                    <button
-                      key={idx}
-                      onClick={() => setActiveFileIdx(idx)}
-                      className={`flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-xs ${
-                        idx === activeFileIdx
-                          ? 'border-b-2 border-glow text-glow'
-                          : 'text-text-dim hover:text-text-muted'
-                      }`}
-                    >
-                      <FileCode className="h-3 w-3" />
-                      {file.file_path}
-                      {file.test_type && (
-                        <span className="rounded bg-void-surface px-1 text-[10px]">
-                          {file.test_type}
+                {/* Vertical file list */}
+                <div className="flex-shrink-0 border-b border-void-surface">
+                  <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-text-dim">
+                    Files ({phase!.output_files!.length})
+                  </div>
+                  <div className="max-h-40 overflow-y-auto">
+                    {phase!.output_files!.map((file: MigrationFile, idx: number) => (
+                      <button
+                        key={idx}
+                        onClick={() => setActiveFileIdx(idx)}
+                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                          idx === activeFileIdx
+                            ? 'bg-glow/10 text-glow border-l-2 border-glow'
+                            : 'text-text-dim hover:bg-void-surface/50 hover:text-text-muted border-l-2 border-transparent'
+                        }`}
+                      >
+                        <FileCode className="h-3 w-3 flex-shrink-0" />
+                        <span className="truncate" title={file.file_path}>
+                          {file.file_path.split('/').pop()}
                         </span>
-                      )}
-                    </button>
-                  ))}
+                        {file.test_type && (
+                          <span className="flex-shrink-0 rounded bg-void-surface px-1 text-[10px]">
+                            {file.test_type}
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="flex-1 overflow-auto">
                   <GeneratedFileView file={phase!.output_files![activeFileIdx]} />

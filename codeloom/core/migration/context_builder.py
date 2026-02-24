@@ -911,8 +911,11 @@ class MigrationContextBuilder:
             lines.append("\n### Data Entities")
             for e in entities:
                 meta = e.get("metadata") or {}
-                params = meta.get("parsed_params", [])
-                fields = ", ".join(p.get("name", "?") for p in params) if params else ""
+                fields_list = meta.get("fields", []) or meta.get("parsed_params", [])
+                fields = ", ".join(
+                    f.get("name", "?") if isinstance(f, dict) else str(f)
+                    for f in fields_list
+                ) if fields_list else ""
                 doc = (e.get("docstring") or "")[:300]
                 lines.append(f"- **{e['name']}** ({e['file_path']})")
                 if fields:
@@ -968,6 +971,185 @@ class MigrationContextBuilder:
             lines.append("\n### Validation Rules\nNone detected in this MVP.")
 
         return "\n".join(lines)
+
+    # ── Hierarchical Context (for MVP Analysis) ────────────────────────
+
+    def _build_class_method_hierarchy(self, unit_ids: List[str]) -> List[Dict]:
+        """Build file -> class -> method hierarchy from contains edges.
+
+        Queries all MVP units and `contains` edges to group methods under
+        their parent class/interface. Returns a list of file-level dicts,
+        each containing top-level units with nested children.
+        """
+        if not unit_ids:
+            return []
+
+        uids = [UUID(uid) if isinstance(uid, str) else uid for uid in unit_ids]
+
+        with self._db.get_session() as session:
+            # Get all units in this MVP
+            units = session.execute(text("""
+                SELECT cu.unit_id, cu.name, cu.qualified_name, cu.unit_type,
+                       cu.signature, cu.docstring, cu.metadata,
+                       cf.file_path, cu.start_line, cu.end_line
+                FROM code_units cu
+                JOIN code_files cf ON cu.file_id = cf.file_id
+                WHERE cu.unit_id = ANY(:uids)
+                ORDER BY cf.file_path, cu.start_line
+            """), {"uids": uids}).fetchall()
+
+            # Get contains edges (class -> method) within this MVP
+            contains = session.execute(text("""
+                SELECT ce.source_unit_id, ce.target_unit_id
+                FROM code_edges ce
+                WHERE ce.source_unit_id = ANY(:uids)
+                  AND ce.target_unit_id = ANY(:uids)
+                  AND ce.edge_type = 'contains'
+            """), {"uids": uids}).fetchall()
+
+        # Build unit lookup and parent map
+        unit_map: Dict[str, Dict] = {}
+        for row in units:
+            uid = str(row.unit_id)
+            unit_map[uid] = {
+                "unit_id": uid,
+                "name": row.name,
+                "qualified_name": row.qualified_name,
+                "unit_type": row.unit_type,
+                "signature": row.signature,
+                "docstring": row.docstring,
+                "metadata": row.metadata or {},
+                "file_path": row.file_path,
+                "start_line": row.start_line,
+                "end_line": row.end_line,
+                "children": [],
+            }
+
+        # parent_map: child_id -> parent_id
+        parent_map: Dict[str, str] = {}
+        for edge in contains:
+            parent_id = str(edge.source_unit_id)
+            child_id = str(edge.target_unit_id)
+            if parent_id in unit_map and child_id in unit_map:
+                parent_map[child_id] = parent_id
+
+        # Nest children under parents
+        for child_id, parent_id in parent_map.items():
+            unit_map[parent_id]["children"].append(unit_map[child_id])
+
+        # Group top-level units (no parent) by file
+        from collections import OrderedDict
+        files: Dict[str, List[Dict]] = OrderedDict()
+        for uid, unit in unit_map.items():
+            if uid not in parent_map:  # top-level
+                fp = unit["file_path"]
+                files.setdefault(fp, []).append(unit)
+
+        # Sort children by start_line
+        for fp, top_units in files.items():
+            for u in top_units:
+                u["children"].sort(key=lambda c: c.get("start_line") or 0)
+
+        return [{"file_path": fp, "units": us} for fp, us in files.items()]
+
+    def format_mvp_hierarchical_context(self, hierarchy: List[Dict]) -> str:
+        """Format the file->class->method hierarchy into a markdown section.
+
+        This replaces the flat functional context for analysis prompts,
+        giving the LLM grouped structure that maps naturally to class-level
+        vector chunks.
+        """
+        if not hierarchy:
+            return "## MVP Functional Context (Grouped)\nNo hierarchical context available."
+
+        lines = ["## MVP Functional Context (Grouped)"]
+
+        for file_entry in hierarchy:
+            fp = file_entry["file_path"]
+            lines.append(f"\n### File: {fp}")
+
+            for unit in file_entry.get("units", []):
+                utype = unit["unit_type"]
+                name = unit["name"]
+                sig = unit.get("signature") or ""
+                doc = (unit.get("docstring") or "")[:200]
+                meta = unit.get("metadata") or {}
+                children = unit.get("children", [])
+
+                if utype in ("class", "interface", "struct", "enum"):
+                    # Class-level header
+                    layer_hint = self._infer_layer_hint(name, meta)
+                    layer_str = f" ({layer_hint})" if layer_hint else ""
+                    lines.append(f"\n#### {utype.title()}: {name}{layer_str}")
+                    if sig:
+                        lines.append(f"  Signature: `{sig}`")
+
+                    # Class fields
+                    fields_list = meta.get("fields", []) or meta.get("parsed_params", [])
+                    if fields_list:
+                        field_names = ", ".join(
+                            f.get("name", "?") if isinstance(f, dict) else str(f)
+                            for f in fields_list
+                        )
+                        lines.append(f"  Fields: {field_names}")
+
+                    if doc:
+                        lines.append(f"  Purpose: {doc}")
+
+                    # Nested methods
+                    if children:
+                        lines.append("\n  **Methods:**")
+                        for child in children:
+                            csig = child.get("signature") or child.get("name", "?")
+                            cstart = child.get("start_line") or "?"
+                            cend = child.get("end_line") or "?"
+                            cdoc = (child.get("docstring") or "")[:150]
+                            purpose_str = f"\n    Purpose: {cdoc}" if cdoc else ""
+                            lines.append(
+                                f"  - `{csig}` — lines {cstart}-{cend}{purpose_str}"
+                            )
+                else:
+                    # Standalone function or other top-level unit
+                    start = unit.get("start_line") or "?"
+                    end = unit.get("end_line") or "?"
+                    lines.append(f"\n- **{name}** ({utype}) — lines {start}-{end}")
+                    if sig:
+                        lines.append(f"  Signature: `{sig}`")
+                    if doc:
+                        lines.append(f"  Purpose: {doc}")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _infer_layer_hint(name: str, meta: Dict) -> str:
+        """Infer architectural layer from class name and metadata."""
+        name_lower = name.lower()
+        annotations = meta.get("annotations", []) or meta.get("decorators", []) or []
+        ann_str = " ".join(str(a) for a in annotations).lower()
+
+        if any(k in name_lower for k in ("service", "manager", "handler", "usecase")):
+            return "Service"
+        if any(k in name_lower for k in ("repository", "dao", "store")):
+            return "Repository"
+        if any(k in name_lower for k in ("controller", "resource", "endpoint")):
+            return "Controller"
+        if any(k in name_lower for k in ("entity", "model", "dto", "vo")):
+            return "Entity"
+        if any(k in name_lower for k in ("validator", "validation")):
+            return "Validator"
+        if any(k in name_lower for k in ("client", "gateway", "adapter", "proxy")):
+            return "Integration"
+        if any(k in name_lower for k in ("config", "configuration", "properties")):
+            return "Configuration"
+        if "entity" in ann_str or "table" in ann_str:
+            return "Entity"
+        if "restcontroller" in ann_str or "controller" in ann_str:
+            return "Controller"
+        if "service" in ann_str or "component" in ann_str:
+            return "Service"
+        if "repository" in ann_str:
+            return "Repository"
+        return ""
 
     # ── Data queries ───────────────────────────────────────────────────
 

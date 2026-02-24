@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Limits
 MAX_FILE_SIZE_MB = 50
-MAX_FILES = 500
+MAX_FILES = 1000
 
 
 @dataclass

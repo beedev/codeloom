@@ -528,3 +528,57 @@ export interface DiagramAvailability {
   cached: boolean;
   generated_at: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Analytics
+// ---------------------------------------------------------------------------
+
+export interface ProjectAnalytics {
+  project: {
+    name: string;
+    file_count: number;
+    total_lines: number;
+    primary_language: string | null;
+    languages: string[];
+    ast_status: string;
+    asg_status: string;
+    deep_analysis_status: string;
+  };
+  code_breakdown: {
+    units_by_type: Record<string, number>;
+    edges_by_type: Record<string, number>;
+    files_by_language: Record<string, number>;
+  };
+  migration: {
+    plan_count: number;
+    active_plan: {
+      plan_id: string;
+      status: string;
+      pipeline_version: string;
+      migration_lane: string | null;
+      mvps: Record<string, number>;
+      phases: Record<string, number>;
+      avg_confidence: number | null;
+      gates_pass_rate: number | null;
+    } | null;
+  };
+  understanding: {
+    analyses_count: number;
+    entry_points_detected: number;
+  };
+  queries: {
+    total: number;
+  };
+  llm: {
+    total_calls?: number;
+    total_tokens_in?: number;
+    total_tokens_out?: number;
+    total_latency_ms?: number;
+    avg_latency_ms?: number;
+    errors?: number;
+    retries?: number;
+    calls_by_purpose?: Record<string, number>;
+    model?: string;
+    estimated_cost_usd?: number;
+  };
+}

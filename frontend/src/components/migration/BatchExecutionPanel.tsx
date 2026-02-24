@@ -36,6 +36,10 @@ interface BatchExecutionPanelProps {
   totalMvps: number;
   onMvpClick?: (mvpId: number) => void;
   onBatchComplete?: () => void;
+  /** Controlled mode: null = launch, string = monitor that batch, undefined = uncontrolled */
+  initialBatchId?: string | null;
+  onRunsLoaded?: (runs: BatchStatus[]) => void;
+  onBatchIdChange?: (batchId: string | null) => void;
 }
 
 type ApprovalPolicy = 'manual' | 'auto' | 'auto_non_blocking';
@@ -89,6 +93,9 @@ export function BatchExecutionPanel({
   totalMvps,
   onMvpClick,
   onBatchComplete,
+  initialBatchId,
+  onRunsLoaded,
+  onBatchIdChange,
 }: BatchExecutionPanelProps) {
   // ── State ──
   const [mode, setMode] = useState<'launch' | 'monitor' | 'history'>('launch');
@@ -109,6 +116,12 @@ export function BatchExecutionPanel({
   const [batchHistory, setBatchHistory] = useState<BatchStatus[]>([]);
   const [historyLoaded, setHistoryLoaded] = useState(false);
 
+  // Controlled mode: parent drives batch selection via initialBatchId
+  const isControlled = initialBatchId !== undefined;
+  const effectiveMode = isControlled
+    ? (initialBatchId === null ? 'launch' as const : 'monitor' as const)
+    : mode;
+
   // ── Cleanup polling on unmount ──
   useEffect(() => {
     return () => {
@@ -122,14 +135,17 @@ export function BatchExecutionPanel({
       const history = await api.listBatchExecutions(planId);
       setBatchHistory(history);
       setHistoryLoaded(true);
+      onRunsLoaded?.(history);
 
-      // If there's an active (running) batch, auto-switch to monitor mode
-      const running = history.find(b => b.status === 'running');
-      if (running) {
-        setActiveBatchId(running.batch_id);
-        setBatchStatus(running);
-        setMode('monitor');
-        startPolling(running.batch_id);
+      // Auto-switch to running batch (only in uncontrolled mode)
+      if (initialBatchId === undefined) {
+        const running = history.find(b => b.status === 'running');
+        if (running) {
+          setActiveBatchId(running.batch_id);
+          setBatchStatus(running);
+          setMode('monitor');
+          startPolling(running.batch_id);
+        }
       }
     } catch {
       // Ignore — history is optional
@@ -165,6 +181,38 @@ export function BatchExecutionPanel({
     pollRef.current = setInterval(poll, 5000);
   }, [planId, onBatchComplete, loadHistory]);
 
+  // ── Controlled mode: sync polling with external batch ID ──
+  // NOTE: intentionally omits startPolling from deps to avoid infinite loop
+  // (onBatchComplete is an inline arrow → new ref each render → startPolling
+  //  recreates → effect re-fires → poll calls onBatchComplete → render → loop)
+  useEffect(() => {
+    if (initialBatchId === undefined) return;
+    if (initialBatchId === null) {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      setActiveBatchId(null);
+      setBatchStatus(null);
+      return;
+    }
+    setActiveBatchId(initialBatchId);
+
+    // Clear any existing poll, then fetch once — only start polling if still running
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    let cancelled = false;
+    api.getBatchStatus(planId, initialBatchId).then((status) => {
+      if (cancelled) return;
+      setBatchStatus(status);
+      if (status.status === 'running') {
+        startPolling(initialBatchId);
+      }
+    }).catch(() => {});
+
+    return () => {
+      cancelled = true;
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialBatchId, planId]);
+
   // ── Launch batch ──
   const handleLaunch = useCallback(async () => {
     setIsLaunching(true);
@@ -177,6 +225,7 @@ export function BatchExecutionPanel({
       const result = await api.launchBatchExecution(planId, params);
       setActiveBatchId(result.batch_id);
       setMode('monitor');
+      onBatchIdChange?.(result.batch_id);
       startPolling(result.batch_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to launch batch');
@@ -193,6 +242,7 @@ export function BatchExecutionPanel({
       const result = await api.retryBatchExecution(planId, batchId);
       setActiveBatchId(result.batch_id);
       setMode('monitor');
+      onBatchIdChange?.(result.batch_id);
       startPolling(result.batch_id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to retry batch');
@@ -284,16 +334,21 @@ export function BatchExecutionPanel({
         const isExpanded = expandedMvps.has(mvp.mvp_id);
         return (
           <div key={mvp.mvp_id} className="group">
-            {/* Row */}
+            {/* Row — click navigates to MVP, chevron toggles expand */}
             <div
               className="flex cursor-pointer items-center gap-3 px-4 py-2.5 hover:bg-void-light/30"
-              onClick={() => toggleExpanded(mvp.mvp_id)}
+              onClick={() => onMvpClick ? onMvpClick(mvp.mvp_id) : toggleExpanded(mvp.mvp_id)}
             >
               {/* Expand chevron */}
-              {isExpanded
-                ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-text-dim" />
-                : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-dim" />
-              }
+              <button
+                onClick={(e) => { e.stopPropagation(); toggleExpanded(mvp.mvp_id); }}
+                className="shrink-0 text-text-dim hover:text-text"
+              >
+                {isExpanded
+                  ? <ChevronDown className="h-3.5 w-3.5" />
+                  : <ChevronRight className="h-3.5 w-3.5" />
+                }
+              </button>
 
               {/* Status icon */}
               <StatusIcon status={mvp.status} />
@@ -378,9 +433,30 @@ export function BatchExecutionPanel({
                   </div>
                 )}
                 {!mvp.error && mvp.gate_results.length === 0 && (
-                  <p className="text-xs text-text-dim">
-                    {mvp.status === 'pending' ? 'Waiting to execute...' : 'No additional details.'}
-                  </p>
+                  mvp.status === 'pending' ? (
+                    <p className="text-xs text-text-dim">Waiting to execute...</p>
+                  ) : (
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3 text-xs text-text-dim">
+                        <span>Phase {mvp.current_phase} {mvp.status === 'approved' ? 'approved' : 'executed'}</span>
+                        {mvp.completed_at && (
+                          <span>&middot; {new Date(mvp.completed_at).toLocaleTimeString()}</span>
+                        )}
+                      </div>
+                      {onMvpClick && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onMvpClick(mvp.mvp_id);
+                          }}
+                          className="flex items-center gap-1 rounded bg-void-surface px-2.5 py-1 text-[11px] text-text-muted hover:bg-void-surface/80 hover:text-text"
+                        >
+                          <Eye className="h-3 w-3" />
+                          View Outputs
+                        </button>
+                      )}
+                    </div>
+                  )
                 )}
               </div>
             )}
@@ -408,7 +484,7 @@ export function BatchExecutionPanel({
       )}
 
       {/* ── Mode: Launch ── */}
-      {mode === 'launch' && (
+      {effectiveMode === 'launch' && (
         <div className="space-y-4">
           <div>
             <h3 className="text-sm font-medium text-text">Batch Migration</h3>
@@ -484,8 +560,8 @@ export function BatchExecutionPanel({
               Start Batch Migration
             </button>
 
-            {/* History link */}
-            {batchHistory.length > 0 && (
+            {/* History link (only in uncontrolled mode — sidebar handles this otherwise) */}
+            {!isControlled && batchHistory.length > 0 && (
               <button
                 onClick={() => setMode('history')}
                 className="text-xs text-text-dim hover:text-text-muted"
@@ -497,8 +573,15 @@ export function BatchExecutionPanel({
         </div>
       )}
 
+      {/* ── Mode: Monitor (loading) ── */}
+      {effectiveMode === 'monitor' && !batchStatus && (
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-5 w-5 animate-spin text-text-dim" />
+        </div>
+      )}
+
       {/* ── Mode: Monitor ── */}
-      {mode === 'monitor' && batchStatus && (
+      {effectiveMode === 'monitor' && batchStatus && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
@@ -516,7 +599,7 @@ export function BatchExecutionPanel({
               {batchStatus.status !== 'running' && (
                 <>
                   <button
-                    onClick={() => setMode('launch')}
+                    onClick={() => { setMode('launch'); onBatchIdChange?.(null); }}
                     className="rounded bg-void-surface px-3 py-1.5 text-xs text-text-muted hover:bg-void-surface/80"
                   >
                     New Batch
@@ -583,7 +666,7 @@ export function BatchExecutionPanel({
                   )}
                 </div>
                 <div className="flex gap-2">
-                  {batchHistory.length > 0 && (
+                  {!isControlled && batchHistory.length > 0 && (
                     <button
                       onClick={() => setMode('history')}
                       className="rounded bg-void-surface px-3 py-1.5 text-xs text-text-muted hover:text-text"
@@ -598,8 +681,8 @@ export function BatchExecutionPanel({
         </div>
       )}
 
-      {/* ── Mode: History ── */}
-      {mode === 'history' && (
+      {/* ── Mode: History (uncontrolled only — sidebar handles this in controlled mode) ── */}
+      {effectiveMode === 'history' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-medium text-text">Batch Execution History</h3>

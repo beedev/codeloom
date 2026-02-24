@@ -159,7 +159,7 @@ def _call_llm(
         llm.temperature = temperature
 
     try:
-        response = llm.complete(prompt)
+        response = llm.complete(prompt, gateway_purpose="migration")
         return response.text.strip()
     finally:
         if original_temp is not None:
@@ -474,6 +474,7 @@ def _execute_architecture(
         framework_docs=framework_docs_str,
         source_patterns=source_patterns_str,
         migration_type=plan.get("migration_type", "framework_migration"),
+        asset_strategies=plan.get("asset_strategies") or None,
     )
 
     output = _call_llm(prompt)
@@ -820,14 +821,19 @@ def execute_mvp_analysis(
     # Get architecture output (could be in prev[1] for V2 or prev[2] for V1)
     architecture_output = previous_outputs.get(1, "") or previous_outputs.get(2, "")
 
-    # MVP functional context
+    # MVP functional context — prefer hierarchical grouping over flat
     functional_str = ""
     if mvp_context and mvp_context.get("unit_ids"):
         try:
-            functional = context_builder.get_mvp_functional_context(mvp_context["unit_ids"])
-            functional_str = context_builder.format_mvp_functional_context(functional)
+            hierarchy = context_builder._build_class_method_hierarchy(mvp_context["unit_ids"])
+            functional_str = context_builder.format_mvp_hierarchical_context(hierarchy)
         except Exception as e:
-            logger.warning("Functional context extraction failed: %s", e)
+            logger.warning("Hierarchical context failed, falling back to flat: %s", e)
+            try:
+                functional = context_builder.get_mvp_functional_context(mvp_context["unit_ids"])
+                functional_str = context_builder.format_mvp_functional_context(functional)
+            except Exception as e2:
+                logger.warning("Flat functional context also failed: %s", e2)
 
     # Framework docs
     framework_docs_str = ""
@@ -933,6 +939,131 @@ def _src_validate_register(
             break
 
     return best_output
+
+
+# ── Analysis Embedding ────────────────────────────────────────────────
+
+def _embed_analysis_output(
+    analysis_output: str,
+    project_id: str,
+    plan_id: str,
+    mvp_id: int,
+    mvp_name: str,
+    pipeline,
+) -> int:
+    """Chunk analysis output by class/file sections and embed into vector store.
+
+    Splits the markdown output on ### File: or #### ClassName headers.
+    Each chunk gets metadata tagging it as migration_analysis so it can
+    be retrieved by RAG chat queries about business rules, entities, etc.
+
+    Deduplication is automatic — the vector store uses md5(text) + project_id
+    unique index, so re-running analysis replaces old embeddings.
+
+    Args:
+        analysis_output: The full markdown analysis output
+        project_id: Source project UUID string
+        plan_id: Migration plan UUID string
+        mvp_id: MVP integer ID
+        mvp_name: MVP display name
+        pipeline: LocalRAGPipeline instance (needs _vector_store and Settings.embed_model)
+
+    Returns:
+        Number of nodes embedded
+    """
+    if not analysis_output or not pipeline:
+        return 0
+
+    vector_store = getattr(pipeline, "_vector_store", None)
+    if vector_store is None:
+        logger.warning("Pipeline has no _vector_store, skipping analysis embedding")
+        return 0
+
+    # Split on file and class-level headers
+    # Pattern matches: ### File: ... or #### ClassName ...
+    section_pattern = re.compile(r"(?=^###\s)", re.MULTILINE)
+    raw_sections = section_pattern.split(analysis_output)
+
+    # Build chunks — skip tiny sections, merge preamble with first real section
+    chunks: List[Dict[str, str]] = []
+    current_file = ""
+
+    for section in raw_sections:
+        section = section.strip()
+        if not section or len(section) < 50:
+            continue
+
+        # Extract file name from "### File: path/to/File.java"
+        file_match = re.match(r"^###\s+File:\s*(.+)", section)
+        if file_match:
+            current_file = file_match.group(1).strip()
+
+        # Extract class name from "#### ClassName ..." within the section
+        class_match = re.search(r"^####\s+(?:Class|Interface|Struct|Enum):\s*(\S+)", section, re.MULTILINE)
+        class_name = class_match.group(1).strip() if class_match else ""
+
+        chunks.append({
+            "text": section,
+            "file_name": current_file,
+            "class_name": class_name,
+        })
+
+    if not chunks:
+        # No section headers found — embed the whole output as one chunk
+        if len(analysis_output) > 100:
+            chunks.append({
+                "text": analysis_output,
+                "file_name": "",
+                "class_name": "",
+            })
+        else:
+            return 0
+
+    # Create TextNodes with metadata
+    try:
+        from llama_index.core.schema import TextNode
+    except ImportError:
+        logger.warning("llama_index.core.schema not available, skipping embedding")
+        return 0
+
+    nodes = []
+    for i, chunk in enumerate(chunks):
+        node = TextNode(
+            text=chunk["text"],
+            metadata={
+                "node_type": "migration_analysis",
+                "project_id": project_id,
+                "plan_id": plan_id,
+                "mvp_id": mvp_id,
+                "mvp_name": mvp_name,
+                "class_name": chunk["class_name"],
+                "file_name": chunk["file_name"],
+                "chunk_index": i,
+            },
+        )
+        nodes.append(node)
+
+    # Embed and store
+    try:
+        from llama_index.core import Settings as LISettings
+        embed_model = LISettings.embed_model
+        if embed_model:
+            for node in nodes:
+                node.embedding = embed_model.get_text_embedding(node.text)
+    except Exception as e:
+        logger.warning("Failed to generate embeddings for analysis chunks: %s", e)
+        return 0
+
+    try:
+        added = vector_store.add_nodes(nodes, project_id=project_id)
+        logger.info(
+            "Embedded %d analysis chunks for MVP %d (%s) in project %s",
+            added, mvp_id, mvp_name, project_id,
+        )
+        return added
+    except Exception as e:
+        logger.warning("Failed to add analysis nodes to vector store: %s", e)
+        return 0
 
 
 # ── Helpers ──────────────────────────────────────────────────────────

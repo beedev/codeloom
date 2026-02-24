@@ -15,18 +15,21 @@ logger = logging.getLogger(__name__)
 
 
 def _unwrap_llm(llm):
-    """Extract raw LlamaIndex LLM from wrapper classes like GroqWithBackoff.
+    """Extract raw LlamaIndex LLM from LLMGateway or legacy wrappers.
 
     LlamaIndex's resolve_llm() requires instances of the LLM base class.
-    Wrapper classes (e.g., GroqWithBackoff for rate limiting) must be
-    unwrapped before passing to components like SimpleChatEngine.
+    LLMGateway (CustomLLM subclass) stores the raw LLM as _llm.
 
     Args:
-        llm: LLM instance or wrapper
+        llm: LLM instance, LLMGateway, or legacy wrapper
 
     Returns:
         Raw LlamaIndex LLM instance
     """
+    if hasattr(llm, '_llm') and not isinstance(getattr(llm, '_llm', None), type(None)):
+        raw_llm = llm._llm
+        logger.debug(f"Unwrapped LLM: {type(llm).__name__} → {type(raw_llm).__name__}")
+        return raw_llm
     if hasattr(llm, 'get_raw_llm'):
         raw_llm = llm.get_raw_llm()
         logger.debug(f"Unwrapped LLM: {type(llm).__name__} → {type(raw_llm).__name__}")

@@ -31,14 +31,17 @@ interface PhaseTimelineProps {
   phases: MigrationPhaseInfo[];
   activePhase: number;
   onSelectPhase: (phaseNumber: number) => void;
+  locked?: boolean;
 }
 
-export function PhaseTimeline({ phases, activePhase, onSelectPhase }: PhaseTimelineProps) {
+export function PhaseTimeline({ phases, activePhase, onSelectPhase, locked }: PhaseTimelineProps) {
   return (
     <div className="flex items-center gap-1 overflow-x-auto px-4 py-3">
       {phases.map((phase, idx) => {
         const isActive = phase.phase_number === activePhase;
-        const isClickable = phase.status === 'complete' || phase.approved || phase.status === 'error';
+        // Locked phases are still clickable for read-only viewing
+        const hasOutput = phase.status === 'complete' || phase.approved || phase.status === 'error';
+        const isClickable = hasOutput;
         const materialIcon = PHASE_ICONS[phase.phase_type];
 
         return (
@@ -59,17 +62,21 @@ export function PhaseTimeline({ phases, activePhase, onSelectPhase }: PhaseTimel
               onClick={() => isClickable ? onSelectPhase(phase.phase_number) : undefined}
               disabled={!isClickable && !isActive}
               className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition-colors ${
-                isActive
-                  ? 'border-glow bg-glow/10 text-glow'
-                  : phase.approved
-                    ? 'border-success/50 bg-success/5 text-success hover:bg-success/10 cursor-pointer'
-                    : phase.status === 'complete'
-                      ? 'border-success/30 bg-void-light/50 text-success hover:bg-void-light cursor-pointer'
-                      : phase.status === 'running'
-                        ? 'border-glow/50 bg-glow/5 text-glow'
-                        : phase.status === 'error'
-                          ? 'border-danger/50 bg-danger/5 text-danger hover:bg-danger/10 cursor-pointer'
-                          : 'border-void-surface bg-void-light/30 text-text-dim'
+                locked
+                  ? isActive
+                    ? 'border-text-dim/40 bg-void-light/60 text-text-muted cursor-pointer'
+                    : 'border-void-surface/50 bg-void-light/30 text-text-dim hover:bg-void-light/50 cursor-pointer'
+                  : isActive
+                    ? 'border-glow bg-glow/10 text-glow'
+                    : phase.approved
+                      ? 'border-success/50 bg-success/5 text-success hover:bg-success/10 cursor-pointer'
+                      : phase.status === 'complete'
+                        ? 'border-success/30 bg-void-light/50 text-success hover:bg-void-light cursor-pointer'
+                        : phase.status === 'running'
+                          ? 'border-glow/50 bg-glow/5 text-glow'
+                          : phase.status === 'error'
+                            ? 'border-danger/50 bg-danger/5 text-danger hover:bg-danger/10 cursor-pointer'
+                            : 'border-void-surface bg-void-light/30 text-text-dim'
               }`}
             >
               <PhaseIcon

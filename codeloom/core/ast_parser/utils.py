@@ -24,6 +24,9 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".jsp": "jsp",
     ".jspf": "jsp",
     ".properties": "properties",
+    ".aspx": "aspx",
+    ".ascx": "aspx",
+    ".master": "aspx",
 }
 
 # Directories to skip during file walking
@@ -113,6 +116,9 @@ def get_parser(language: str) -> "BaseLanguageParser":
         elif language == "properties":
             from .properties_parser import PropertiesParser
             _parser_registry["properties"] = PropertiesParser()
+        elif language == "aspx":
+            from .asp_parser import AspParser
+            _parser_registry["aspx"] = AspParser()
         else:
             raise ValueError(
                 f"Unsupported language: {language}. "

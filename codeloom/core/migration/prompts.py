@@ -294,6 +294,7 @@ def phase_2_architecture(
     framework_docs: str = "",
     source_patterns: str = "",
     migration_type: str = "framework_migration",
+    asset_strategies: dict | None = None,
 ) -> str:
     """Build prompt for Phase 2: Technical Migration Blueprint.
 
@@ -301,9 +302,52 @@ def phase_2_architecture(
         framework_docs: Target framework best practices from DocEnricher.
         source_patterns: Formatted source pattern analysis from context_builder.
         migration_type: One of "version_upgrade", "framework_migration", "rewrite".
+        asset_strategies: Per-language migration strategies from the plan.
+            Keys are language names, values are dicts with "strategy" and optional "target".
     """
     stack_str = ", ".join(target_stack.get("frameworks", []))
     langs_str = ", ".join(target_stack.get("languages", []))
+
+    # Per-language strategy overrides (e.g. "TypeScript: keep_as_is")
+    asset_strategy_section = ""
+    if asset_strategies:
+        strategy_lines = []
+        for lang, spec in asset_strategies.items():
+            strat = spec.get("strategy", "convert")
+            target_lang = spec.get("target", "")
+            if strat == "keep_as_is":
+                strategy_lines.append(
+                    f"- **{lang}**: KEEP AS-IS — Do NOT convert {lang} files. "
+                    f"Preserve original language, update imports/references only."
+                )
+            elif strat == "no_change":
+                strategy_lines.append(
+                    f"- **{lang}**: NO CHANGE — Exclude {lang} files from migration entirely."
+                )
+            elif strat == "convert" and target_lang:
+                strategy_lines.append(
+                    f"- **{lang}**: CONVERT to {target_lang} — Rewrite {lang} source files in {target_lang}."
+                )
+            elif strat in ("framework_migration", "rewrite") and target_lang:
+                strategy_lines.append(
+                    f"- **{lang}**: {strat.upper().replace('_', ' ')} to {target_lang} — "
+                    f"Migrate {lang} code to {target_lang} using target framework best practices."
+                )
+            elif strat == "version_upgrade":
+                strategy_lines.append(
+                    f"- **{lang}**: VERSION UPGRADE — Keep {lang}, upgrade framework/library versions."
+                )
+            else:
+                strategy_lines.append(f"- **{lang}**: {strat}")
+
+        if strategy_lines:
+            asset_strategy_section = (
+                "\n### Per-Language Migration Strategies (User-Configured)\n"
+                "CRITICAL — these override the default source code conversion rules. "
+                "Only convert languages explicitly marked for conversion:\n"
+                + "\n".join(strategy_lines)
+                + "\n"
+            )
 
     # Conditional SP instructions and output sections
     sp_instruction = ""
@@ -439,6 +483,7 @@ Target ALWAYS follows framework best practices. If source has anti-patterns
 ### File Type Conversion Rules
 CRITICAL — only convert files whose source language matches a convertible type:
 - **Source code files** (.py, .js, .ts, .java, .cs, .go, .rb, etc.) → Convert to target language
+  UNLESS per-language strategies below specify otherwise (keep_as_is, no_change).
 - **SQL files** (.sql — schemas, migrations, stored procedures, queries) → Keep as SQL.
   Map to target data access patterns (e.g., repository classes that CALL the SQL), but do NOT
   rewrite the SQL itself into Java/Python/Go classes. SQL migrations stay as SQL migrations.
@@ -447,7 +492,7 @@ CRITICAL — only convert files whose source language matches a convertible type
 - **Build files** (pom.xml, build.gradle, package.json, Makefile, Dockerfile) → Map to target
   build system equivalent, do NOT convert to source code.
 - **Documentation** (.md, .txt, .rst) → Preserve as-is, update references only.
-
+{asset_strategy_section}
 ### Instructions
 1. For EVERY source pattern detected, specify the target BEST PRACTICE equivalent.
    If source uses an anti-pattern, specify the correct target pattern and explain why.
@@ -853,10 +898,24 @@ and detailed migration design. This produces the complete analysis needed before
 
 ## MVP Summary: {mvp_name}
 
-## Unit Analysis
-| Unit | Type | Complexity | Dependencies | Notes |
-|------|------|-----------|--------------|-------|
-| ... | ... | High/Med/Low | ... | ... |
+## Unit Analysis (Grouped by Class)
+
+Organize the unit analysis by file and class. For each file, group methods under
+their parent class. This makes class-level concerns visible.
+
+### File: [path/to/File.java]
+
+#### ClassName (class, Layer)
+| Method | Complexity | Dependencies | Notes |
+|--------|-----------|-------------|-------|
+| methodA | High/Med/Low | [deps] | [notes] |
+| methodB | ... | ... | ... |
+
+**Class-Level Concerns:**
+- [Thread safety, error handling, transaction boundaries, etc.]
+
+Standalone functions (not belonging to a class) get their own row at file level.
+If the context provides a grouped hierarchy, follow that structure exactly.
 
 ## Functional Requirements Register
 

@@ -731,3 +731,13 @@ export async function getChainDetail(
 ): Promise<ChainDetail> {
   return request(`/api/understanding/${projectId}/chain/${analysisId}`);
 }
+
+// ---------------------------------------------------------------------------
+// Analytics
+// ---------------------------------------------------------------------------
+
+export async function getProjectAnalytics(
+  projectId: string,
+): Promise<import('../types/index.ts').ProjectAnalytics> {
+  return request(`/api/projects/${projectId}/analytics`);
+}

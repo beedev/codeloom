@@ -78,6 +78,7 @@ class MigrationEngine:
         self._db = db_manager
         self._pipeline = pipeline
         self._clusterer = MvpClusterer(db_manager)
+        self._batch_runs: Dict[str, Dict] = {}  # batch_id -> batch state
 
     # ── Plan Lifecycle ─────────────────────────────────────────────────
 
@@ -2482,6 +2483,20 @@ class MigrationEngine:
             except Exception as disk_err:
                 logger.warning("Failed to write MVP documents to disk: %s", disk_err)
 
+            # Embed analysis output into vector store for RAG chat
+            try:
+                from .phases import _embed_analysis_output
+                _embed_analysis_output(
+                    analysis_output=result.get("output", ""),
+                    project_id=project_id,
+                    plan_id=str(pid),
+                    mvp_id=mvp_id,
+                    mvp_name=mvp_data.get("name", f"MVP-{mvp_id}"),
+                    pipeline=self._pipeline,
+                )
+            except Exception as embed_err:
+                logger.warning("Failed to embed analysis output: %s", embed_err)
+
             logger.info(f"Deep analysis complete for MVP {mvp_id} in plan {plan_id}")
             return {
                 "output": result.get("output", ""),
@@ -2586,19 +2601,38 @@ class MigrationEngine:
                 )
             migrated_files = phase.output_files or []
 
-            # Get source files from MVP's file_ids
+            # Get source files from MVP's file_ids (or derive from unit_ids)
             source_files: List[Dict] = []
             if mvp_id:
                 mvp = session.query(FunctionalMVP).filter(
                     FunctionalMVP.mvp_id == mvp_id,
                     FunctionalMVP.plan_id == pid,
                 ).first()
-                if mvp and mvp.file_ids:
-                    for fid in mvp.file_ids:
-                        try:
-                            file_uuid = UUID(fid) if isinstance(fid, str) else fid
-                        except (ValueError, AttributeError):
-                            continue
+                if mvp:
+                    # Resolve file IDs: prefer file_ids, fall back to unit_ids
+                    resolved_file_ids: set = set()
+                    if mvp.file_ids:
+                        for fid in mvp.file_ids:
+                            try:
+                                resolved_file_ids.add(
+                                    UUID(fid) if isinstance(fid, str) else fid
+                                )
+                            except (ValueError, AttributeError):
+                                continue
+                    elif mvp.unit_ids:
+                        # Derive file IDs from unit_ids
+                        for uid in mvp.unit_ids:
+                            try:
+                                unit_uuid = UUID(uid) if isinstance(uid, str) else uid
+                            except (ValueError, AttributeError):
+                                continue
+                            unit = session.query(CodeUnit.file_id).filter(
+                                CodeUnit.unit_id == unit_uuid,
+                            ).first()
+                            if unit:
+                                resolved_file_ids.add(unit.file_id)
+
+                    for file_uuid in resolved_file_ids:
                         code_file = session.query(CodeFile).filter(
                             CodeFile.file_id == file_uuid,
                         ).first()
@@ -2687,6 +2721,8 @@ class MigrationEngine:
         source_files: List[Dict], migrated_files: List[Dict]
     ) -> List[Dict]:
         """Match source files to migrated files by basename similarity."""
+        import re as _re
+
         mapping = []
 
         def _stem(path: str) -> str:
@@ -2695,7 +2731,14 @@ class MigrationEngine:
             root, _ = os.path.splitext(base)
             return root.lower()
 
+        def _tokenize(stem: str) -> set:
+            """Split stem into word tokens (handles camelCase, kebab, snake)."""
+            # Split camelCase first, then split on - and _
+            parts = _re.sub(r'([a-z])([A-Z])', r'\1_\2', stem)
+            return {t for t in _re.split(r'[-_.]', parts.lower()) if len(t) > 1}
+
         source_stems = {_stem(f["file_path"]): f["file_path"] for f in source_files}
+        mapped_targets: set = set()
 
         for mf in migrated_files:
             target_path = mf.get("file_path", "")
@@ -2708,21 +2751,51 @@ class MigrationEngine:
                     "target_path": target_path,
                     "confidence": 0.9,
                 })
-            else:
-                # Partial match: check if target stem starts with or contains source stem
-                best_match = None
-                best_score = 0.0
-                for s_stem, s_path in source_stems.items():
-                    if s_stem in target_stem or target_stem in s_stem:
-                        score = min(len(s_stem), len(target_stem)) / max(len(s_stem), len(target_stem))
-                        if score > best_score:
-                            best_score = score
-                            best_match = s_path
-                if best_match and best_score > 0.3:
+                mapped_targets.add(target_path)
+                continue
+
+            # Partial substring match + word-token overlap
+            best_match = None
+            best_score = 0.0
+            target_tokens = _tokenize(target_stem)
+
+            for s_stem, s_path in source_stems.items():
+                score = 0.0
+
+                # Substring containment
+                if s_stem in target_stem or target_stem in s_stem:
+                    score = min(len(s_stem), len(target_stem)) / max(len(s_stem), len(target_stem))
+
+                # Word-token overlap (catches renamed files like checkPaths → validate-paths)
+                if target_tokens:
+                    source_tokens = _tokenize(s_stem)
+                    if source_tokens:
+                        overlap = len(target_tokens & source_tokens)
+                        token_score = overlap / max(len(target_tokens), len(source_tokens))
+                        score = max(score, token_score)
+
+                if score > best_score:
+                    best_score = score
+                    best_match = s_path
+
+            if best_match and best_score > 0.25:
+                mapping.append({
+                    "source_path": best_match,
+                    "target_path": target_path,
+                    "confidence": round(best_score * 0.8, 2),
+                })
+                mapped_targets.add(target_path)
+
+        # Fallback: if only 1 source file and unmapped targets exist, assign it
+        if len(source_files) == 1:
+            source_path = source_files[0]["file_path"]
+            for mf in migrated_files:
+                tp = mf.get("file_path", "")
+                if tp not in mapped_targets:
                     mapping.append({
-                        "source_path": best_match,
-                        "target_path": target_path,
-                        "confidence": round(best_score * 0.8, 2),
+                        "source_path": source_path,
+                        "target_path": tp,
+                        "confidence": 0.3,
                     })
 
         return mapping
@@ -3150,3 +3223,226 @@ class MigrationEngine:
             mvp_id, mvp_dir,
         )
         return mvp_dir
+
+    # ── Batch Execution ────────────────────────────────────────────────
+
+    def prepare_batch_execution(
+        self,
+        plan_id: str,
+        phase_number: int | None = None,
+        mvp_ids: List[int] | None = None,
+        approval_policy: str = "manual",
+        run_all: bool = False,
+    ) -> Dict:
+        """Validate plan and create a batch run descriptor.
+
+        Returns a BatchLaunchResult dict immediately. The actual execution
+        happens in execute_batch_worker (called as a background task).
+        """
+        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+
+        with self._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not plan:
+                raise ValueError(f"Migration plan {plan_id} not found")
+
+            version = plan.pipeline_version or 1
+            mvp_ph = _mvp_phases(version)
+
+            # Resolve starting phase
+            starting_phase = phase_number or mvp_ph[0]
+            if starting_phase not in mvp_ph:
+                raise ValueError(
+                    f"Phase {starting_phase} is not a per-MVP phase. "
+                    f"Per-MVP phases for V{version}: {mvp_ph}"
+                )
+
+            # Resolve eligible MVPs
+            all_mvps = session.query(FunctionalMVP).filter(
+                FunctionalMVP.plan_id == pid
+            ).order_by(FunctionalMVP.priority).all()
+
+            if not all_mvps:
+                raise ValueError("No MVPs found for this plan. Run discovery first.")
+
+            if mvp_ids:
+                eligible = [m for m in all_mvps if m.mvp_id in mvp_ids]
+                missing = set(mvp_ids) - {m.mvp_id for m in eligible}
+                if missing:
+                    raise ValueError(f"MVP(s) not found: {missing}")
+            else:
+                eligible = all_mvps
+
+            batch_id = str(uuid4())
+            mvp_list = [{"mvp_id": m.mvp_id, "name": m.name} for m in eligible]
+
+            # Build initial batch state
+            self._batch_runs[batch_id] = {
+                "batch_id": batch_id,
+                "plan_id": str(pid),
+                "status": "running",
+                "approval_policy": approval_policy,
+                "run_all": run_all,
+                "starting_phase": starting_phase,
+                "pipeline_version": version,
+                "total_mvps": len(eligible),
+                "completed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "needs_review": 0,
+                "started_at": datetime.utcnow().isoformat(),
+                "completed_at": None,
+                "mvp_results": [
+                    {
+                        "mvp_id": m.mvp_id,
+                        "name": m.name,
+                        "status": "pending",
+                        "current_phase": 0,
+                        "error": None,
+                        "completed_at": None,
+                        "gate_results": [],
+                    }
+                    for m in eligible
+                ],
+            }
+
+            return {
+                "batch_id": batch_id,
+                "plan_id": str(pid),
+                "total_mvps": len(eligible),
+                "mvp_list": mvp_list,
+                "pipeline_version": version,
+            }
+
+    def execute_batch_worker(self, batch_id: str) -> None:
+        """Background worker: iterate MVPs and execute phases sequentially.
+
+        For each MVP, runs from starting_phase through the final per-MVP phase.
+        Approval behaviour depends on approval_policy:
+          - "manual": execute phase, mark needs_review, skip remaining phases
+          - "auto": execute + auto-approve if all gates pass, else mark needs_review
+          - "auto_non_blocking": execute + auto-approve unless blocking gates fail
+        If run_all=True, runs Transform → Approve → Test in sequence per MVP.
+        """
+        batch = self._batch_runs.get(batch_id)
+        if not batch:
+            logger.error("Batch %s not found in memory", batch_id)
+            return
+
+        plan_id = batch["plan_id"]
+        version = batch["pipeline_version"]
+        mvp_ph = _mvp_phases(version)
+        starting_phase = batch["starting_phase"]
+        approval_policy = batch["approval_policy"]
+        run_all = batch["run_all"]
+
+        # Determine phase range for each MVP
+        start_idx = mvp_ph.index(starting_phase)
+        phases_to_run = mvp_ph[start_idx:] if run_all else (starting_phase,)
+
+        for mvp_result in batch["mvp_results"]:
+            mvp_id = mvp_result["mvp_id"]
+            mvp_result["status"] = "processing"
+
+            try:
+                for phase_num in phases_to_run:
+                    mvp_result["current_phase"] = phase_num
+
+                    # Execute the phase
+                    self.execute_phase(plan_id, phase_num, mvp_id=mvp_id)
+
+                    # Decide whether to auto-approve
+                    phase_output = self.get_phase_output(plan_id, phase_num, mvp_id)
+                    meta = (phase_output or {}).get("phase_metadata", {})
+                    gate_results = meta.get("gate_results", [])
+                    gates_all_passed = meta.get("gates_all_passed", True)
+                    requires_review = meta.get("requires_manual_review", False)
+
+                    mvp_result["gate_results"] = gate_results
+
+                    should_approve = False
+                    if approval_policy == "auto":
+                        should_approve = gates_all_passed and not requires_review
+                    elif approval_policy == "auto_non_blocking":
+                        # Approve unless a blocking gate failed
+                        blocking_failures = [
+                            g for g in gate_results
+                            if g.get("blocking") and not g.get("passed")
+                        ]
+                        should_approve = len(blocking_failures) == 0
+                    # "manual" → never auto-approve
+
+                    if should_approve:
+                        try:
+                            self.approve_phase(plan_id, phase_num, mvp_id=mvp_id)
+                        except ValueError as approve_err:
+                            logger.warning(
+                                "Auto-approve failed for MVP %d phase %d: %s",
+                                mvp_id, phase_num, approve_err,
+                            )
+                            mvp_result["status"] = "needs_review"
+                            mvp_result["error"] = str(approve_err)
+                            batch["needs_review"] += 1
+                            break
+                    else:
+                        # If not auto-approving mid-pipeline, stop here for this MVP
+                        if run_all and phase_num != phases_to_run[-1]:
+                            if approval_policy == "manual":
+                                mvp_result["status"] = "needs_review"
+                                batch["needs_review"] += 1
+                                break
+                            elif requires_review:
+                                mvp_result["status"] = "needs_review"
+                                batch["needs_review"] += 1
+                                break
+
+                # If we completed all phases without breaking
+                if mvp_result["status"] == "processing":
+                    if approval_policy == "manual":
+                        mvp_result["status"] = "needs_review"
+                        batch["needs_review"] += 1
+                    else:
+                        mvp_result["status"] = "executed"
+                        batch["completed"] += 1
+
+                mvp_result["completed_at"] = datetime.utcnow().isoformat()
+
+            except Exception as e:
+                logger.error("Batch MVP %d failed: %s", mvp_id, e)
+                mvp_result["status"] = "failed"
+                mvp_result["error"] = str(e)
+                mvp_result["completed_at"] = datetime.utcnow().isoformat()
+                batch["failed"] += 1
+
+        # Finalize batch status
+        batch["completed_at"] = datetime.utcnow().isoformat()
+        if batch["failed"] > 0 and batch["completed"] > 0:
+            batch["status"] = "partial_failure"
+        elif batch["failed"] == batch["total_mvps"]:
+            batch["status"] = "partial_failure"
+        elif batch["needs_review"] > 0:
+            batch["status"] = "needs_review"
+        else:
+            batch["status"] = "complete"
+
+        logger.info(
+            "Batch %s finished: %d completed, %d failed, %d needs_review",
+            batch_id, batch["completed"], batch["failed"], batch["needs_review"],
+        )
+
+    def get_batch_status(self, batch_id: str, plan_id: str | None = None) -> Dict | None:
+        """Return current batch state (in-memory)."""
+        batch = self._batch_runs.get(batch_id)
+        if batch and plan_id and batch["plan_id"] != str(plan_id):
+            return None
+        return batch
+
+    def list_batch_executions(self, plan_id: str) -> List[Dict]:
+        """Return all batch runs for a given plan."""
+        pid = str(plan_id)
+        return [
+            b for b in self._batch_runs.values()
+            if b["plan_id"] == pid
+        ]

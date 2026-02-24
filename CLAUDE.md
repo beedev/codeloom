@@ -138,7 +138,7 @@ FLASK_SECRET_KEY=change-me       # Used for session middleware (name is legacy)
 
 ## Key Defaults
 
-- Backend: http://localhost:9005 (not 7860 — updated from DBNotebook)
+- Backend: http://localhost:9005
 - Frontend dev: http://localhost:3000 (Vite proxies `/api` to :9005)
 - PostgreSQL: localhost:5432 (database: `codeloom_dev`)
 - Embedding dimension: 1536 (OpenAI text-embedding-3-small)

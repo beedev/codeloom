@@ -17,6 +17,8 @@ import {
   Network,
   ArrowRightLeft,
   Brain,
+  BarChart3,
+  BookOpen,
 } from 'lucide-react';
 import { Layout } from '../components/Layout.tsx';
 import { FileTree } from '../components/FileTree.tsx';
@@ -352,6 +354,20 @@ export function ProjectView() {
               {existingPlanId ? 'Migration' : 'Migrate'}
             </Link>
           )}
+          <Link
+            to={`/project/${projectId}/wiki`}
+            className="flex items-center gap-1.5 rounded-md border border-void-surface px-3 py-1.5 text-xs text-text-muted hover:bg-void-lighter hover:text-text"
+          >
+            <BookOpen className="h-3.5 w-3.5" />
+            Wiki
+          </Link>
+          <Link
+            to={`/project/${projectId}/analytics`}
+            className="flex items-center gap-1.5 rounded-md border border-void-surface px-3 py-1.5 text-xs text-text-muted hover:bg-void-lighter hover:text-text"
+          >
+            <BarChart3 className="h-3.5 w-3.5" />
+            Analytics
+          </Link>
           <Link
             to={`/project/${projectId}/chat`}
             className="flex items-center gap-1.5 rounded-md bg-glow px-3 py-1.5 text-xs font-medium text-white hover:bg-glow-dim"

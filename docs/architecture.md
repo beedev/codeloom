@@ -30,7 +30,7 @@ CodeLoom enables developers to upload an entire codebase, understand it through 
          │               │                        │
          ▼               ▼                        ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Flask API (:7860)                           │
+│                     FastAPI (:9005)                               │
 │  /api/projects  │  /api/projects/{id}/query  │  /api/migration  │
 └────────┬────────────────┬────────────────────────┬──────────────┘
          │                │                        │

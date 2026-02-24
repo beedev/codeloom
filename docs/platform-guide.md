@@ -146,7 +146,7 @@ Per project:
 | Limit | Default | Setting |
 |---|---|---|
 | Max file size | 50 MB | `MAX_FILE_SIZE_MB` in `code_ingestion.py` |
-| Max files per project | 500 | `MAX_FILES` in `code_ingestion.py` |
+| Max files per project | 1,000 | `MAX_FILES` in `code_ingestion.py` |
 | Max tokens per chunk | 1024 | `max_tokens_per_chunk` constructor param |
 
 ### Upload Methods

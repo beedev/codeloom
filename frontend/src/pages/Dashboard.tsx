@@ -16,6 +16,8 @@ import {
   GitBranch,
   Upload,
   FolderOpen,
+  BarChart3,
+  BookOpen,
 } from 'lucide-react';
 import { Layout } from '../components/Layout.tsx';
 import { useProjects } from '../hooks/useProjects.ts';
@@ -113,6 +115,8 @@ export function Dashboard() {
                     project={project}
                     onOpen={() => navigate(`/project/${project.project_id}`)}
                     onChat={() => navigate(`/project/${project.project_id}/chat`)}
+                    onAnalytics={() => navigate(`/project/${project.project_id}/analytics`)}
+                    onWiki={() => navigate(`/project/${project.project_id}/wiki`)}
                     onDelete={() => deleteProject(project.project_id)}
                   />
                 ))}
@@ -174,11 +178,15 @@ function ProjectCard({
   project,
   onOpen,
   onChat,
+  onAnalytics,
+  onWiki,
   onDelete,
 }: {
   project: Project;
   onOpen: () => void;
   onChat: () => void;
+  onAnalytics: () => void;
+  onWiki: () => void;
   onDelete: () => void;
 }) {
   const statusColors: Record<string, string> = {
@@ -239,7 +247,7 @@ function ProjectCard({
         )}
       </div>
 
-      {/* Open + Chat buttons */}
+      {/* Open + Chat + Analytics buttons */}
       <div className="mt-4 flex items-center gap-2">
         <button
           onClick={onOpen}
@@ -252,6 +260,20 @@ function ProjectCard({
           className="rounded-lg border border-void-surface px-4 py-1.5 text-xs text-text-muted transition-colors hover:bg-void-surface hover:text-text"
         >
           Chat
+        </button>
+        <button
+          onClick={onAnalytics}
+          className="flex items-center gap-1 rounded-lg border border-void-surface px-3 py-1.5 text-xs text-text-muted transition-colors hover:bg-void-surface hover:text-text"
+        >
+          <BarChart3 className="h-3 w-3" />
+          Analytics
+        </button>
+        <button
+          onClick={onWiki}
+          className="flex items-center gap-1 rounded-lg border border-void-surface px-3 py-1.5 text-xs text-text-muted transition-colors hover:bg-void-surface hover:text-text"
+        >
+          <BookOpen className="h-3 w-3" />
+          Wiki
         </button>
       </div>
     </div>

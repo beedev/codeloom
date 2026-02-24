@@ -17,7 +17,9 @@ import { ProjectView } from './pages/ProjectView.tsx';
 import { CodeChatPage } from './pages/CodeChatPage.tsx';
 import { MigrationWizard } from './pages/MigrationWizard.tsx';
 import { MigrationPlans } from './pages/MigrationPlans.tsx';
+import { AnalyticsPage } from './pages/AnalyticsPage.tsx';
 import { Settings } from './pages/Settings.tsx';
+import { ProjectWikiPage } from './pages/ProjectWikiPage.tsx';
 
 // ---------------------------------------------------------------------------
 // ProtectedRoute -- redirects to /login if not authenticated
@@ -78,6 +80,14 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/project/:id/analytics"
+        element={
+          <ProtectedRoute>
+            <AnalyticsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/migrations"
         element={
           <ProtectedRoute>
@@ -90,6 +100,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <Settings />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/project/:id/wiki"
+        element={
+          <ProtectedRoute>
+            <ProjectWikiPage />
           </ProtectedRoute>
         }
       />

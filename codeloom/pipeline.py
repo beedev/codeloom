@@ -25,6 +25,7 @@ from .core.raptor import RAPTORWorker, RAPTORJob
 from .core.memory import SessionMemoryService
 from .core.constants import DEFAULT_USER_ID
 from .core.utils import unwrap_llm
+from .core.gateway import LLMGateway
 from .setting import get_settings, QueryTimeSettings
 
 logger = logging.getLogger(__name__)
@@ -161,12 +162,11 @@ class LocalRAGPipeline:
             host=host,
             setting=self._settings
         )
-        # Settings.llm requires a proper LlamaIndex LLM instance
-        # If using a wrapper (e.g., GroqWithBackoff), extract the raw LLM
-        if hasattr(self._default_model, 'get_raw_llm'):
-            Settings.llm = self._default_model.get_raw_llm()
-        else:
-            Settings.llm = self._default_model
+        # Wrap in LLMGateway for observability, retry, and metrics.
+        # Gateway extends CustomLLM so it passes LlamaIndex isinstance checks.
+        raw_llm = unwrap_llm(self._default_model)
+        self._gateway = LLMGateway(raw_llm)
+        Settings.llm = self._gateway
         Settings.embed_model = LocalEmbedding.set(
             host=host,
             setting=self._settings
@@ -363,9 +363,17 @@ class LocalRAGPipeline:
             host=self._ollama_host,
             setting=self._settings
         )
-        # Unwrap LLM wrappers (e.g., GroqWithBackoff) for LlamaIndex Settings compatibility
-        Settings.llm = unwrap_llm(self._default_model)
+        # Re-wrap in LLMGateway for observability
+        raw_llm = unwrap_llm(self._default_model)
+        self._gateway = LLMGateway(raw_llm)
+        Settings.llm = self._gateway
         logger.info(f"Model updated: {self._model_name}")
+
+    def get_llm_metrics(self) -> dict:
+        """Return LLM gateway metrics snapshot for analytics."""
+        if hasattr(self, '_gateway'):
+            return self._gateway.get_metrics()
+        return {}
 
     def reset_engine(self) -> None:
         """Reset the chat engine without documents."""

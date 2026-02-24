@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 from typing import Optional, Set
 
-import backoff
 import requests
 import yaml
 from llama_index.llms.ollama import Ollama
@@ -72,109 +71,8 @@ def _load_models_from_yaml() -> dict[str, Set[str]]:
 _MODEL_SETS = _load_models_from_yaml()
 
 
-def _log_groq_backoff(details: dict) -> None:
-    """Log Groq rate limit backoff events."""
-    logger.warning(
-        f"Groq rate limited, retry {details['tries']}/5 in {details['wait']:.1f}s"
-    )
-
 # Cache for LLM models to avoid re-initialization
 _llm_cache: dict = {}
-
-
-def _get_rate_limit_exceptions():
-    """Get rate limit exception classes lazily."""
-    from groq import RateLimitError as GroqRateLimitError
-    from openai import RateLimitError as OpenAIRateLimitError
-    return (GroqRateLimitError, OpenAIRateLimitError)
-
-
-class GroqWithBackoff:
-    """LlamaIndex Groq LLM wrapper with rate limit backoff.
-
-    Wraps the Groq LLM and intercepts complete/stream_complete calls
-    to apply exponential backoff on rate limit errors.
-    """
-
-    def __init__(self, model_name: str, api_key: str, temperature: float):
-        from llama_index.llms.groq import Groq
-        self._llm = Groq(
-            model=model_name,
-            api_key=api_key,
-            temperature=temperature,
-        )
-        self._rate_limit_exceptions = _get_rate_limit_exceptions()
-        logger.info(f"Created Groq LLM with rate limit backoff: {model_name}")
-
-    def get_raw_llm(self):
-        """Return the underlying LlamaIndex LLM for Settings.llm compatibility."""
-        return self._llm
-
-    def __getattr__(self, name):
-        """Delegate all attribute access to wrapped LLM."""
-        return getattr(self._llm, name)
-
-    @property
-    def model(self):
-        """Expose model name for compatibility."""
-        return self._llm.model
-
-    @property
-    def metadata(self):
-        """Expose metadata for LlamaIndex compatibility."""
-        return self._llm.metadata
-
-    def complete(self, prompt, **kwargs):
-        """Complete with exponential backoff on rate limits."""
-        @backoff.on_exception(
-            backoff.expo,
-            self._rate_limit_exceptions,
-            max_tries=5,
-            max_time=60,
-            on_backoff=_log_groq_backoff,
-        )
-        def _do_complete():
-            return self._llm.complete(prompt, **kwargs)
-        return _do_complete()
-
-    def stream_complete(self, prompt, **kwargs):
-        """Stream complete with exponential backoff on rate limits."""
-        @backoff.on_exception(
-            backoff.expo,
-            self._rate_limit_exceptions,
-            max_tries=5,
-            max_time=60,
-            on_backoff=_log_groq_backoff,
-        )
-        def _do_stream():
-            return self._llm.stream_complete(prompt, **kwargs)
-        return _do_stream()
-
-    def chat(self, messages, **kwargs):
-        """Chat with exponential backoff on rate limits."""
-        @backoff.on_exception(
-            backoff.expo,
-            self._rate_limit_exceptions,
-            max_tries=5,
-            max_time=60,
-            on_backoff=_log_groq_backoff,
-        )
-        def _do_chat():
-            return self._llm.chat(messages, **kwargs)
-        return _do_chat()
-
-    def stream_chat(self, messages, **kwargs):
-        """Stream chat with exponential backoff on rate limits."""
-        @backoff.on_exception(
-            backoff.expo,
-            self._rate_limit_exceptions,
-            max_tries=5,
-            max_time=60,
-            on_backoff=_log_groq_backoff,
-        )
-        def _do_stream_chat():
-            return self._llm.stream_chat(messages, **kwargs)
-        return _do_stream_chat()
 
 
 class LocalRAGModel:
@@ -275,9 +173,10 @@ class LocalRAGModel:
                 max_tokens=setting.gemini.max_output_tokens
             )
         elif provider == "groq":
-            # Create Groq LLM with rate limit backoff wrapper
-            model = GroqWithBackoff(
-                model_name=model_name,
+            # Create plain Groq LLM — retry/backoff handled by LLMGateway
+            from llama_index.llms.groq import Groq
+            model = Groq(
+                model=model_name,
                 api_key=os.getenv("GROQ_API_KEY"),
                 temperature=setting.ollama.temperature,
             )
