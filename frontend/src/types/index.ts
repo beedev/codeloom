@@ -285,6 +285,79 @@ export interface MigrationFile {
   test_type?: 'unit' | 'integration' | 'equivalence' | 'sp_stub';
 }
 
+// ── Agent Event Types (SSE from agentic migration execution) ──
+
+export type AgentEventType =
+  | 'agent_start'
+  | 'thinking'
+  | 'tool_call'
+  | 'tool_result'
+  | 'output'
+  | 'agent_done'
+  | 'error';
+
+export interface AgentEventBase {
+  type: AgentEventType;
+}
+
+export interface AgentStartEvent extends AgentEventBase {
+  type: 'agent_start';
+  turn: number;
+  max_turns: number;
+  phase_type: string;
+  tool_count: number;
+}
+
+export interface ThinkingEvent extends AgentEventBase {
+  type: 'thinking';
+  content: string;
+  turn: number;
+}
+
+export interface ToolCallEvent extends AgentEventBase {
+  type: 'tool_call';
+  tool: string;
+  args: Record<string, unknown>;
+  call_id: string;
+  turn: number;
+}
+
+export interface ToolResultEvent extends AgentEventBase {
+  type: 'tool_result';
+  call_id: string;
+  result: string;
+  duration_ms: number;
+  truncated: boolean;
+}
+
+export interface OutputEvent extends AgentEventBase {
+  type: 'output';
+  content: string;
+}
+
+export interface AgentDoneEvent extends AgentEventBase {
+  type: 'agent_done';
+  turns_used: number;
+  tools_called: number;
+  total_ms: number;
+  token_usage: Record<string, unknown>;
+}
+
+export interface AgentErrorEvent extends AgentEventBase {
+  type: 'error';
+  error: string;
+  recoverable: boolean;
+}
+
+export type AgentEvent =
+  | AgentStartEvent
+  | ThinkingEvent
+  | ToolCallEvent
+  | ToolResultEvent
+  | OutputEvent
+  | AgentDoneEvent
+  | AgentErrorEvent;
+
 export interface MvpResolvedFile {
   file_id: string;
   file_path: string;

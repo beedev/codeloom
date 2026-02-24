@@ -1022,3 +1022,521 @@ deprecation lifecycle, and confidence tiers surface the right level of
 human attention for each output. Together they shift migration from "LLM
 generates code, hope for the best" to "measurable, auditable, progressively
 reviewable engineering process."
+
+---
+
+## Feature 12: LLM Gateway -- Transparent Observability and Reliability Layer
+
+**What it does**: Wraps every LLM call in the system with retry logic,
+latency tracking, token counting, cost estimation, and per-purpose
+tagging -- without requiring any consumer code changes.
+
+**Implementation**: `codeloom/core/gateway.py`
+
+The `LLMGateway` subclasses LlamaIndex's `CustomLLM`, so it can be set as
+`Settings.llm` directly. Every call site in the system -- RAG queries,
+RAPTOR summarization, migration phases, deep understanding analysis --
+flows through the gateway automatically.
+
+### Design
+
+```
+Any call site (pipeline, migration, understanding)
+    |
+    v
+LLMGateway.chat() / .complete()
+    |
+    +-- Log: prompt length, model, purpose tag
+    +-- Retry with exponential backoff (rate limits, timeouts)
+    +-- Delegate to wrapped LLM provider
+    +-- Extract real token counts from provider response
+    |   (fallback: estimate at 1.3x word count)
+    +-- Track: latency, tokens_in, tokens_out, cost
+    +-- Increment per-purpose counters
+    |
+    v
+Response (unchanged -- transparent to consumers)
+```
+
+### Per-Call Purpose Tagging
+
+Every call is tagged with a `gateway_purpose` string that enables
+fine-grained analytics:
+
+| Purpose | Source | Typical Volume |
+|---------|--------|---------------|
+| `migration` | Phase execution (single-shot) | 1-6 calls per phase |
+| `migration_agent` | Agentic loop turns | 3-10 calls per phase |
+| `understanding` | Deep analysis narratives | 1 per entry point |
+| `raptor` | RAPTOR tree summarization | Proportional to file count |
+| `query` | RAG chat responses | Per user question |
+| `general` | Fallback / uncategorized | Rare |
+
+### Cost Estimation
+
+Built-in pricing for 45+ models across all supported providers:
+
+| Provider | Example Models | Pricing Source |
+|----------|---------------|----------------|
+| OpenAI | GPT-4, GPT-4o, GPT-4.1, o1, o3 | Input/output per 1M tokens |
+| Anthropic | Claude 3.5 Sonnet, Claude 4 | Input/output per 1M tokens |
+| Google | Gemini 2.0 Flash, Gemini 2.5 Pro | Input/output per 1M tokens |
+| Groq | Llama, Mixtral | Input/output per 1M tokens |
+| Ollama | Any local model | $0 (local inference) |
+
+### Metrics API
+
+Thread-safe in-memory counters exposed via `get_metrics()`:
+
+```python
+{
+    "total_calls": 142,
+    "total_tokens_in": 847200,
+    "total_tokens_out": 312400,
+    "total_latency_ms": 89300,
+    "avg_latency_ms": 628.9,
+    "total_errors": 2,
+    "total_retries": 3,
+    "calls_by_purpose": {
+        "migration_agent": 48,
+        "query": 67,
+        "understanding": 15,
+        "raptor": 12
+    },
+    "estimated_cost_usd": 4.23
+}
+```
+
+Surfaced at `/api/projects/{id}/analytics` under the `llm` key, driving
+the Project Wiki's cost and usage dashboards.
+
+### Retry Strategy
+
+```
+MAX_RETRIES = 3
+backoff = 2^attempt seconds (1s, 2s, 4s)
+
+Caught exceptions:
+  - OpenAI: RateLimitError, APITimeoutError, APIConnectionError
+  - Anthropic: RateLimitError, APIStatusError (529)
+  - Google: ResourceExhausted, ServiceUnavailable
+  - Groq: RateLimitError, APITimeoutError
+  - Generic: TimeoutError, ConnectionError
+```
+
+**How it enhances the platform**: Before the gateway, LLM failures were
+opaque -- a migration phase would fail with a cryptic API error, and the
+user would have to retry manually. Now, transient failures retry
+automatically, every call is metered, and the analytics dashboard shows
+exactly where tokens (and money) are being spent. The purpose tagging
+means you can answer "how much did this migration plan cost?" by summing
+the `migration` + `migration_agent` calls.
+
+---
+
+## Feature 13: Deep Understanding -- AI-Powered Codebase Narratives
+
+**What it does**: Automatically discovers application entry points, traces
+their call chains through the ASG, and generates structured narratives
+that explain what each code path does in business terms -- its data
+entities, business rules, external integrations, and side effects.
+
+**Implementation**: `codeloom/core/understanding/`
+
+This is CodeLoom's "read the codebase and explain it" system. Unlike RAG
+(which answers specific questions), deep understanding produces
+comprehensive analyses proactively -- the results exist before any user
+asks a question, and they feed into both the chat context and migration
+phase prompts.
+
+### Architecture
+
+```
+POST /understanding/{project_id}/analyze
+    |
+    v
+UnderstandingEngine.start_analysis()
+    +-- Create deep_analysis_job (status: pending)
+    +-- Return 202 Accepted with job_id
+    |
+    v  (background)
+UnderstandingWorker (daemon thread, asyncio loop)
+    +-- Claim job via FOR UPDATE SKIP LOCKED (distributed-safe)
+    +-- ChainTracer.detect_entry_points()
+    |     +-- Scan all CodeUnits for entry point patterns:
+    |     |     HTTP endpoints (@RequestMapping, @app.route, [HttpGet])
+    |     |     Message handlers (@KafkaListener, @RabbitListener)
+    |     |     Scheduled tasks (@Scheduled, cron patterns)
+    |     |     CLI commands (main(), @click.command)
+    |     |     Event listeners (@EventListener, signals)
+    |     |     Startup hooks (@PostConstruct, Application_Start)
+    |     +-- Return ranked list by connectivity score
+    |
+    +-- For each entry point:
+    |     +-- ChainTracer.trace_call_chain(entry_unit_id)
+    |     |     Walk ASG 'calls' edges, depth-first, max 5 levels
+    |     |     Record: unit_id, depth, path_count
+    |     |
+    |     +-- ChainAnalyzer.analyze(chain)
+    |     |     Tier selection based on total token count:
+    |     |       Tier 1 (<=100K): Full source for all units
+    |     |       Tier 2 (100-200K): Full source depth 0-2,
+    |     |                          signatures only depth 3+
+    |     |       Tier 3 (>200K): LLM-summarized deep branches
+    |     |
+    |     +-- LLM extracts structured DeepContextBundle:
+    |           - narrative: Plain-English explanation of the code path
+    |           - business_rules: What domain rules are enforced
+    |           - data_entities: What data is read/written
+    |           - integrations: External systems touched
+    |           - side_effects: Emails sent, files written, events fired
+    |           - evidence_refs: Links back to specific code units
+    |           - confidence_score: 0.0-1.0
+    |           - coverage_pct: % of call chain analyzed
+    |
+    +-- Store results in deep_analyses table
+    +-- Update job progress (completed_entry_points / total)
+    +-- Heartbeat every 30s (stale jobs reclaimed at 120s)
+```
+
+### Tiered Analysis
+
+The tier system is what makes this practical for large codebases. A single
+entry point in a Java enterprise app might touch 200+ code units across 50
+files -- far too much to feed into one LLM call. The tiers handle this:
+
+| Tier | Token Budget | Strategy | Typical Use |
+|------|-------------|----------|-------------|
+| 1 | <= 100K | Full source for all units in chain | Small/medium apps, leaf entry points |
+| 2 | 100K - 200K | Full source for shallow (depth 0-2), signatures for deep (3+) | Large apps, typical entry points |
+| 3 | > 200K | LLM summarizes deep branches first, then analyzes summaries + shallow source | Enterprise monoliths, deep call trees |
+
+### Integration with Chat and Migration
+
+Deep understanding results don't sit in isolation -- they feed into two
+downstream consumers:
+
+**RAG Chat**: When a user asks a question, the retrieval pipeline includes
+deep analysis narratives as context. If someone asks "how does order
+processing work?", RAG returns both the relevant code chunks AND the
+narrative that explains the order processing entry point's full call chain.
+The LLM can synthesize a comprehensive answer because it has both the
+granular code and the big-picture narrative.
+
+**Migration Context**: The `MigrationContextBuilder` method
+`get_deep_analysis_context()` pulls overlapping narratives for the current
+MVP's units and injects them into the transform phase prompt. The migrating
+LLM doesn't just see raw source code -- it understands the business purpose
+of the code it's transforming.
+
+### Data Model
+
+```
+deep_analysis_jobs
+    job_id          UUID PK
+    project_id      UUID FK -> projects
+    status          pending | processing | complete | error
+    total_entry_points    INT
+    completed_entry_points INT
+    retry_count     INT (max 3)
+    created_at      TIMESTAMP
+
+deep_analyses
+    analysis_id     UUID PK
+    project_id      UUID FK -> projects
+    entry_unit_id   UUID FK -> code_units
+    tier            INT (1, 2, or 3)
+    total_units     INT
+    total_tokens    INT
+    confidence_score FLOAT
+    coverage_pct    FLOAT
+    narrative       TEXT
+    result_json     JSONB (full DeepContextBundle)
+
+analysis_units
+    analysis_id     UUID FK -> deep_analyses
+    unit_id         UUID FK -> code_units
+    min_depth       INT
+    path_count      INT
+```
+
+**How it enhances the platform**: Deep understanding bridges the gap
+between "I can search this code" and "I understand this application."
+Before it, CodeLoom could answer "what does function X do?" by retrieving
+the function's code. After it, CodeLoom can answer "what happens when a
+user places an order?" by synthesizing the narrative that traces the
+full call chain from the HTTP endpoint through validation, business logic,
+database writes, and notification dispatch. And because these narratives
+feed into migration, the LLM generating target code understands not just
+the syntax of what it's migrating, but the business intent behind it.
+
+---
+
+## Feature 14: Agentic Migration -- Multi-Turn Tool-Use Execution
+
+**What it does**: Replaces single-shot LLM calls for migration phases with
+an iterative agent loop where the LLM can call tools (read source, search
+codebase, look up framework docs, validate syntax) and refine its output
+across multiple turns.
+
+**Implementation**: `codeloom/core/migration/agent/`
+
+### The Problem with Single-Shot Migration
+
+In the original architecture, each migration phase was a single LLM call:
+build a prompt with as much context as fits the budget, call the LLM once,
+hope the output is correct. This has fundamental limitations:
+
+1. **Context can't be targeted**: The prompt must pre-load all potentially
+   relevant code, wasting budget on code the LLM doesn't need
+2. **No verification loop**: If the generated code has syntax errors or
+   references a wrong API, there's no way to catch and fix it
+3. **No exploration**: The LLM can't ask "what does the UserService look
+   like?" -- it either has it in context or it doesn't
+
+### The Agent Architecture
+
+```
+MigrationAgent
+    |
+    +-- system_prompt: Phase-specific migration instructions
+    +-- task_prompt: MVP context + requirements
+    +-- tools: 10 bound ToolDefinitions
+    +-- max_turns: 10 (configurable)
+    |
+    v
+Turn 1: LLM examines context, decides what it needs
+    +-- Tool call: get_source_code(token_budget=12000)
+    +-- Tool call: get_dependencies(limit=50)
+    |
+Turn 2: LLM reads source, identifies framework patterns
+    +-- Tool call: lookup_framework_docs(framework="Spring Boot",
+    |                                     topic="JPA repositories")
+    +-- Tool call: read_source_file(file_path="src/.../UserDAO.java")
+    |
+Turn 3: LLM generates migrated code, self-validates
+    +-- Tool call: validate_syntax(code="...", language="java")
+    |   -> "Syntax errors: Line 42, missing semicolon"
+    |
+Turn 4: LLM fixes error, re-validates
+    +-- Tool call: validate_syntax(code="...", language="java")
+    |   -> "Syntax OK"
+    |
+Turn 5: LLM produces final output (no tool calls = done)
+    -> Final migrated code with explanations
+```
+
+### Tool Arsenal
+
+The agent has access to 10 tools, assembled per-phase:
+
+| Tool | Category | Purpose | Budget/Limit |
+|------|----------|---------|-------------|
+| `get_source_code` | code | MVP units ordered by connectivity | 12K tokens default, 20K max |
+| `read_source_file` | code | Full file content for reference | Outer safety net: 90K chars |
+| `get_unit_details` | code | Enriched metadata (params, types, modifiers) | 40 units default |
+| `get_functional_context` | code | Business rules, entities, integrations | Per-MVP extraction |
+| `get_dependencies` | code | Cross-boundary ASG edges (blast radius) | 50 edges, 8K chars |
+| `get_module_graph` | code | File-level import/dependency graph | 8K chars |
+| `get_deep_analysis` | code | Deep understanding narratives for MVP | 5 narratives, 10K chars |
+| `search_codebase` | search | Semantic RAG search across full project | 6 results, 10K chars |
+| `lookup_framework_docs` | docs | Context7 primary, Tavily fallback | 12K chars |
+| `validate_syntax` | validation | tree-sitter parse check on generated code | Unlimited |
+
+Tools are phase-gated -- `transform` gets all 10, `analyze` gets 8 (no
+docs/validation), `test` gets 7, `discovery` gets 3.
+
+### Event Streaming
+
+Every agent action produces a typed event, serialized to SSE for real-time
+frontend rendering:
+
+| Event | Payload | UI Treatment |
+|-------|---------|-------------|
+| `AgentStartEvent` | turn count, tool count, phase type | Progress bar initialization |
+| `ThinkingEvent` | reasoning text, turn number | Italic text with brain icon |
+| `ToolCallEvent` | tool name, args, call_id, turn | Color-coded tool badge + args |
+| `ToolResultEvent` | result text, duration_ms, truncated flag | Collapsible result panel |
+| `OutputEvent` | final answer content | Syntax-highlighted code block |
+| `AgentDoneEvent` | turns_used, tools_called, total_ms | Summary stats bar |
+| `ErrorEvent` | error message, recoverable flag | Red error card |
+
+### Graceful Degradation
+
+The agent handles edge cases without crashing:
+
+- **Tool call format error**: If the LLM produces a malformed tool call
+  (common with some providers), the agent retries without tools, forcing a
+  plain-text final answer
+- **Unknown tool**: Returns an error string listing available tools -- the
+  LLM self-corrects on the next turn
+- **Max turns exhausted**: On the final turn, tools are stripped and the
+  LLM is instructed to produce its best answer with whatever context it
+  has gathered
+- **Tool execution failure**: Catches exceptions, returns error string to
+  the LLM, which can try a different approach
+
+### Phase Integration
+
+The agentic path is activated per-phase via `use_agent=True`:
+
+```
+execute_phase(plan_id, phase_number, mvp_id, use_agent=True)
+    |
+    v
+Build system prompt (phase-specific migration instructions)
+Build task prompt (MVP context from context_builder)
+Assemble tools (phase-gated via _PHASE_TOOL_MAP)
+    |
+    v
+MigrationAgent(llm=gateway, tools=tools, system_prompt=...)
+    .execute(task_prompt=..., phase_type="transform")
+    |
+    v
+Generator[AgentEvent] -> SSE stream -> Frontend AgentExecutionPanel
+```
+
+The frontend `AgentExecutionPanel` consumes the SSE stream and renders
+each event as an `AgentStepCard` -- tool calls show with color-coded
+badges (purple for code tools, amber for search, green for docs), results
+are collapsible, and the final output renders as syntax-highlighted code.
+
+**How it enhances the platform**: The shift from single-shot to agentic is
+qualitative, not just quantitative. A single-shot migration of a complex
+MVP might produce code that references a Spring Boot annotation wrong
+because the LLM didn't have the docs in context. The agent looks up the
+docs, generates the code, validates the syntax, fixes errors, and produces
+a verified result -- all in one execution. The user watches this happen in
+real-time through the streaming UI, building trust in the process.
+
+---
+
+## Feature 15: Project Wiki and Analytics Dashboard
+
+**What it does**: Provides a unified intelligence dashboard that aggregates
+project health metrics, code analysis results, migration progress, and LLM
+usage into a single browsable view.
+
+**Implementation**: `codeloom/api/routes/analytics.py`,
+`frontend/src/components/wiki/`
+
+### Analytics API
+
+A single endpoint (`GET /api/projects/{id}/analytics`) aggregates data
+from five separate database queries and the LLM gateway metrics into one
+response:
+
+```python
+{
+    "project": {
+        "name": "enterprise-app",
+        "file_count": 342,
+        "total_lines": 89400,
+        "primary_language": "java",
+        "languages": ["java", "jsp", "xml", "sql", "properties"],
+        "ast_status": "complete",
+        "asg_status": "complete",
+        "deep_analysis_status": "complete"
+    },
+    "code_breakdown": {
+        "units_by_type": {"class": 187, "method": 1240, "interface": 43, ...},
+        "edges_by_type": {"calls": 3420, "imports": 890, "inherits": 156, ...},
+        "files_by_language": {"java": 280, "jsp": 34, "xml": 18, ...}
+    },
+    "migration": {
+        "plan_count": 1,
+        "active_plan": {
+            "status": "in_progress",
+            "pipeline_version": 2,
+            "migration_lane": "struts_to_springboot",
+            "mvps": {"total": 12, "pending": 4, "processing": 1, ...},
+            "phases": {"total": 26, "executed": 18, "approved": 15, ...},
+            "avg_confidence": 0.84,
+            "gates_pass_rate": 0.93
+        }
+    },
+    "understanding": {
+        "analyses_count": 28,
+        "entry_points_detected": 34
+    },
+    "llm": {
+        "total_calls": 142,
+        "total_tokens_in": 847200,
+        "total_tokens_out": 312400,
+        "estimated_cost_usd": 4.23,
+        "calls_by_purpose": {"migration_agent": 48, "query": 67, ...}
+    }
+}
+```
+
+### Wiki Sections
+
+The frontend renders this data across seven specialized sections:
+
+| Section | What It Shows | Data Source |
+|---------|--------------|-------------|
+| Overview | Status badges, metric cards, language distribution | `project` + `code_breakdown` |
+| Architecture | Dependency graph, module hierarchy, interface contracts | ASG queries + framework analysis |
+| Migration | Plan timeline, MVP breakdown, phase progress, confidence trends | `migration` analytics |
+| Understanding | Entry point catalog, narrative summaries, evidence links | Deep analysis results |
+| Generated Code | Target architecture snippets, design patterns | Migration phase outputs |
+| MVP Catalog | MVP cards with unit composition, boundary edges, business context | MVP + context builder |
+| Diagrams | Mermaid/PlantUML diagrams (ASG, MVP structure, call chains) | Generated from ASG data |
+
+**How it enhances the platform**: The wiki turns CodeLoom from a tool you
+interact with one query at a time into a living document that reflects
+everything the system knows about a codebase. A new team member can open
+the wiki and see: the project has 342 files across 5 languages, the ASG
+found 3420 call relationships, deep understanding traced 28 code paths,
+migration is 58% complete with 84% average confidence, and the LLM has
+spent $4.23 across 142 calls. That's a project health dashboard that
+updates as you work.
+
+---
+
+## The Integration Effect (Updated)
+
+What makes CodeLoom more than the sum of its parts is how these features
+compose:
+
+1. **Parsing feeds everything**: AST metadata -> ASG edges -> chunk quality
+   -> retrieval accuracy -> migration intelligence.
+
+2. **ASG enables clustering**: Edge density metrics -> cohesion/coupling
+   scores -> MVP boundaries -> incremental migration.
+
+3. **Lanes leverage metadata**: Parser-extracted types + ASG relationships ->
+   type-correct code generation + quality gates.
+
+4. **RAG uses the full stack**: Chunked code + RAPTOR summaries + ASG context
+   + deep understanding narratives -> accurate answers at any abstraction
+   level.
+
+5. **Human approval closes the loop**: Every automated step has a checkpoint
+   where domain expertise can correct course.
+
+6. **Framework detection informs everything**: Detected patterns -> lane
+   selection -> prompt augmentation -> doc enrichment -> transform rules.
+
+7. **Gateway observes everything**: Every LLM call -- RAG, migration,
+   understanding, RAPTOR -- flows through one layer with retry, metrics,
+   and cost tracking. Nothing is invisible.
+
+8. **Deep understanding feeds forward**: Entry point narratives -> chat
+   context enrichment -> migration phase prompts. The LLM migrating code
+   knows its business purpose, not just its syntax.
+
+9. **Agentic execution closes the quality gap**: The agent reads source,
+   looks up docs, generates code, validates syntax, and fixes errors in a
+   single execution -- replacing the hope-based single-shot approach.
+
+10. **The wiki makes it visible**: Every metric, analysis, and migration
+    artifact surfaces in a browsable dashboard -- project health at a
+    glance instead of buried in database rows.
+
+The system follows a principle of **progressive enrichment**: raw files
+become parsed units, parsed units become graph nodes with edges, graph
+nodes become clustered MVPs, MVPs become migration targets with
+lane-specific transforms, entry points become traced call chains with
+business narratives, and every LLM interaction is metered and observable.
+Each layer adds intelligence that the next layer consumes.

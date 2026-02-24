@@ -30,7 +30,10 @@ from .context_builder import MigrationContextBuilder
 from .doc_enricher import DocEnricher
 from .lanes.base import aggregate_confidence, confidence_tier
 from .mvp_clusterer import MvpClusterer, _MAX_CLUSTER_SIZE
-from .phases import execute_phase, execute_mvp_analysis, get_phase_type, _describe_mvp, _evaluate_mvp_coherence
+from .phases import (
+    execute_phase, execute_phase_agentic,
+    execute_mvp_analysis, get_phase_type, _describe_mvp, _evaluate_mvp_coherence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1342,7 +1345,7 @@ class MigrationEngine:
             mvps = session.query(FunctionalMVP).filter(
                 FunctionalMVP.mvp_id.in_(mvp_ids),
                 FunctionalMVP.plan_id == pid,
-            ).order_by(FunctionalMVP.priority).all()
+            ).order_by(FunctionalMVP.priority, FunctionalMVP.mvp_id).all()
 
             if len(mvps) < 2:
                 raise ValueError("Some MVPs not found")
@@ -1501,7 +1504,7 @@ class MigrationEngine:
 
             mvps = session.query(FunctionalMVP).filter(
                 FunctionalMVP.plan_id == pid
-            ).order_by(FunctionalMVP.priority).all()
+            ).order_by(FunctionalMVP.priority, FunctionalMVP.mvp_id).all()
 
             if not mvps:
                 raise ValueError("No MVPs found — run discovery first")
@@ -1510,6 +1513,23 @@ class MigrationEngine:
             created = []
             for mvp in mvps:
                 for n in mvp_ph:
+                    # Idempotent: skip if phase already exists
+                    existing = session.query(MigrationPhase).filter(
+                        MigrationPhase.plan_id == pid,
+                        MigrationPhase.phase_number == n,
+                        MigrationPhase.mvp_id == mvp.mvp_id,
+                    ).first()
+                    if existing:
+                        created.append({
+                            "phase_id": str(existing.phase_id),
+                            "mvp_id": mvp.mvp_id,
+                            "mvp_name": mvp.name,
+                            "phase_number": n,
+                            "phase_type": get_phase_type(n, version),
+                            "already_existed": True,
+                        })
+                        continue
+
                     phase = MigrationPhase(
                         phase_id=uuid4(),
                         plan_id=pid,
@@ -1646,7 +1666,7 @@ class MigrationEngine:
             # Inject MVP functional summaries for Discovery prompt
             all_mvps = session.query(FunctionalMVP).filter(
                 FunctionalMVP.plan_id == pid
-            ).order_by(FunctionalMVP.priority).all()
+            ).order_by(FunctionalMVP.priority, FunctionalMVP.mvp_id).all()
             if all_mvps:
                 plan_data["_mvp_summaries"] = [
                     {
@@ -1913,6 +1933,197 @@ class MigrationEngine:
 
         return self.get_phase_output(str(pid), phase_number, mvp_id)
 
+    def execute_phase_agentic(
+        self,
+        plan_id: str,
+        phase_number: int,
+        mvp_id: Optional[int] = None,
+        max_turns: int = 10,
+    ):
+        """Execute a migration phase using the agentic tool-use loop.
+
+        Performs the same validation, enrichment, and persistence as execute_phase()
+        but yields AgentEvent objects for SSE streaming instead of blocking.
+
+        Args:
+            plan_id: Migration plan UUID string.
+            phase_number: Phase number.
+            mvp_id: MVP ID for per-MVP phases.
+            max_turns: Maximum agent iterations.
+
+        Yields:
+            AgentEvent instances for SSE streaming.
+        """
+        from .agent.events import ErrorEvent, AgentDoneEvent
+        import json as _json
+
+        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+
+        with self._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not plan:
+                yield ErrorEvent(error=f"Migration plan {plan_id} not found", recoverable=False)
+                return
+
+            version = plan.pipeline_version or 1
+            plan_ph = _plan_phases(version)
+            mvp_ph = _mvp_phases(version)
+
+            if phase_number in mvp_ph and mvp_id is None:
+                yield ErrorEvent(error=f"Phase {phase_number} requires an mvp_id", recoverable=False)
+                return
+            if phase_number in plan_ph and mvp_id is not None:
+                yield ErrorEvent(error=f"Plan-level phase {phase_number} does not accept mvp_id", recoverable=False)
+                return
+
+            try:
+                self._validate_prerequisites(session, pid, phase_number, mvp_id, version)
+            except ValueError as e:
+                yield ErrorEvent(error=str(e), recoverable=False)
+                return
+
+            phase = self._get_phase(session, pid, phase_number, mvp_id)
+            if not phase:
+                yield ErrorEvent(error=f"Phase {phase_number} not found", recoverable=False)
+                return
+
+            # Mark as running
+            run_id = uuid4()
+            phase.run_id = run_id
+            phase.status = "running"
+            plan.status = "in_progress"
+            plan.current_phase = phase_number
+
+            previous_outputs = self._collect_previous_outputs(session, pid, phase_number, mvp_id)
+
+            # Fetch project name for disk output directory
+            project_name = None
+            proj = session.query(Project).filter(
+                Project.project_id == plan.source_project_id
+            ).first()
+            if proj:
+                project_name = proj.name
+
+            plan_data = {
+                "target_brief": plan.target_brief,
+                "target_stack": plan.target_stack or {},
+                "constraints": plan.constraints or {},
+                "migration_type": plan.migration_type or "framework_migration",
+                "discovery_metadata": plan.discovery_metadata or {},
+                "framework_docs": plan.framework_docs or {},
+                "_project_name": project_name,
+            }
+            project_id = str(plan.source_project_id)
+
+            mvp_data = None
+            if mvp_id:
+                mvp = session.query(FunctionalMVP).filter(
+                    FunctionalMVP.mvp_id == mvp_id
+                ).first()
+                if mvp:
+                    mvp_data = self._mvp_to_dict(mvp)
+                    if mvp.analysis_output:
+                        plan_data["_analysis_output"] = mvp.analysis_output.get("output", "")
+
+        context_type = get_phase_type(phase_number, version) if version == 2 else None
+        started_at = datetime.utcnow()
+        execution_start = time.monotonic()
+
+        try:
+            from .agent.events import OutputEvent
+            ctx_builder = MigrationContextBuilder(self._db, project_id)
+
+            # Stream events, capturing output content for persistence
+            captured_output = ""
+            for event in execute_phase_agentic(
+                phase_number=phase_number,
+                plan=plan_data,
+                previous_outputs=previous_outputs,
+                context_builder=ctx_builder,
+                context_type=context_type,
+                mvp_context=mvp_data,
+                pipeline=self._pipeline,
+                project_id=project_id,
+                max_turns=max_turns,
+            ):
+                # Capture the final output content for DB persistence
+                if isinstance(event, OutputEvent):
+                    captured_output = event.content
+
+                yield event
+
+            duration_ms = int((time.monotonic() - execution_start) * 1000)
+            logger.info(
+                "Agentic phase %d finished for mvp=%s — captured_output=%d chars",
+                phase_number, mvp_id, len(captured_output),
+            )
+
+            # Persist result (always, even if no captured_output)
+            output_files = []
+            effective_type = context_type or get_phase_type(phase_number, version)
+            if captured_output and effective_type in ("transform", "test"):
+                from .phases import _parse_json_files
+                output_files = _parse_json_files(captured_output)
+
+            with self._db.get_session() as session:
+                phase = self._get_phase(session, pid, phase_number, mvp_id)
+                if phase:
+                    if captured_output or output_files:
+                        phase.status = "complete"
+                    else:
+                        phase.status = "error"
+                    phase.output = captured_output if not output_files else (
+                        f"Generated {len(output_files)} file(s). See output_files."
+                    )
+                    phase.output_files = output_files
+                    meta = dict(phase.phase_metadata or {})
+                    meta["execution_metrics"] = {
+                        "run_id": str(run_id),
+                        "started_at": started_at.isoformat(),
+                        "completed_at": datetime.utcnow().isoformat(),
+                        "duration_ms": duration_ms,
+                        "agentic": True,
+                        "max_turns": max_turns,
+                    }
+                    phase.phase_metadata = meta
+
+                    if mvp_id:
+                        mvp_obj = session.query(FunctionalMVP).filter(
+                            FunctionalMVP.mvp_id == mvp_id
+                        ).first()
+                        if mvp_obj:
+                            mvp_obj.current_phase = phase_number
+
+            # Write to disk (fire-and-forget — DB is source of truth)
+            if captured_output or output_files:
+                try:
+                    self._write_phase_to_disk(
+                        plan_id=str(pid),
+                        phase_number=phase_number,
+                        phase_type=effective_type,
+                        output=captured_output or "",
+                        output_files=output_files,
+                        mvp_id=mvp_id,
+                        project_name=plan_data.get("_project_name"),
+                    )
+                    logger.info(
+                        "Agentic disk write: plan=%s phase=%d mvp=%s files=%d",
+                        str(pid)[:8], phase_number, mvp_id, len(output_files),
+                    )
+                except Exception as disk_err:
+                    logger.warning("Agentic disk write failed (non-fatal): %s", disk_err)
+
+        except Exception as e:
+            logger.error(f"Agentic phase {phase_number} failed: {e}")
+            with self._db.get_session() as session:
+                phase = self._get_phase(session, pid, phase_number, mvp_id)
+                if phase:
+                    phase.status = "error"
+                    phase.output = f"Agentic execution error: {e}"
+            yield ErrorEvent(error=str(e), recoverable=False)
+
     def approve_phase(
         self,
         plan_id: str,
@@ -2060,7 +2271,7 @@ class MigrationEngine:
             # MVPs with their phases
             mvps = session.query(FunctionalMVP).filter(
                 FunctionalMVP.plan_id == pid
-            ).order_by(FunctionalMVP.priority).all()
+            ).order_by(FunctionalMVP.priority, FunctionalMVP.mvp_id).all()
 
             mvp_summaries = []
             for mvp in mvps:
@@ -3052,8 +3263,14 @@ class MigrationEngine:
         directory path, or None if nothing was written.
         """
         if not output and not output_files:
+            logger.debug("_write_phase_to_disk: nothing to write (empty output and no files)")
             return None
 
+        logger.info(
+            "_write_phase_to_disk: plan=%s phase=%d type=%s mvp=%s output=%d chars, files=%d, project=%s",
+            plan_id[:8], phase_number, phase_type, mvp_id,
+            len(output or ""), len(output_files), project_name,
+        )
         plan_dir = self._get_plan_dir(plan_id, project_name)
 
         # Write LLM markdown output to _plans/
@@ -3233,6 +3450,8 @@ class MigrationEngine:
         mvp_ids: List[int] | None = None,
         approval_policy: str = "manual",
         run_all: bool = False,
+        use_agent: bool = False,
+        max_agent_turns: int = 10,
     ) -> Dict:
         """Validate plan and create a batch run descriptor.
 
@@ -3262,7 +3481,7 @@ class MigrationEngine:
             # Resolve eligible MVPs
             all_mvps = session.query(FunctionalMVP).filter(
                 FunctionalMVP.plan_id == pid
-            ).order_by(FunctionalMVP.priority).all()
+            ).order_by(FunctionalMVP.priority, FunctionalMVP.mvp_id).all()
 
             if not all_mvps:
                 raise ValueError("No MVPs found for this plan. Run discovery first.")
@@ -3285,6 +3504,8 @@ class MigrationEngine:
                 "status": "running",
                 "approval_policy": approval_policy,
                 "run_all": run_all,
+                "use_agent": use_agent,
+                "max_agent_turns": max_agent_turns,
                 "starting_phase": starting_phase,
                 "pipeline_version": version,
                 "total_mvps": len(eligible),
@@ -3303,6 +3524,8 @@ class MigrationEngine:
                         "error": None,
                         "completed_at": None,
                         "gate_results": [],
+                        "agent_stats": None,
+                        "agent_trace": [],
                     }
                     for m in eligible
                 ],
@@ -3337,21 +3560,68 @@ class MigrationEngine:
         starting_phase = batch["starting_phase"]
         approval_policy = batch["approval_policy"]
         run_all = batch["run_all"]
+        use_agent = batch.get("use_agent", False)
+        max_agent_turns = batch.get("max_agent_turns", 10)
 
         # Determine phase range for each MVP
         start_idx = mvp_ph.index(starting_phase)
         phases_to_run = mvp_ph[start_idx:] if run_all else (starting_phase,)
 
         for mvp_result in batch["mvp_results"]:
+            # Check cancellation before starting each MVP
+            if batch.get("cancel_requested"):
+                mvp_result["status"] = "cancelled"
+                batch["skipped"] += 1
+                continue
+
             mvp_id = mvp_result["mvp_id"]
             mvp_result["status"] = "processing"
 
             try:
                 for phase_num in phases_to_run:
+                    # Check cancellation between phases
+                    if batch.get("cancel_requested"):
+                        mvp_result["status"] = "cancelled"
+                        batch["skipped"] += 1
+                        break
+
                     mvp_result["current_phase"] = phase_num
 
-                    # Execute the phase
-                    self.execute_phase(plan_id, phase_num, mvp_id=mvp_id)
+                    # Execute the phase (agentic or standard)
+                    if use_agent:
+                        from dataclasses import asdict as _asdict
+                        from codeloom.core.migration.agent.events import AgentDoneEvent
+                        # Initialize trace on the shared dict so polling picks up events live
+                        mvp_result["agent_trace"] = []
+                        for event in self.execute_phase_agentic(
+                            plan_id, phase_num, mvp_id=mvp_id,
+                            max_turns=max_agent_turns,
+                        ):
+                            # Check cancellation between agent events
+                            if batch.get("cancel_requested"):
+                                mvp_result["status"] = "cancelled"
+                                batch["skipped"] += 1
+                                break
+
+                            evt = _asdict(event)
+                            if evt.get("type") == "tool_result":
+                                r = evt.get("result", "")
+                                if len(r) > 2000:
+                                    evt["result"] = r[:2000] + "\n...(truncated for trace)"
+                                    evt["truncated"] = True
+                            # Append to shared dict in real-time (visible to status polls)
+                            mvp_result["agent_trace"].append(evt)
+                            if isinstance(event, AgentDoneEvent):
+                                mvp_result["agent_stats"] = {
+                                    "turns_used": event.turns_used,
+                                    "tools_called": event.tools_called,
+                                    "total_ms": event.total_ms,
+                                }
+                        # Break out of phase loop if cancelled
+                        if batch.get("cancel_requested"):
+                            break
+                    else:
+                        self.execute_phase(plan_id, phase_num, mvp_id=mvp_id)
 
                     # Decide whether to auto-approve
                     phase_output = self.get_phase_output(plan_id, phase_num, mvp_id)
@@ -3418,7 +3688,9 @@ class MigrationEngine:
 
         # Finalize batch status
         batch["completed_at"] = datetime.utcnow().isoformat()
-        if batch["failed"] > 0 and batch["completed"] > 0:
+        if batch.get("cancel_requested"):
+            batch["status"] = "cancelled"
+        elif batch["failed"] > 0 and batch["completed"] > 0:
             batch["status"] = "partial_failure"
         elif batch["failed"] == batch["total_mvps"]:
             batch["status"] = "partial_failure"
@@ -3432,17 +3704,94 @@ class MigrationEngine:
             batch_id, batch["completed"], batch["failed"], batch["needs_review"],
         )
 
-    def get_batch_status(self, batch_id: str, plan_id: str | None = None) -> Dict | None:
-        """Return current batch state (in-memory)."""
+        # Persist completed batch to DB so it survives restarts
+        self._persist_batch_to_db(batch)
+
+    def _persist_batch_to_db(self, batch: Dict) -> None:
+        """Save a batch run snapshot to plan.batch_executions JSONB column."""
+        try:
+            plan_id = batch["plan_id"]
+            pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+            with self._db.get_session() as session:
+                plan = session.query(MigrationPlan).filter(
+                    MigrationPlan.plan_id == pid
+                ).first()
+                if not plan:
+                    logger.warning("Cannot persist batch — plan %s not found", plan_id)
+                    return
+                existing = list(plan.batch_executions or [])
+                # Replace if same batch_id already stored (e.g. retry), else append
+                existing = [b for b in existing if b.get("batch_id") != batch["batch_id"]]
+                existing.append(batch)
+                plan.batch_executions = existing
+            logger.info("Persisted batch %s to DB", batch["batch_id"])
+        except Exception as e:
+            logger.warning("Failed to persist batch to DB (non-fatal): %s", e)
+
+    def cancel_batch(self, batch_id: str, plan_id: str | None = None) -> Dict:
+        """Signal a running batch to stop after the current MVP completes."""
         batch = self._batch_runs.get(batch_id)
-        if batch and plan_id and batch["plan_id"] != str(plan_id):
-            return None
-        return batch
+        if not batch:
+            raise ValueError(f"Batch {batch_id} not found")
+        if plan_id and batch["plan_id"] != str(plan_id):
+            raise ValueError(f"Batch {batch_id} does not belong to plan {plan_id}")
+        if batch["status"] != "running":
+            raise ValueError(f"Batch is not running (status={batch['status']})")
+
+        batch["cancel_requested"] = True
+        logger.info("Cancel requested for batch %s", batch_id)
+        return {"batch_id": batch_id, "cancel_requested": True}
+
+    def get_batch_status(self, batch_id: str, plan_id: str | None = None) -> Dict | None:
+        """Return current batch state — in-memory first, then DB fallback."""
+        batch = self._batch_runs.get(batch_id)
+        if batch:
+            if plan_id and batch["plan_id"] != str(plan_id):
+                return None
+            return batch
+
+        # Fallback: load from DB persisted batch_executions
+        if plan_id:
+            try:
+                pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+                with self._db.get_session() as session:
+                    plan = session.query(MigrationPlan).filter(
+                        MigrationPlan.plan_id == pid
+                    ).first()
+                    if plan and plan.batch_executions:
+                        for b in plan.batch_executions:
+                            if b.get("batch_id") == batch_id:
+                                return b
+            except Exception:
+                pass
+        return None
 
     def list_batch_executions(self, plan_id: str) -> List[Dict]:
-        """Return all batch runs for a given plan."""
+        """Return all batch runs for a given plan (in-memory + DB persisted)."""
         pid = str(plan_id)
-        return [
-            b for b in self._batch_runs.values()
+
+        # Collect in-memory batch IDs
+        in_memory = {
+            b["batch_id"]: b
+            for b in self._batch_runs.values()
             if b["plan_id"] == pid
-        ]
+        }
+
+        # Load DB-persisted batches that aren't already in memory
+        try:
+            plan_uuid = UUID(pid)
+            with self._db.get_session() as session:
+                plan = session.query(MigrationPlan).filter(
+                    MigrationPlan.plan_id == plan_uuid
+                ).first()
+                if plan and plan.batch_executions:
+                    for b in plan.batch_executions:
+                        if b.get("batch_id") not in in_memory:
+                            in_memory[b["batch_id"]] = b
+        except Exception as e:
+            logger.warning("Failed to load persisted batches: %s", e)
+
+        # Sort by started_at descending (newest first)
+        result = list(in_memory.values())
+        result.sort(key=lambda b: b.get("started_at", ""), reverse=True)
+        return result

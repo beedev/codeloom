@@ -6,54 +6,75 @@
 
 ## 1. Vision
 
-CodeLoom enables developers to upload an entire codebase, understand it through AI-powered code intelligence, and migrate it to a new architecture or tech stack with confidence.
+CodeLoom enables developers to upload an entire codebase, understand it
+through AI-powered code intelligence, and migrate it to a new architecture
+or tech stack with confidence.
 
 **Core capabilities**:
 - **Code RAG** - Upload a codebase, ask questions, get code snippets with context
-- **Code Intelligence** - AST parsing + ASG relationship mapping for deep understanding
-- **Code Migration** - 6-phase pipeline from current state to target architecture
+- **Code Intelligence** - AST parsing + ASG relationship mapping + deep understanding narratives
+- **Code Migration** - MVP-centric pipeline with agentic LLM execution and human approval gates
+- **Observability** - LLM gateway with cost tracking, retry, and per-purpose analytics
 
-**Supported languages**: Python, JavaScript/TypeScript, Java, C#/.NET (via tree-sitter)
+**Supported languages**: Python, JavaScript/TypeScript, Java, C#/.NET (via
+tree-sitter), VB.NET, SQL, JSP, ASPX, XML config, Properties (via regex
+parsers) -- 12 languages/file types total.
 
 ---
 
 ## 2. System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    React Frontend (:3000)                        │
-│  ┌───────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ Code Chat │  │ Project View │  │ Migration Wizard         │  │
-│  │ (RAG)     │  │ (ASG Graph)  │  │ (6-phase pipeline)       │  │
-│  └─────┬─────┘  └──────┬───────┘  └────────────┬─────────────┘  │
-└────────┼───────────────┼────────────────────────┼───────────────┘
-         │               │                        │
-         ▼               ▼                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     FastAPI (:9005)                               │
-│  /api/projects  │  /api/projects/{id}/query  │  /api/migration  │
-└────────┬────────────────┬────────────────────────┬──────────────┘
-         │                │                        │
-         ▼                ▼                        ▼
-┌────────────────┐  ┌──────────────┐  ┌────────────────────────┐
-│ Code Ingestion │  │ Code RAG     │  │ Migration Engine       │
-│                │  │ Pipeline     │  │                        │
-│ Zip Upload     │  │ Hybrid       │  │ 1. Approach            │
-│ tree-sitter    │  │ Retrieval    │  │ 2. Architecture        │
-│ AST Parse      │  │ (BM25+Vector)│  │ 3. MVP Scope           │
-│ ASG Build      │  │ + ASG Expand │  │ 4. Design              │
-│ Code Chunking  │  │ + Reranking  │  │ 5. Code Transform      │
-│ Embedding      │  │              │  │ 6. Test Generation     │
-└────────┬───────┘  └──────┬───────┘  └────────────┬───────────┘
-         │                 │                        │
-         ▼                 ▼                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   PostgreSQL + pgvector                          │
-│  ┌──────────────┐  ┌───────────┐  ┌────────────┐  ┌──────────┐ │
-│  │data_embeddings│ │code_units │  │code_edges  │  │migration │ │
-│  │(code vectors) │ │(AST nodes)│  │(ASG graph) │  │_plans    │ │
-│  └──────────────┘  └───────────┘  └────────────┘  └──────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                      React Frontend (:3000)                           │
+│  ┌───────────┐ ┌──────────┐ ┌────────────────┐ ┌────────────────┐   │
+│  │ Code Chat │ │ Project  │ │   Migration    │ │  Project Wiki  │   │
+│  │ (RAG)     │ │ View +   │ │   Wizard +     │ │  & Analytics   │   │
+│  │           │ │ ASG Graph│ │   Agent Panel  │ │  Dashboard     │   │
+│  └─────┬─────┘ └────┬─────┘ └───────┬────────┘ └───────┬────────┘   │
+└────────┼────────────┼───────────────┼───────────────────┼────────────┘
+         │            │               │                   │
+         ▼            ▼               ▼                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                       FastAPI (:9005)                                  │
+│  /api/projects  /api/.../query  /api/migration  /api/understanding   │
+│  /api/auth      /api/graph      /api/settings   /api/.../analytics   │
+└──────┬──────────────┬───────────────┬───────────────────┬────────────┘
+       │              │               │                   │
+       ▼              ▼               ▼                   ▼
+┌──────────────┐ ┌──────────┐ ┌─────────────────┐ ┌────────────────┐
+│ Code         │ │ Code RAG │ │ Migration       │ │ Deep           │
+│ Ingestion    │ │ Pipeline │ │ Engine          │ │ Understanding  │
+│              │ │          │ │                 │ │                │
+│ Zip Upload   │ │ Hybrid   │ │ V2 Pipeline:   │ │ Entry Point    │
+│ tree-sitter  │ │ Retrieval│ │ 1. Architecture│ │ Detection      │
+│ + regex      │ │ (BM25+   │ │ 2. Discovery   │ │ Call Chain     │
+│ AST Parse    │ │  Vector) │ │ 3. Transform   │ │ Tracing        │
+│ Semantic     │ │ + RAPTOR │ │ 4. Test        │ │ Tiered LLM     │
+│ Enrichment   │ │ + Rerank │ │                │ │ Analysis       │
+│ ASG Build    │ │ + Deep   │ │ Agentic Loop   │ │ Narrative      │
+│ Chunking     │ │ Analysis │ │ (10 tools,     │ │ Generation     │
+│ Embedding    │ │ Context  │ │  multi-turn)   │ │                │
+└──────┬───────┘ └────┬─────┘ └───────┬─────────┘ └───────┬────────┘
+       │              │               │                    │
+       │              ▼               ▼                    │
+       │        ┌──────────────────────────────────┐       │
+       │        │         LLM Gateway              │       │
+       │        │  Retry + Metrics + Cost Tracking │◄──────┘
+       │        │  (wraps all LLM providers)       │
+       │        └──────────────┬───────────────────┘
+       │                       │
+       ▼                       ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                     PostgreSQL + pgvector                              │
+│ ┌──────────────┐ ┌───────────┐ ┌────────────┐ ┌───────────────────┐ │
+│ │data_embeddings│ │code_units │ │code_edges  │ │migration_plans    │ │
+│ │(code vectors) │ │(AST nodes)│ │(ASG graph) │ │functional_mvps    │ │
+│ └──────────────┘ └───────────┘ └────────────┘ │migration_phases   │ │
+│ ┌──────────────┐ ┌───────────┐ ┌────────────┐ │deep_analysis_jobs │ │
+│ │conversations │ │code_files │ │query_logs  │ │deep_analyses      │ │
+│ └──────────────┘ └───────────┘ └────────────┘ └───────────────────┘ │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -62,421 +83,362 @@ CodeLoom enables developers to upload an entire codebase, understand it through 
 
 ### 3.1 AST Parser (`core/ast_parser/`)
 
-Parses source code into structural units using tree-sitter.
+Parses source code into structural units. Two-tier architecture:
 
-**Input**: Source file (any supported language)
-**Output**: List of `CodeUnit` objects
+| Tier | Languages | Parser | Metadata Depth |
+|------|-----------|--------|----------------|
+| Tree-sitter | Python, JavaScript, TypeScript, Java, C# | `BaseLanguageParser` subclasses | Full AST + semantic enrichment |
+| Regex-based | VB.NET, SQL, JSP, ASPX, XML config, Properties | Custom parsers | Pattern-extracted metadata |
 
-```python
-@dataclass
-class CodeUnit:
-    unit_id: str              # Unique ID
-    file_id: str              # Parent file
-    unit_type: str            # function | class | method | module | interface | enum
-    name: str                 # Function/class name
-    language: str             # python | javascript | typescript | java | csharp
-    start_line: int
-    end_line: int
-    signature: str            # Full signature (def foo(x: int) -> str)
-    docstring: str            # Extracted docstring/JSDoc/Javadoc
-    source: str               # Raw source code
-    imports: List[str]        # What this unit imports/uses
-    parent: Optional[str]     # Parent class/module if nested
-```
+**Semantic Enrichment** (`enricher.py`): Second-pass AST walk extracting
+`parsed_params` (name + type), `return_type`, `modifiers`, `fields`,
+`is_async`, `is_override`, `annotations`. Feeds ASG edge detection and
+migration type generation.
 
-**Parser strategy**:
-- **Primary**: tree-sitter for all 4 languages (consistent cross-language approach)
-- **Enhancement**: Python `ast` module for Python-specific depth (type inference, decorator parsing)
-- **Fallback**: Blank-line splitting with larger chunks (~1024 tokens) for unsupported languages
-
-**tree-sitter queries per language**:
-| Language | Functions | Classes | Methods | Imports |
-|----------|-----------|---------|---------|---------|
-| Python | `function_definition` | `class_definition` | nested `function_definition` | `import_statement`, `import_from_statement` |
-| JS/TS | `function_declaration`, `arrow_function` | `class_declaration` | `method_definition` | `import_statement` |
-| Java | `method_declaration` | `class_declaration` | `method_declaration` in class | `import_declaration` |
-| C# | `method_declaration` | `class_declaration` | `method_declaration` in class | `using_directive` |
+**Optional Bridges** (`bridges/`): JavaParser (JVM) and Roslyn (.NET SDK)
+for deep type resolution. Built via `./dev.sh setup-tools`.
 
 ### 3.2 ASG Builder (`core/asg_builder/`)
 
-Builds a semantic relationship graph from AST-parsed code units.
+Builds a semantic relationship graph from parsed code units.
 
-**Edge types**:
-| Edge | Meaning | Example |
-|------|---------|---------|
-| `calls` | Function A calls function B | `ingest_file()` calls `store_nodes()` |
-| `imports` | Module A imports from module B | `pipeline.py` imports from `retriever.py` |
-| `inherits` | Class A extends class B | `MyService(BaseService)` |
-| `implements` | Class implements interface | `GroqProvider implements LLMProvider` |
-| `uses` | Function uses a type/class | `def foo(x: UserModel)` |
-| `contains` | Module contains class/function | `pipeline.py` contains `LocalRAGPipeline` |
-| `overrides` | Method overrides parent method | `get_llm()` overrides `LLMProvider.get_llm()` |
+**Edge types** (8 core + framework-specific):
 
-**Storage**: PostgreSQL adjacency table
+| Module | Edges | Detection Strategy |
+|--------|-------|--------------------|
+| `structural.py` | `contains`, `imports`, `calls` | Nesting, import statements, identifier intersection |
+| `oop.py` | `inherits`, `implements`, `overrides`, `type_dep` | Metadata + regex + inheritance chain walking |
+| `stored_proc.py` | `calls_sp` | Language-specific SP invocation patterns |
+| `struts.py` | `struts_action_*`, `jsp_includes` | Struts XML config + JSP tag parsing |
 
-```sql
-CREATE TABLE code_edges (
-    id SERIAL PRIMARY KEY,
-    project_id UUID NOT NULL,
-    source_unit_id VARCHAR NOT NULL,
-    target_unit_id VARCHAR NOT NULL,
-    edge_type VARCHAR(50) NOT NULL,  -- calls, imports, inherits, etc.
-    metadata JSONB DEFAULT '{}',      -- line number, context, confidence
-    UNIQUE(project_id, source_unit_id, target_unit_id, edge_type)
-);
-CREATE INDEX idx_code_edges_source ON code_edges(source_unit_id);
-CREATE INDEX idx_code_edges_target ON code_edges(target_unit_id);
-CREATE INDEX idx_code_edges_type ON code_edges(edge_type);
-```
-
-**Graph queries**:
-- `get_callers(unit_id)` - What calls this function?
-- `get_callees(unit_id)` - What does this function call?
-- `get_dependencies(unit_id, depth=2)` - Transitive dependency tree
-- `get_dependents(unit_id, depth=2)` - Transitive reverse dependency (blast radius)
-- `get_import_graph(project_id)` - Full module dependency graph
-- `get_class_hierarchy(project_id)` - Inheritance tree
+`EdgeContext` (context.py) pre-indexes all units by name, qualified name,
+and file for O(1) resolution during edge detection.
 
 ### 3.3 Code Chunker (`core/code_chunker/`)
 
-Produces self-contained chunks for embedding, using AST boundaries instead of token windows.
+AST-informed chunking with preamble injection. Each `CodeUnit` becomes one
+chunk with file path, imports, and parent class prepended. Token counting
+via tiktoken (`cl100k_base`), default 1024 tokens/chunk. Oversized units
+split at blank line boundaries with preamble replicated.
 
-**Strategy**:
-1. Each `CodeUnit` (function, class, method) becomes one chunk
-2. Prepend a **preamble** to each chunk:
-   ```
-   # File: src/core/engine/retriever.py
-   # Imports: from llama_index import VectorIndexRetriever, ...
-   # Class: LocalRetriever(BaseRetriever)
+### 3.4 Code RAG Pipeline (`core/engine/`, `core/raptor/`, `core/stateless/`)
 
-   def _build_two_stage_retriever(self, index, top_k):
-       ...
-   ```
-3. Large units (>1024 tokens) get split at logical boundaries (inner functions, comment blocks)
-4. Module-level code (imports, constants, globals) bundled as one chunk per file
+Hybrid retrieval stack:
 
-**Chunk metadata** (stored in JSONB alongside embedding):
-```json
-{
-    "file_path": "src/core/engine/retriever.py",
-    "language": "python",
-    "unit_type": "method",
-    "unit_name": "_build_two_stage_retriever",
-    "class_name": "LocalRetriever",
-    "signature": "def _build_two_stage_retriever(self, index, top_k)",
-    "start_line": 145,
-    "end_line": 198,
-    "imports": ["VectorIndexRetriever", "BM25Retriever"],
-    "unit_id": "abc123"
-}
-```
-
-### 3.4 Code RAG Pipeline
-
-Extends DBNotebook's retrieval with ASG-augmented expansion.
-
-**Query flow**:
 ```
 User Query
     │
     ▼
-Hybrid Retrieval (BM25 + Vector)          ← Existing DBNotebook engine
+BM25 sparse search (keyword matching)
+    + Vector search via pgvector (semantic similarity)
     │
     ▼
-Top-K code chunks (initial matches)
+Reranking (mxbai-rerank-base-v1)
     │
     ▼
-ASG Expansion                              ← NEW
-    │  For each matched chunk:
-    │  - Get callers/callees (depth=1)
-    │  - Get imports
-    │  - Get parent class/module
+RAPTOR hierarchical summaries (L0: units, L1: files, L2+: clusters)
     │
     ▼
-Expanded chunk set (initial + related)
+Deep understanding narratives (when available)
     │
     ▼
-Reranker                                   ← Existing DBNotebook reranker
-    │
-    ▼
-Final Top-K chunks with full context
-    │
-    ▼
-LLM Generation (code-specific system prompt)
-    │
-    ▼
-Response with file paths + code snippets
+LLM Generation → SSE streaming response
 ```
 
-**Code-specific system prompt**:
-- Always include file paths with code snippets
-- Show function signatures
-- Explain relationships ("X calls Y which...")
-- Format code blocks with language tags
+Two API patterns: `stateless_query*()` (thread-safe, multi-user) and
+`query()` (single-user session mode). Node cache with 5-minute TTL.
+Session memory up to 100 messages, 24-hour TTL.
 
-### 3.5 Migration Engine (`core/migration/`)
+### 3.5 LLM Gateway (`core/gateway.py`)
 
-6-phase pipeline, each phase takes input from the previous and produces artifacts.
+Transparent observability proxy wrapping all LLM providers:
+
+- **Retry**: Exponential backoff (1s, 2s, 4s) for rate limits and timeouts
+- **Metrics**: Per-call latency, token counts (real or estimated), cost
+- **Purpose tagging**: `migration`, `migration_agent`, `understanding`,
+  `raptor`, `query`, `general`
+- **Cost estimation**: 45+ models with USD pricing across all providers
+- **Thread-safe**: Lock-protected in-memory counters
+
+Subclasses LlamaIndex `CustomLLM` so it sets as `Settings.llm` --
+all 30+ call sites flow through automatically with zero code changes.
+
+### 3.6 Deep Understanding Engine (`core/understanding/`)
+
+Background analysis system:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     MIGRATION PIPELINE                           │
-│                                                                  │
-│  INPUTS:                                                         │
-│  - Source project (uploaded, AST+ASG built)                      │
-│  - Target architecture brief (text description)                  │
-│  - Target tech stack (languages, frameworks, versions)           │
-│  - Constraints (timeline, team size, risk tolerance)             │
-│                                                                  │
-│  ┌─────────┐   ┌──────────────┐   ┌─────┐   ┌────────┐         │
-│  │1.Approach│──▶│2.Architecture│──▶│3.MVP│──▶│4.Design│         │
-│  └─────────┘   └──────────────┘   └─────┘   └───┬────┘         │
-│                                                   │              │
-│                    ┌─────────┐   ┌───────────┐    │              │
-│                    │6.Testing│◀──│5.Migration │◀───┘              │
-│                    └─────────┘   └───────────┘                   │
-│                                                                  │
-│  Each phase has:                                                 │
-│  - LLM-powered analysis using source ASG + target brief          │
-│  - Human approval gate before proceeding                         │
-│  - Persisted output artifacts                                    │
-└──────────────────────────────────────────────────────────────────┘
+ChainTracer → detect entry points (HTTP, CLI, scheduled, events)
+    │
+    ▼
+ChainTracer → trace call chains via ASG (max depth 5)
+    │
+    ▼
+ChainAnalyzer → tiered LLM analysis:
+    Tier 1 (<=100K tokens): Full source
+    Tier 2 (100-200K): Full shallow + signatures deep
+    Tier 3 (>200K): LLM-summarized branches
+    │
+    ▼
+DeepContextBundle → narrative, business_rules, data_entities,
+    integrations, side_effects, evidence_refs, confidence, coverage
 ```
 
-**Phase details**:
+**Worker**: Background daemon thread with asyncio loop, distributed lease
+protocol (`FOR UPDATE SKIP LOCKED`), 30s heartbeat, 120s stale reclaim.
 
-| Phase | Input | LLM + ASG Role | Output |
-|-------|-------|---------------|--------|
-| **1. Approach** | Source ASG + target brief | ASG reveals coupling/complexity; LLM recommends rewrite vs refactor vs strangler fig | Strategy document with risk assessment |
-| **2. Architecture** | Strategy + target stack | ASG dependency graph drives module mapping old→new; LLM designs target architecture | Architecture design with module mapping |
-| **3. MVP** | Architecture + priorities | ASG identifies leaf nodes (low dependency) for safe early migration | MVP scope: ordered list of modules |
-| **4. Design** | MVP scope | AST provides exact signatures/types; LLM designs new interfaces per module | Detailed design per module |
-| **5. Migration** | Design per module | AST transforms code structures; ASG ensures all call sites updated | Migrated code, module by module |
-| **6. Testing** | Migrated code | ASG generates tests covering real call paths; LLM writes test code | Test suite: unit + integration + equivalence |
+**Downstream**: Narratives feed into RAG chat context and migration phase
+prompts via `MigrationContextBuilder.get_deep_analysis_context()`.
+
+### 3.7 Migration Engine (`core/migration/`)
+
+MVP-centric pipeline with two execution modes.
+
+**Pipeline V2 (default)**:
+
+```
+Plan-level:    Phase 1 (Architecture) → Phase 2 (Discovery/Clustering)
+Per-MVP:       Phase 3 (Transform) → Phase 4 (Test)
+On-demand:     analyze_mvp() for deep analysis of individual MVPs
+```
+
+**Execution modes**:
+
+| Mode | Mechanism | Use Case |
+|------|-----------|----------|
+| Single-shot | One LLM call with pre-built context | Fast, simple MVPs |
+| Agentic | Multi-turn tool-use loop (max 10 turns) | Complex MVPs needing exploration |
+
+**Agentic tool arsenal** (10 tools, phase-gated):
+
+| Tool | Purpose |
+|------|---------|
+| `get_source_code` | MVP units ordered by connectivity (12K default budget) |
+| `read_source_file` | Full file content for reference context |
+| `get_unit_details` | Enriched metadata (params, types, modifiers) |
+| `get_functional_context` | Business rules, entities, integrations |
+| `get_dependencies` | Cross-boundary ASG edges (blast radius) |
+| `get_module_graph` | File-level import graph |
+| `get_deep_analysis` | Deep understanding narratives for MVP |
+| `search_codebase` | Semantic RAG search across full project |
+| `lookup_framework_docs` | Context7 primary, Tavily fallback |
+| `validate_syntax` | tree-sitter parse check on generated code |
+
+**Agent events** stream via SSE: `ThinkingEvent`, `ToolCallEvent`,
+`ToolResultEvent`, `OutputEvent`, `AgentDoneEvent`, `ErrorEvent`.
+
+**Supporting infrastructure**:
+- `MvpClusterer`: RAPTOR-driven or package-based clustering with
+  cohesion/coupling from ASG edges
+- `MigrationContextBuilder`: Phase-specific context assembly within token
+  budgets, integrating source code, ASG edges, functional context, deep
+  analysis narratives, and framework patterns
+- `MigrationLane` ABC: Pluggable framework-specific migration lanes
+  (Struts→Spring Boot, StoredProc→ORM, VB.NET→.NET Core)
+- Quality gates, confidence scoring, retry with checkpoints, batch
+  execution with configurable approval policies
 
 ---
 
 ## 4. Data Model
 
-### New Tables
+### Core Tables
 
-```sql
--- Projects (replaces DBNotebook's notebooks for code context)
-CREATE TABLE projects (
-    project_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
-    name VARCHAR(255) NOT NULL,
-    description TEXT,
-    primary_language VARCHAR(50),        -- python, javascript, java, csharp
-    languages JSONB DEFAULT '[]',        -- all detected languages
-    file_count INTEGER DEFAULT 0,
-    total_lines INTEGER DEFAULT 0,
-    ast_status VARCHAR(20) DEFAULT 'pending',  -- pending, parsing, complete, error
-    asg_status VARCHAR(20) DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- Individual files in a project
-CREATE TABLE code_files (
-    file_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID REFERENCES projects(project_id) ON DELETE CASCADE,
-    file_path VARCHAR(1024) NOT NULL,    -- relative path within project
-    language VARCHAR(50),
-    file_hash VARCHAR(64),               -- MD5 for change detection
-    line_count INTEGER,
-    size_bytes INTEGER,
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(project_id, file_path)
-);
-
--- AST-parsed code units
-CREATE TABLE code_units (
-    unit_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    file_id UUID REFERENCES code_files(file_id) ON DELETE CASCADE,
-    project_id UUID REFERENCES projects(project_id) ON DELETE CASCADE,
-    unit_type VARCHAR(50) NOT NULL,      -- function, class, method, module, interface
-    name VARCHAR(255) NOT NULL,
-    qualified_name VARCHAR(1024),        -- module.class.method
-    language VARCHAR(50),
-    start_line INTEGER,
-    end_line INTEGER,
-    signature TEXT,
-    docstring TEXT,
-    source TEXT,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- ASG relationship edges
-CREATE TABLE code_edges (
-    id SERIAL PRIMARY KEY,
-    project_id UUID REFERENCES projects(project_id) ON DELETE CASCADE,
-    source_unit_id UUID REFERENCES code_units(unit_id) ON DELETE CASCADE,
-    target_unit_id UUID REFERENCES code_units(unit_id) ON DELETE CASCADE,
-    edge_type VARCHAR(50) NOT NULL,
-    metadata JSONB DEFAULT '{}',
-    UNIQUE(project_id, source_unit_id, target_unit_id, edge_type)
-);
-
--- Migration plans
-CREATE TABLE migration_plans (
-    plan_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID REFERENCES users(user_id) ON DELETE CASCADE,
-    source_project_id UUID REFERENCES projects(project_id),
-    target_brief TEXT NOT NULL,          -- Target architecture description
-    target_stack JSONB NOT NULL,         -- {languages, frameworks, versions}
-    constraints JSONB DEFAULT '{}',     -- {timeline, team_size, risk_tolerance}
-    status VARCHAR(20) DEFAULT 'draft', -- draft, in_progress, complete, abandoned
-    current_phase INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- Migration phase outputs
-CREATE TABLE migration_phases (
-    phase_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    plan_id UUID REFERENCES migration_plans(plan_id) ON DELETE CASCADE,
-    phase_number INTEGER NOT NULL,       -- 1-6
-    phase_type VARCHAR(50) NOT NULL,     -- approach, architecture, mvp, design, migration, testing
-    status VARCHAR(20) DEFAULT 'pending',
-    input_summary TEXT,
-    output TEXT,                          -- LLM-generated output (markdown)
-    output_files JSONB DEFAULT '[]',     -- Generated code files
-    approved BOOLEAN DEFAULT FALSE,
-    approved_at TIMESTAMP,
-    metadata JSONB DEFAULT '{}',
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(plan_id, phase_number)
-);
-
--- Reuse existing data_embeddings table for code chunk vectors
--- Reuse existing users, conversations tables
-```
+| Table | Key Fields | Purpose |
+|-------|-----------|---------|
+| `projects` | name, languages, ast_status, asg_status, deep_analysis_status | Project container |
+| `code_files` | file_path, language, line_count, raptor_status | Source files |
+| `code_units` | unit_type, qualified_name, signature, source, unit_metadata (JSONB) | Parsed code elements |
+| `code_edges` | source_unit_id, target_unit_id, edge_type, edge_metadata | ASG relationships |
+| `migration_plans` | target_brief, target_stack, pipeline_version, lane_versions, migration_lane_id | Migration configuration |
+| `migration_phases` | phase_type, status, output, approved, phase_metadata (JSONB), run_id | Pipeline phase records |
+| `functional_mvps` | unit_ids, cohesion_score, coupling_score, migration_readiness, analysis_output | MVP groupings |
+| `deep_analysis_jobs` | project_id, status, total/completed entry_points, retry_count | Background analysis jobs |
+| `deep_analyses` | entry_unit_id, tier, narrative, result_json (JSONB), confidence, coverage | Entry point analyses |
+| `analysis_units` | analysis_id, unit_id, min_depth, path_count | Units in analysis chains |
 
 ### Reused Tables (from DBNotebook)
-- `users` - Authentication, roles, API keys
-- `data_embeddings` - pgvector storage for code chunk embeddings
-- `conversations` - Chat history per project
-- `query_logs` - Token usage tracking
+
+- `users`, `roles`, `user_roles`, `project_access` -- Auth + RBAC
+- `data_embeddings` -- pgvector storage for code chunk embeddings
+- `conversations` -- Chat history per project
+- `query_logs` -- Token usage tracking
+- `embedding_config` -- Embedding model configuration
 
 ---
 
 ## 5. API Surface
 
-### Project Management
+All routes prefixed with `/api`.
+
+### Auth & Projects
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/projects/upload` | Upload zip/tar.gz codebase |
+| POST | `/api/auth/login` | Session login |
+| POST | `/api/auth/logout` | Session logout |
+| GET | `/api/auth/session` | Session check |
 | GET | `/api/projects` | List user's projects |
+| POST | `/api/projects/upload` | Upload zip codebase (triggers ingestion) |
 | GET | `/api/projects/{id}` | Project details + stats |
 | DELETE | `/api/projects/{id}` | Delete project |
 | GET | `/api/projects/{id}/files` | File tree |
-| GET | `/api/projects/{id}/file/{path}` | View file content |
-
-### Code Intelligence
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/projects/{id}/structure` | AST overview (units, stats per file) |
-| GET | `/api/projects/{id}/graph` | ASG data for visualization |
-| GET | `/api/projects/{id}/unit/{unit_id}` | Code unit details + relationships |
-| GET | `/api/projects/{id}/unit/{unit_id}/callers` | What calls this? |
-| GET | `/api/projects/{id}/unit/{unit_id}/callees` | What does this call? |
-| GET | `/api/projects/{id}/unit/{unit_id}/blast-radius` | Impact of changing this |
+| GET | `/api/projects/{id}/units` | Browse code units |
+| POST | `/api/projects/{id}/build-asg` | Trigger ASG building |
 
 ### Code Chat (RAG)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/projects/{id}/query` | Query codebase (JSON response) |
-| POST | `/api/projects/{id}/query/stream` | Query codebase (SSE streaming) |
+| POST | `/api/projects/{id}/query/stream` | SSE streaming RAG chat |
 
 ### Migration
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/migration/plan` | Create migration plan |
-| GET | `/api/migration/{id}` | Plan status + phase summaries |
-| POST | `/api/migration/{id}/phase/{n}/execute` | Execute phase N |
-| GET | `/api/migration/{id}/phase/{n}` | Phase output |
-| POST | `/api/migration/{id}/phase/{n}/approve` | Approve phase to proceed |
-| GET | `/api/migration/{id}/diff` | Source vs migrated diff |
+| POST | `/api/migration/plan` | Create plan (source + target) |
+| GET | `/api/migration/{id}/asset-inventory` | File-type breakdown + strategies |
+| POST | `/api/migration/{id}/discover` | Run clustering + create MVPs |
+| GET | `/api/migration/{id}/mvps` | List MVPs with metrics |
+| POST | `/api/migration/{id}/mvps/merge` | Merge MVPs |
+| POST | `/api/migration/{id}/mvps/{mid}/split` | Split MVP |
+| POST | `/api/migration/{id}/phase/N/execute` | Run phase (single-shot or agentic) |
+| POST | `/api/migration/{id}/phase/N/approve` | Human approval gate |
+| POST | `/api/migration/{id}/phase/N/reject` | Reject and reset phase |
+| GET | `/api/migration/{id}/phase/N/diff-context` | Source vs. migrated |
+| GET | `/api/migration/{id}/phase/N/download` | Download generated files |
+| POST | `/api/migration/{id}/batch/execute` | Batch phase execution |
+| GET | `/api/migration/{id}/batch/{bid}/status` | Batch progress |
+| GET | `/api/migration/{id}/scorecard` | Plan-level quality metrics |
+
+### Deep Understanding
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/understanding/{id}/analyze` | Start background analysis job |
+| GET | `/api/understanding/{id}/status/{job_id}` | Job progress |
+| GET | `/api/understanding/{id}/entry-points` | Preview detectable entry points |
+| GET | `/api/understanding/{id}/results` | List all analyses with coverage |
+| GET | `/api/understanding/{id}/chain/{analysis_id}` | Full narrative + evidence |
+
+### Analytics & Settings
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects/{id}/analytics` | Unified project metrics (code, migration, LLM) |
+| GET | `/api/settings` | Runtime configuration |
+| POST | `/api/settings` | Update configuration |
+| GET | `/api/graph/{id}` | ASG visualization data |
+| GET | `/api/health` | Health check |
 
 ---
 
-## 6. Frontend Pages
+## 6. Frontend
+
+React 19 SPA with Vite 7, Tailwind CSS 4, TypeScript, react-router-dom.
+
+### Pages
 
 | Page | Route | Purpose |
 |------|-------|---------|
-| **Dashboard** | `/` | List projects, active migrations, recent queries |
-| **Project View** | `/project/{id}` | File tree, stats, ASG graph, code browser |
-| **Code Chat** | `/project/{id}/chat` | RAG chat against codebase |
-| **Dependency Graph** | `/project/{id}/graph` | Interactive ASG visualization |
-| **Migration Wizard** | `/migration/{id}` | Step through 6 phases with approval gates |
-| **Diff View** | `/migration/{id}/diff` | Side-by-side source vs migrated code |
 | **Login** | `/login` | Authentication |
-| **Admin** | `/admin` | User management, token metrics |
+| **Dashboard** | `/` | Project list, status badges |
+| **Project View** | `/project/{id}` | File tree, code browser, ASG graph |
+| **Project Wiki** | `/project/{id}/wiki` | Multi-section intelligence dashboard |
+| **Code Chat** | `/project/{id}/chat` | RAG chat with deep analysis context |
+| **Migration** | `/migration/{id}` | Phase wizard with approval gates |
+| **Batch Panel** | `/migration/{id}/batch` | Multi-MVP batch execution |
+
+### Migration UI Components
+
+| Component | Purpose |
+|-----------|---------|
+| `PhaseViewer` | Phase-by-phase output with approve/reject/re-execute |
+| `AgentExecutionPanel` | Real-time SSE stream rendering of agentic execution |
+| `AgentStepCard` | Individual step cards (thinking, tool call, result, output, error) |
+| `BatchExecutionPanel` | Multi-MVP orchestration: configure → monitor → results |
+
+### Wiki Sections
+
+| Section | Content |
+|---------|---------|
+| Overview | Status badges, metric cards, language distribution |
+| Architecture | Dependency graph, module hierarchy, interface contracts |
+| Migration | Plan timeline, MVP breakdown, confidence trends |
+| Understanding | Entry point catalog, narrative summaries, evidence links |
+| Generated Code | Target architecture snippets, design patterns |
+| MVP Catalog | MVP cards with unit composition and business context |
+| Diagrams | Mermaid diagrams (ASG, MVP structure, call chains) |
 
 ---
 
 ## 7. Phased Delivery
 
-### Phase 1: Code Upload + Basic RAG (MVP)
+### Phase 1: Code Upload + Basic RAG -- COMPLETE
 - Zip upload + file extraction
-- tree-sitter AST parsing (Python first)
-- Code-aware chunking (by function/class)
+- tree-sitter AST parsing (Python)
+- Code-aware chunking with preamble injection
 - Embed + store in pgvector
-- Code Chat via existing retrieval engine
+- Code Chat via hybrid retrieval + RAPTOR
 - Basic project view (file tree + code browser)
 
-### Phase 2: ASG + Relationship-Aware Retrieval
-- ASG builder (call graphs, imports, inheritance)
+### Phase 2: ASG + Relationship-Aware Retrieval -- COMPLETE
+- ASG builder (8 edge types across 3 detector modules)
 - Graph storage in PostgreSQL
-- ASG-expanded retrieval (pull related code with matches)
+- ASG-expanded retrieval in RAG pipeline
 - Dependency graph visualization
-- Add JavaScript/TypeScript support
+- JavaScript/TypeScript support
 
-### Phase 3: Migration Engine
-- 6-phase migration pipeline
-- Target brief input UI
-- Migration planning (approach + architecture + MVP)
-- Code transformation (design + migration + testing)
-- Diff view for migrated code
-- Add Java support
+### Phase 3: Migration Engine -- COMPLETE
+- V2 4-phase pipeline (Architecture → Discovery → Transform → Test)
+- MVP clustering (RAPTOR-driven + package-based fallback)
+- Per-MVP phase execution with approval gates
+- Migration lanes (Struts→Spring Boot, StoredProc→ORM)
+- Batch execution with configurable approval policies
+- Java support
 
-### Phase 4: Advanced
-- C#/.NET support
-- VSCode extension (query + debug from editor)
-- Multi-project comparison
+### Phase 4: Advanced Parsing + Semantic Enrichment -- COMPLETE
+- C#/.NET parser with semantic enrichment
+- VB.NET, SQL, JSP, ASPX, XML, Properties regex parsers
+- `implements`, `overrides`, `type_dep` edge types
+- JavaParser/Roslyn bridges for deep type resolution
+- VB.NET→.NET Core migration lane
+- Cross-technology view layer migration (JSP→React, ASPX→React)
+
+### Phase 5: Intelligence + Observability -- COMPLETE
+- LLM Gateway (retry, metrics, cost tracking, purpose tagging)
+- Deep Understanding (entry point detection, call chain tracing, tiered analysis)
+- Agentic migration (10-tool multi-turn execution)
+- Project Wiki and Analytics dashboard
+- Enterprise quality (gates, retry, confidence, scorecard)
+- Deep analysis → chat context and migration context integration
+
+### Phase 6: Future
+- Diff views for migrated code
 - Test generation from ASG paths
-- Migration templates for common patterns (Flask->FastAPI, React class->hooks, etc.)
+- VSCode extension (query + debug from editor)
 
 ---
 
 ## 8. Forked from DBNotebook
 
-### Reused components (from dbnotebook/)
-- `core/providers/` - All LLM providers (Groq, OpenAI, Anthropic, Gemini, Ollama)
-- `core/vector_store/` - pgvector store
-- `core/engine/` - Hybrid retrieval engine (BM25 + vector + reranker)
-- `core/embedding/` - Embedding layer
-- `core/config/` - YAML config loader
-- `core/auth/` - Auth + RBAC
-- `core/db/` - SQLAlchemy DB layer (models adapted for code domain)
-- `core/raptor/` - Hierarchical retrieval (adapted for code hierarchy)
-- `core/memory/` - Session memory
-- `core/observability/` - Query logger + token metrics
-- `core/interfaces/` - Base interfaces
-- `core/registry.py` - Plugin registry
-- `api/core/` - Decorators, response builders, exceptions
-- `pipeline.py` - Adapted for code RAG
+### Reused components
+- `core/providers/` -- All LLM providers (Groq, OpenAI, Anthropic, Gemini, Ollama)
+- `core/vector_store/` -- pgvector store
+- `core/engine/` -- Hybrid retrieval engine (BM25 + vector + reranker)
+- `core/embedding/` -- Embedding layer
+- `core/config/` -- YAML config loader
+- `core/auth/` -- Auth + RBAC
+- `core/db/` -- SQLAlchemy DB layer (models adapted for code domain)
+- `core/raptor/` -- Hierarchical retrieval (adapted for code hierarchy)
+- `core/memory/` -- Session memory
+- `core/observability/` -- Query logger + token metrics
+- `core/interfaces/` -- Base interfaces
+- `core/registry.py` -- Plugin registry
+- `pipeline.py` -- Adapted for code RAG
 
 ### Not carried over
 - SQL Chat, Analytics, Quiz, Studio, Document transformations
 - Vision/image processing
-- Document-specific ingestion
-- Document-specific agents
-- All DBNotebook API routes (replaced with code-specific routes)
+- Document-specific ingestion and agents
 
 ---
 
 *Created: February 6, 2026*
-*Status: Architecture Design*
+*Last updated: February 24, 2026*
+*Status: Phase 5 Complete*

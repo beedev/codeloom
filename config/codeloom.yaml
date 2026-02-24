@@ -413,9 +413,7 @@ migration:
     #   temperature: 0.1
 
     # LLM for code generation tasks (transform, test generation)
-    generation_llm: null
-    # Example:
-    # generation_llm:
-    #   provider: anthropic
-    #   model: claude-sonnet-4-5-20250929
-    #   temperature: 0.2
+    generation_llm:
+      provider: openai
+      model: gpt-4.1
+      temperature: 0.2

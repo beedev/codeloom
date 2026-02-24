@@ -37,6 +37,7 @@ from llama_index.core import Settings
 from .context_builder import MigrationContextBuilder
 from .doc_enricher import DocEnricher
 from . import prompts
+from .agent import MigrationAgent, AgentEvent, build_tools_for_phase
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,214 @@ def execute_phase(
     return executor(plan, previous_outputs, context_builder, token_budget, mvp_context)
 
 
+# ── Agentic Execution ─────────────────────────────────────────────────
+
+# System prompt for the migration agent.
+_AGENT_SYSTEM_PROMPT = """\
+You are a code migration specialist. You have access to tools that let you
+read source code, search the codebase, look up framework documentation,
+and validate generated code.
+
+Your workflow:
+1. Use get_source_code or get_unit_details to understand the MVP's code.
+2. Use get_functional_context and get_dependencies to understand business logic and blast radius.
+3. Use lookup_framework_docs for the TARGET framework's correct patterns.
+4. Generate your migration output.
+5. Use validate_syntax on any generated code to catch errors.
+
+Important rules:
+- ALWAYS read the source code before generating migrated code.
+- Look up the target framework docs for correct annotation/API patterns.
+- Check dependencies to understand what external code depends on this MVP.
+- Validate generated code syntax before finishing.
+- Follow the output format specified in the task instructions EXACTLY.
+- When the task says to output a JSON array, output ONLY the raw JSON array — no markdown fences, no explanation text before or after.
+"""
+
+
+def execute_phase_agentic(
+    phase_number: int,
+    plan: Dict[str, Any],
+    previous_outputs: Dict[int, str],
+    context_builder: MigrationContextBuilder,
+    context_type: Optional[str] = None,
+    mvp_context: Optional[Dict[str, Any]] = None,
+    pipeline=None,
+    project_id: Optional[str] = None,
+    max_turns: int = 10,
+) -> "Generator[AgentEvent, None, Optional[Dict[str, Any]]]":
+    """Execute a migration phase using the agentic tool-use loop.
+
+    Instead of assembling all context upfront and making a single LLM call,
+    this gives the LLM tools to pull context on demand and iterate.
+
+    Args:
+        phase_number: Phase number for UI display.
+        plan: Migration plan dict.
+        previous_outputs: Approved phase outputs.
+        context_builder: MigrationContextBuilder for the project.
+        context_type: Phase type ("transform", "analyze", "test", "discovery").
+        mvp_context: MVP dict for per-MVP phases.
+        pipeline: LocalRAGPipeline for search_codebase tool.
+        project_id: Project UUID string for search_codebase tool.
+        max_turns: Maximum agent iterations.
+
+    Yields:
+        AgentEvent instances for SSE streaming.
+
+    Returns:
+        Dict with 'output' and optionally 'output_files' on the agent.result,
+        or None if the agent failed.
+    """
+    effective_type = context_type or get_phase_type(phase_number)
+    unit_ids = (mvp_context or {}).get("unit_ids", [])
+
+    # Build phase-specific tools
+    tools = build_tools_for_phase(
+        context_type=effective_type,
+        ctx=context_builder,
+        unit_ids=unit_ids,
+        pipeline=pipeline,
+        project_id=project_id,
+        target_stack=plan.get("target_stack"),
+    )
+
+    # Resolve LLM (respects overrides)
+    llm_context = "generation" if effective_type in ("transform", "test") else "understanding"
+    llm = _get_phase_llm(llm_context)
+    if llm is None:
+        from .agent.events import ErrorEvent
+        yield ErrorEvent(error="No LLM configured. Check LLM_PROVIDER settings.", recoverable=False)
+        return
+
+    # Build task prompt with minimal upfront context (agent fetches the rest)
+    task_prompt = _build_agentic_task_prompt(
+        effective_type, plan, previous_outputs, mvp_context,
+    )
+
+    agent = MigrationAgent(
+        llm=llm,
+        tools=tools,
+        system_prompt=_AGENT_SYSTEM_PROMPT,
+        max_turns=max_turns,
+    )
+
+    # Run the agent loop, yielding events
+    yield from agent.execute(task_prompt, phase_type=effective_type)
+
+    # Store final result for the caller to persist
+    if agent.result:
+        # Attempt to parse output_files from transform/test phases
+        output_files = []
+        if effective_type in ("transform", "test"):
+            output_files = _parse_json_files(agent.result)
+
+        agent.result = json.dumps({
+            "output": agent.result if not output_files else (
+                f"Generated {len(output_files)} file(s). See output_files."
+            ),
+            "output_files": output_files,
+        })
+
+
+def _build_agentic_task_prompt(
+    context_type: str,
+    plan: Dict[str, Any],
+    previous_outputs: Dict[int, str],
+    mvp_context: Optional[Dict[str, Any]],
+) -> str:
+    """Build a task prompt that tells the agent WHAT to do, not HOW.
+
+    The agent will use tools to gather context on demand.
+    We provide: target brief, target stack, MVP info, and previous phase outputs.
+    """
+    parts = []
+
+    # Migration target
+    parts.append(f"## Migration Target\n{plan.get('target_brief', 'Not specified')}")
+
+    stack = plan.get("target_stack", {})
+    if stack:
+        parts.append(f"## Target Stack\n{json.dumps(stack, indent=2)}")
+
+    # Previous phase outputs (condensed)
+    if previous_outputs:
+        parts.append("## Previous Phase Outputs")
+        for pn, text in sorted(previous_outputs.items()):
+            if text:
+                # Truncate to avoid overwhelming the initial context
+                truncated = text[:3000] + ("..." if len(text) > 3000 else "")
+                parts.append(f"### Phase {pn}\n{truncated}")
+
+    # MVP context
+    if mvp_context:
+        parts.append("## Current MVP")
+        parts.append(f"Name: {mvp_context.get('name', 'Unknown')}")
+        parts.append(f"Description: {mvp_context.get('description', 'N/A')}")
+        parts.append(f"Unit count: {len(mvp_context.get('unit_ids', []))}")
+        parts.append(f"Priority: {mvp_context.get('priority', 'N/A')}")
+
+    # Phase-specific instructions
+    instructions = _PHASE_INSTRUCTIONS.get(context_type, "Analyze and produce your output.")
+    parts.append(f"## Your Task\n{instructions}")
+
+    return "\n\n".join(parts)
+
+
+_PHASE_INSTRUCTIONS: Dict[str, str] = {
+    "transform": (
+        "Migrate this MVP's source code to the target framework.\n\n"
+        "Steps:\n"
+        "1. Use get_source_code to read the current implementation.\n"
+        "2. Use get_functional_context to understand business logic.\n"
+        "3. Use get_dependencies to understand blast radius.\n"
+        "4. Use lookup_framework_docs for target framework patterns.\n"
+        "5. Generate migrated code files.\n"
+        "6. Use validate_syntax on each generated file.\n\n"
+        "CRITICAL OUTPUT FORMAT — your final answer MUST be a raw JSON array, nothing else:\n"
+        '[{"file_path": "src/main/java/com/example/Foo.java", "content": "package com.example;\\n...", "language": "java"}]\n\n'
+        "Rules:\n"
+        "- Output ONLY the JSON array. No markdown, no explanation, no code fences.\n"
+        "- Each object must have 'file_path', 'content' (full source code), and 'language'.\n"
+        "- Include ALL migrated files in a single array."
+    ),
+    "analyze": (
+        "Produce a Functional Requirements Register for this MVP.\n\n"
+        "Steps:\n"
+        "1. Use get_source_code and get_unit_details to understand the code.\n"
+        "2. Use get_functional_context for business domain entities and rules.\n"
+        "3. Use get_deep_analysis for existing analysis narratives.\n"
+        "4. Use get_dependencies for integration boundaries.\n\n"
+        "Output: Markdown with tables of Business Rules (BR-N), "
+        "Data Entities (DE-N), Integrations (INT-N), Validations (VAL-N)."
+    ),
+    "test": (
+        "Generate test files for the migrated MVP code.\n\n"
+        "Steps:\n"
+        "1. Read previous phase output to understand what was migrated.\n"
+        "2. Use get_source_code to see the original implementation.\n"
+        "3. Use get_functional_context for business logic to test.\n"
+        "4. Use lookup_framework_docs for target test framework patterns.\n"
+        "5. Generate test files with comprehensive coverage.\n"
+        "6. Use validate_syntax on each generated test file.\n\n"
+        "CRITICAL OUTPUT FORMAT — your final answer MUST be a raw JSON array, nothing else:\n"
+        '[{"file_path": "src/test/java/com/example/FooTest.java", "content": "package com.example;\\n...", "language": "java"}]\n\n'
+        "Rules:\n"
+        "- Output ONLY the JSON array. No markdown, no explanation, no code fences.\n"
+        "- Each object must have 'file_path', 'content' (full test source), and 'language'.\n"
+        "- Include ALL test files in a single array."
+    ),
+    "discovery": (
+        "Analyze the project codebase and produce a migration strategy.\n\n"
+        "Steps:\n"
+        "1. Use get_module_graph to understand project structure.\n"
+        "2. Use search_codebase to find key patterns and frameworks.\n"
+        "3. Use get_unit_details to understand code organization.\n\n"
+        "Output: Markdown with migration strategy and recommendations."
+    ),
+}
+
+
 def _call_llm(
     prompt: str,
     context_type: Optional[str] = None,
@@ -195,18 +404,22 @@ def _create_override_llm(provider: str, model: str, cfg: dict):
     """Create an LLM instance from override configuration.
 
     Supports: ollama, openai, anthropic, gemini.
+    Wraps in LLMGateway for observability/retry.
     Falls back to Settings.llm on failure.
     """
+    from ..gateway import LLMGateway
+
     temperature = cfg.get("temperature", 0.1)
 
     try:
+        raw_llm = None
         if provider == "ollama":
             from llama_index.llms.ollama import Ollama
-            return Ollama(model=model, temperature=temperature, request_timeout=300)
+            raw_llm = Ollama(model=model, temperature=temperature, request_timeout=300)
         elif provider == "openai":
             import os
             from llama_index.llms.openai import OpenAI
-            return OpenAI(
+            raw_llm = OpenAI(
                 model=model,
                 temperature=temperature,
                 api_key=os.getenv("OPENAI_API_KEY"),
@@ -214,7 +427,7 @@ def _create_override_llm(provider: str, model: str, cfg: dict):
         elif provider == "anthropic":
             import os
             from llama_index.llms.anthropic import Anthropic
-            return Anthropic(
+            raw_llm = Anthropic(
                 model=model,
                 temperature=temperature,
                 api_key=os.getenv("ANTHROPIC_API_KEY"),
@@ -222,7 +435,7 @@ def _create_override_llm(provider: str, model: str, cfg: dict):
         elif provider == "gemini":
             import os
             from llama_index.llms.gemini import Gemini
-            return Gemini(
+            raw_llm = Gemini(
                 model=model,
                 temperature=temperature,
                 api_key=os.getenv("GOOGLE_API_KEY"),
@@ -230,6 +443,9 @@ def _create_override_llm(provider: str, model: str, cfg: dict):
         else:
             logger.warning(f"Unknown LLM provider for override: {provider}")
             return Settings.llm
+
+        logger.info(f"Migration LLM override: {provider}/{model}")
+        return LLMGateway(raw_llm)
     except Exception as e:
         logger.warning(f"Failed to create override LLM ({provider}/{model}): {e}")
         return Settings.llm
@@ -1069,10 +1285,19 @@ def _embed_analysis_output(
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _parse_json_files(raw: str) -> List[Dict]:
-    """Try to parse LLM output as a JSON array of file dicts."""
+    """Try to parse LLM output as a JSON array of file dicts.
+
+    Supports three formats:
+    1. Raw JSON array: [{"file_path": ..., "content": ..., "language": ...}]
+    2. JSON array wrapped in markdown code fences
+    3. Fallback: extract files from markdown code blocks like
+       ```java  // path/to/File.java  ...code...  ```
+    """
+    import re
+
     text = raw.strip()
 
-    # Strip markdown code fences
+    # Strip outer markdown code fences (```json ... ```)
     if text.startswith("```"):
         lines = text.split("\n")
         if lines[0].startswith("```"):
@@ -1084,21 +1309,102 @@ def _parse_json_files(raw: str) -> List[Dict]:
     # Try direct parse
     try:
         parsed = json.loads(text)
-        if isinstance(parsed, list):
+        if isinstance(parsed, list) and parsed:
             return parsed
     except json.JSONDecodeError:
         pass
 
-    # Try to find a JSON array in the text
+    # Try to find a JSON array embedded in text
     start = text.find("[")
     end = text.rfind("]")
     if start != -1 and end != -1 and end > start:
         try:
             parsed = json.loads(text[start:end + 1])
-            if isinstance(parsed, list):
+            if isinstance(parsed, list) and parsed:
                 return parsed
         except json.JSONDecodeError:
             pass
 
+    # ---- Fallback: extract files from markdown code blocks ----
+    # Matches patterns like:
+    #   ```java\n// src/main/java/Foo.java\npackage ...```
+    #   **`src/Foo.java`**\n```java\npackage ...```
+    #   ### src/Foo.java\n```java\npackage ...```
+    files = []
+    # Find all fenced code blocks
+    block_pattern = re.compile(
+        r"```(\w+)?\s*\n(.*?)```", re.DOTALL
+    )
+    # Patterns that precede a code block and name the file
+    path_before_pattern = re.compile(
+        r"(?:\*\*`?|###?\s+|`)([\w./\\-]+\.(?:java|py|ts|tsx|js|jsx|cs|go|rb|rs|kt|swift|xml|yaml|yml|json|sql|html|css|properties|gradle))`?\*?\*?\s*$",
+        re.MULTILINE,
+    )
+
+    blocks = list(block_pattern.finditer(raw))
+    if blocks:
+        for match in blocks:
+            lang = match.group(1) or ""
+            content = match.group(2).strip()
+            if not content:
+                continue
+
+            file_path = ""
+
+            # Check if a file path appears just before this code block
+            preceding_text = raw[:match.start()]
+            path_matches = list(path_before_pattern.finditer(preceding_text))
+            if path_matches:
+                file_path = path_matches[-1].group(1)
+
+            # Check if the first line of the code block is a comment with a path
+            if not file_path:
+                first_line = content.split("\n")[0].strip()
+                # Matches: // path/to/File.java  or  # path/to/file.py
+                comment_path = re.match(
+                    r"^(?://|#)\s*([\w./\\-]+\.\w+)\s*$", first_line
+                )
+                if comment_path:
+                    file_path = comment_path.group(1)
+                    # Remove the comment line from content
+                    content = "\n".join(content.split("\n")[1:]).strip()
+
+            if not file_path:
+                # Infer from package declaration + class name for Java
+                pkg = re.search(r"package\s+([\w.]+);", content)
+                cls = re.search(r"(?:class|interface|enum)\s+(\w+)", content)
+                if pkg and cls:
+                    file_path = f"src/main/java/{pkg.group(1).replace('.', '/')}/{cls.group(1)}.java"
+
+            if file_path and content:
+                files.append({
+                    "file_path": file_path,
+                    "content": content,
+                    "language": lang or _guess_language(file_path),
+                })
+
+    if files:
+        logger.info(
+            "Extracted %d file(s) from markdown code blocks (JSON parse failed)",
+            len(files),
+        )
+        return files
+
     logger.warning("Could not parse LLM output as JSON file array")
     return []
+
+
+def _guess_language(file_path: str) -> str:
+    """Guess language from file extension."""
+    ext_map = {
+        ".java": "java", ".py": "python", ".ts": "typescript",
+        ".tsx": "typescript", ".js": "javascript", ".jsx": "javascript",
+        ".cs": "csharp", ".go": "go", ".rb": "ruby", ".rs": "rust",
+        ".kt": "kotlin", ".swift": "swift", ".xml": "xml",
+        ".yaml": "yaml", ".yml": "yaml", ".json": "json",
+        ".sql": "sql", ".html": "html", ".css": "css",
+    }
+    for ext, lang in ext_map.items():
+        if file_path.endswith(ext):
+            return lang
+    return ""

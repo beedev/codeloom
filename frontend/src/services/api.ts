@@ -504,6 +504,69 @@ export async function executeMigrationPhase(
   );
 }
 
+/**
+ * Execute a migration phase using the agentic tool-use loop.
+ * Returns an SSE stream of AgentEvent objects.
+ */
+export async function executeMigrationPhaseAgentic(
+  planId: string,
+  phaseNumber: number,
+  onEvent: (event: import('../types/index.ts').AgentEvent) => void,
+  options?: {
+    mvpId?: number;
+    maxTurns?: number;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  const params = new URLSearchParams();
+  if (options?.mvpId != null) params.set('mvp_id', String(options.mvpId));
+  if (options?.maxTurns != null) params.set('max_turns', String(options.maxTurns));
+  const qs = params.toString() ? `?${params.toString()}` : '';
+
+  const response = await fetch(
+    `/api/migration/${planId}/phase/${phaseNumber}/execute-agent${qs}`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: { Accept: 'text/event-stream' },
+      signal: options?.signal,
+    },
+  );
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(body || `HTTP ${response.status}`);
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('No response body');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const data = line.slice(6).trim();
+      if (!data || data === '[DONE]') continue;
+
+      try {
+        const parsed = JSON.parse(data);
+        onEvent(parsed);
+      } catch {
+        // Skip malformed SSE lines
+      }
+    }
+  }
+}
+
 export async function getMigrationPhaseOutput(
   planId: string,
   phaseNumber: number,
@@ -625,24 +688,30 @@ export interface BatchExecuteParams {
   mvp_ids?: number[] | null;
   approval_policy?: 'manual' | 'auto' | 'auto_non_blocking';
   run_all?: boolean;
+  use_agent?: boolean;
+  max_agent_turns?: number;
 }
 
 export interface BatchMvpResult {
   mvp_id: number;
   name: string;
-  status: 'pending' | 'processing' | 'executed' | 'approved' | 'needs_review' | 'failed' | 'skipped';
+  status: 'pending' | 'processing' | 'executed' | 'approved' | 'needs_review' | 'failed' | 'skipped' | 'cancelled';
   current_phase: number;
   error: string | null;
   completed_at: string | null;
   gate_results: Array<{ gate_name: string; passed: boolean; blocking: boolean; details?: string }>;
+  agent_stats?: { turns_used: number; tools_called: number; total_ms: number } | null;
+  agent_trace?: import('../types/index.ts').AgentEvent[];
 }
 
 export interface BatchStatus {
   batch_id: string;
   plan_id: string;
-  status: 'running' | 'complete' | 'partial_failure' | 'needs_review';
+  status: 'running' | 'complete' | 'partial_failure' | 'needs_review' | 'cancelled';
   approval_policy: string;
   run_all: boolean;
+  use_agent?: boolean;
+  max_agent_turns?: number;
   starting_phase: number;
   total_mvps: number;
   completed: number;
@@ -693,6 +762,15 @@ export async function retryBatchExecution(
   return request<BatchLaunchResult>(`/api/migration/${planId}/batch/${batchId}/retry`, {
     method: 'POST',
     body: JSON.stringify(mvpIds ? { mvp_ids: mvpIds } : {}),
+  });
+}
+
+export async function cancelBatchExecution(
+  planId: string,
+  batchId: string,
+): Promise<{ batch_id: string; cancel_requested: boolean }> {
+  return request(`/api/migration/${planId}/batch/${batchId}/cancel`, {
+    method: 'POST',
   });
 }
 

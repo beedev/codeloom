@@ -14,9 +14,10 @@ import { useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Highlight, themes } from 'prism-react-renderer';
-import { Play, Check, Loader2, FileCode, AlertCircle, Download } from 'lucide-react';
+import { Play, Check, Loader2, FileCode, AlertCircle, Download, Bot } from 'lucide-react';
 import { DiffViewer } from './DiffViewer.tsx';
 import { TestFilePanel } from './TestFilePanel.tsx';
+import { AgentExecutionPanel } from './AgentExecutionPanel.tsx';
 import * as api from '../../services/api.ts';
 import type { MigrationPhaseOutput, MigrationFile, DiffContext } from '../../types/index.ts';
 
@@ -60,6 +61,10 @@ export function PhaseViewer({
   const [diffContext, setDiffContext] = useState<DiffContext | null>(null);
   const [isDiffLoading, setIsDiffLoading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [agenticMode, setAgenticMode] = useState(false);
+
+  // Phase types that support agentic execution
+  const supportsAgentic = ['transform', 'analyze', 'test'].includes(phaseType);
 
   const title = PHASE_LABELS[phaseType] ?? phaseType;
   const hasOutput = phase && phase.output;
@@ -198,18 +203,30 @@ export function PhaseViewer({
             </button>
           )}
 
-          {/* Execute button */}
-          {canExecute && !isExecuting && (!phase || phase.status === 'pending' || isError) && (
-            <button
-              onClick={onExecute}
-              className="flex items-center gap-1.5 rounded-md bg-glow px-4 py-2 text-xs font-medium text-white hover:bg-glow-dim"
-            >
-              <Play className="h-3.5 w-3.5" />
-              Execute Phase
-            </button>
+          {/* Execute buttons */}
+          {canExecute && !isExecuting && !agenticMode && (!phase || phase.status === 'pending' || isError) && (
+            <>
+              <button
+                onClick={onExecute}
+                className="flex items-center gap-1.5 rounded-md bg-glow px-4 py-2 text-xs font-medium text-white hover:bg-glow-dim"
+              >
+                <Play className="h-3.5 w-3.5" />
+                Execute Phase
+              </button>
+
+              {supportsAgentic && planId && (
+                <button
+                  onClick={() => setAgenticMode(true)}
+                  className="flex items-center gap-1.5 rounded-md border border-nebula/40 bg-nebula/10 px-4 py-2 text-xs font-medium text-nebula-bright transition-colors hover:bg-nebula/20"
+                >
+                  <Bot className="h-3.5 w-3.5" />
+                  Run with Agent
+                </button>
+              )}
+            </>
           )}
 
-          {isExecuting && (
+          {isExecuting && !agenticMode && (
             <div className="flex items-center gap-2 rounded-md bg-glow/10 px-4 py-2 text-xs text-glow">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
               Running...
@@ -234,8 +251,25 @@ export function PhaseViewer({
 
       {/* Phase content */}
       <div className="flex flex-1 overflow-hidden">
+        {/* ── Agentic execution panel ── */}
+        {agenticMode && planId && (
+          <div className="flex-1 p-4">
+            <AgentExecutionPanel
+              planId={planId}
+              phaseNumber={phaseNumber}
+              phaseType={phaseType}
+              mvpId={mvpId}
+              onComplete={() => {
+                setAgenticMode(false);
+                onExecute(); // trigger parent refresh to reload phase output
+              }}
+              onCancel={() => setAgenticMode(false)}
+            />
+          </div>
+        )}
+
         {/* ── Pre-execution states ── */}
-        {!hasOutput && !isExecuting && !hasFiles && (
+        {!agenticMode && !hasOutput && !isExecuting && !hasFiles && (
           <div className="flex flex-1 items-center justify-center text-text-dim">
             <div className="text-center">
               {isError && phase?.output ? (
@@ -259,7 +293,7 @@ export function PhaseViewer({
           </div>
         )}
 
-        {isExecuting && !hasOutput && !hasFiles && (
+        {!agenticMode && isExecuting && !hasOutput && !hasFiles && (
           <div className="flex flex-1 items-center justify-center">
             <div className="text-center">
               <Loader2 className="mx-auto h-8 w-8 animate-spin text-glow" />

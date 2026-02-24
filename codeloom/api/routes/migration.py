@@ -36,7 +36,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from ..deps import get_current_user, require_admin, require_editor, get_migration_engine
@@ -91,6 +91,8 @@ class BatchExecuteRequest(BaseModel):
     mvp_ids: list[int] | None = None         # None = all eligible
     approval_policy: str = "manual"          # "manual" | "auto" | "auto_non_blocking"
     run_all: bool = False                    # transform → approve → test for each MVP
+    use_agent: bool = False                  # agentic multi-turn execution vs single-shot
+    max_agent_turns: int = 10               # max iterations when use_agent=True
 
 
 class BatchRetryRequest(BaseModel):
@@ -494,6 +496,47 @@ async def execute_phase(
         raise HTTPException(status_code=500, detail=f"Phase execution failed: {str(e)}")
 
 
+@router.post("/{plan_id}/phase/{phase_number}/execute-agent")
+async def execute_phase_agent(
+    plan_id: str,
+    phase_number: int,
+    mvp_id: Optional[int] = Query(None, description="MVP ID for per-MVP phases"),
+    max_turns: int = Query(10, ge=1, le=30, description="Maximum agent iterations"),
+    user: dict = Depends(require_editor),
+    engine=Depends(get_migration_engine),
+):
+    """Execute a migration phase using the agentic tool-use loop.
+
+    Returns a Server-Sent Events stream with real-time agent execution events:
+    - agent_start: Loop begins
+    - thinking: Agent reasoning text
+    - tool_call: Tool invocation
+    - tool_result: Tool execution result
+    - output: Final answer
+    - agent_done: Loop completed
+    - error: Error occurred
+    """
+    def event_generator():
+        try:
+            for event in engine.execute_phase_agentic(
+                plan_id, phase_number, mvp_id=mvp_id, max_turns=max_turns,
+            ):
+                yield event.to_sse()
+        except Exception as e:
+            logger.error(f"Agentic phase execution failed: {e}")
+            yield f"data: {{\"type\": \"error\", \"error\": \"{str(e)}\", \"recoverable\": false}}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/{plan_id}/phase/{phase_number}")
 async def get_phase_output(
     plan_id: str,
@@ -634,6 +677,8 @@ async def batch_execute(
             mvp_ids=data.mvp_ids,
             approval_policy=data.approval_policy,
             run_all=data.run_all,
+            use_agent=data.use_agent,
+            max_agent_turns=data.max_agent_turns,
         )
         batch_id = result["batch_id"]
         background_tasks.add_task(engine.execute_batch_worker, batch_id)
@@ -670,6 +715,20 @@ async def list_batches(
         return engine.list_batch_executions(plan_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{plan_id}/batch/{batch_id}/cancel")
+async def cancel_batch(
+    plan_id: str,
+    batch_id: str,
+    user: dict = Depends(require_editor),
+    engine=Depends(get_migration_engine),
+):
+    """Cancel a running batch execution."""
+    try:
+        return engine.cancel_batch(batch_id, plan_id=plan_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/{plan_id}/batch/{batch_id}/retry")
@@ -712,6 +771,8 @@ async def retry_batch(
             mvp_ids=retry_mvp_ids,
             approval_policy=original.get("approval_policy", "manual"),
             run_all=original.get("run_all", False),
+            use_agent=original.get("use_agent", False),
+            max_agent_turns=original.get("max_agent_turns", 10),
         )
         background_tasks.add_task(engine.execute_batch_worker, result["batch_id"])
         return result

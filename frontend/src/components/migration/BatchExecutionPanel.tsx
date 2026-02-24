@@ -23,9 +23,15 @@ import {
   ChevronRight,
   Download,
   Eye,
+  Bot,
+  Zap,
+  Brain,
+  StopCircle,
 } from 'lucide-react';
 import * as api from '../../services/api.ts';
 import type { BatchStatus, BatchMvpResult, BatchExecuteParams } from '../../services/api.ts';
+import type { AgentEvent, ToolCallEvent, ToolResultEvent } from '../../types/index.ts';
+import { ThinkingCard, ToolCallCard, OutputCard, ErrorCard, DoneCard } from './AgentStepCard.tsx';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,6 +85,8 @@ function StatusIcon({ status }: { status: string }) {
       return <Loader2 className="h-4 w-4 animate-spin text-glow" />;
     case 'skipped':
       return <Clock className="h-4 w-4 text-text-dim" />;
+    case 'cancelled':
+      return <StopCircle className="h-4 w-4 text-warning" />;
     default:
       return <div className="h-3 w-3 rounded-full border border-void-surface bg-void-light" />;
   }
@@ -101,6 +109,8 @@ export function BatchExecutionPanel({
   const [mode, setMode] = useState<'launch' | 'monitor' | 'history'>('launch');
   const [approvalPolicy, setApprovalPolicy] = useState<ApprovalPolicy>('auto');
   const [runAll, setRunAll] = useState(true);
+  const [useAgent, setUseAgent] = useState(false);
+  const [maxAgentTurns, setMaxAgentTurns] = useState(10);
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -111,6 +121,10 @@ export function BatchExecutionPanel({
 
   // Expanded MVP rows
   const [expandedMvps, setExpandedMvps] = useState<Set<number>>(new Set());
+
+  // Agentic monitor tab state (lifted here so it survives re-renders)
+  const [agentTab, setAgentTab] = useState<'live' | 'results'>('live');
+  const [reviewMvpId, setReviewMvpId] = useState<number | null>(null);
 
   // History
   const [batchHistory, setBatchHistory] = useState<BatchStatus[]>([]);
@@ -176,9 +190,10 @@ export function BatchExecutionPanel({
       }
     };
 
-    // Immediate first poll
+    // Immediate first poll, then 1.5s for agentic (live trace), 5s for standard
     poll();
-    pollRef.current = setInterval(poll, 5000);
+    const interval = batchStatus?.use_agent ? 1500 : 5000;
+    pollRef.current = setInterval(poll, interval);
   }, [planId, onBatchComplete, loadHistory]);
 
   // ── Controlled mode: sync polling with external batch ID ──
@@ -221,6 +236,8 @@ export function BatchExecutionPanel({
       const params: BatchExecuteParams = {
         approval_policy: approvalPolicy,
         run_all: runAll,
+        use_agent: useAgent,
+        ...(useAgent && { max_agent_turns: maxAgentTurns }),
       };
       const result = await api.launchBatchExecution(planId, params);
       setActiveBatchId(result.batch_id);
@@ -232,7 +249,7 @@ export function BatchExecutionPanel({
     } finally {
       setIsLaunching(false);
     }
-  }, [planId, approvalPolicy, runAll, startPolling]);
+  }, [planId, approvalPolicy, runAll, useAgent, maxAgentTurns, startPolling]);
 
   // ── Retry failed ──
   const handleRetry = useCallback(async (batchId: string) => {
@@ -327,6 +344,333 @@ export function BatchExecutionPanel({
     );
   };
 
+  // ── Agent Trace View (renders stored events from batch agentic execution) ──
+  const AgentTraceView = ({ trace }: { trace: AgentEvent[] }) => {
+    const [showTrace, setShowTrace] = useState(false);
+
+    // Build a map of call_id → tool_result for pairing with tool_call cards
+    const resultMap = new Map<string, ToolResultEvent>();
+    for (const evt of trace) {
+      if (evt.type === 'tool_result') {
+        resultMap.set((evt as ToolResultEvent).call_id, evt as ToolResultEvent);
+      }
+    }
+
+    return (
+      <div className="mt-2">
+        <button
+          onClick={() => setShowTrace(!showTrace)}
+          className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-glow hover:text-glow/80"
+        >
+          <Bot className="h-3 w-3" />
+          Agent Execution Trace ({trace.filter(e => e.type === 'tool_call').length} tool calls)
+          {showTrace
+            ? <ChevronDown className="h-3 w-3" />
+            : <ChevronRight className="h-3 w-3" />
+          }
+        </button>
+        {showTrace && (
+          <div className="mt-2 space-y-1 rounded-lg border border-void-surface/40 bg-void/50 p-3 max-h-96 overflow-y-auto">
+            {trace.map((evt, i) => {
+              switch (evt.type) {
+                case 'thinking':
+                  return <ThinkingCard key={i} event={evt} />;
+                case 'tool_call':
+                  return (
+                    <ToolCallCard
+                      key={i}
+                      event={evt as ToolCallEvent}
+                      result={resultMap.get((evt as ToolCallEvent).call_id)}
+                    />
+                  );
+                case 'tool_result':
+                  // Rendered inline with tool_call above
+                  return null;
+                case 'output':
+                  return <OutputCard key={i} event={evt} />;
+                case 'error':
+                  return <ErrorCard key={i} event={evt} />;
+                case 'agent_done':
+                  return (
+                    <DoneCard
+                      key={i}
+                      turnsUsed={evt.turns_used}
+                      toolsCalled={evt.tools_called}
+                      totalMs={evt.total_ms}
+                    />
+                  );
+                default:
+                  return null;
+              }
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── Agentic Monitor View (split-panel: MVP queue + live agent console) ──
+  // ── Reusable trace renderer (no scroll logic — caller owns the container) ──
+  const TraceEventList = ({ trace }: { trace: AgentEvent[] }) => {
+    const resultMap = new Map<string, ToolResultEvent>();
+    for (const evt of trace) {
+      if (evt.type === 'tool_result') {
+        resultMap.set((evt as ToolResultEvent).call_id, evt as ToolResultEvent);
+      }
+    }
+
+    return (
+      <>
+        {trace.map((evt, i) => {
+          switch (evt.type) {
+            case 'agent_start':
+              return null;
+            case 'thinking':
+              return <ThinkingCard key={i} event={evt} />;
+            case 'tool_call':
+              return (
+                <ToolCallCard
+                  key={i}
+                  event={evt as ToolCallEvent}
+                  result={resultMap.get((evt as ToolCallEvent).call_id)}
+                />
+              );
+            case 'tool_result':
+              return null;
+            case 'output':
+              return <OutputCard key={i} event={evt} />;
+            case 'error':
+              return <ErrorCard key={i} event={evt} />;
+            case 'agent_done':
+              return (
+                <DoneCard
+                  key={i}
+                  turnsUsed={evt.turns_used}
+                  toolsCalled={evt.tools_called}
+                  totalMs={evt.total_ms}
+                />
+              );
+            default:
+              return null;
+          }
+        })}
+      </>
+    );
+  };
+
+  // ── Two-tab agentic monitor: "Live" + "Results" ──
+  // State (agentTab, reviewMvpId) is lifted to parent so it survives poll re-renders.
+  const AgenticMonitorView = ({ batch }: { batch: BatchStatus }) => {
+    const activeTab = agentTab;
+    const setActiveTab = setAgentTab;
+    const liveScrollRef = useRef<HTMLDivElement>(null);
+
+    const processingMvp = batch.mvp_results.find(m => m.status === 'processing');
+    const liveMvp = processingMvp ?? batch.mvp_results.findLast(m => m.agent_trace && m.agent_trace.length > 0);
+    const liveTrace = (liveMvp?.agent_trace ?? []) as AgentEvent[];
+
+    const reviewMvp = reviewMvpId ? batch.mvp_results.find(m => m.mvp_id === reviewMvpId) : null;
+    const reviewTrace = (reviewMvp?.agent_trace ?? []) as AgentEvent[];
+
+    // Live tab: always auto-scroll to bottom
+    useEffect(() => {
+      if (activeTab === 'live') {
+        const el = liveScrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+    }, [liveTrace.length, activeTab]);
+
+    // Auto-switch to results when batch finishes
+    useEffect(() => {
+      if (batch.status !== 'running' && activeTab === 'live') {
+        setActiveTab('results');
+      }
+    }, [batch.status]);
+
+    const liveTurnCount = liveTrace.reduce((max, e) => {
+      const t = 'turn' in e ? (e as { turn: number }).turn : -1;
+      return t > max ? t : max;
+    }, 0);
+    const liveToolCount = liveTrace.filter(e => e.type === 'tool_call').length;
+
+    const completedMvps = batch.mvp_results.filter(
+      m => m.agent_trace && m.agent_trace.length > 0 && m.status !== 'processing' && m.status !== 'pending'
+    );
+
+    return (
+      <div className="h-[calc(100vh-380px)] min-h-[400px] flex flex-col rounded-lg border border-void-surface overflow-hidden">
+        {/* Tab bar */}
+        <div className="flex items-center border-b border-void-surface bg-void-light/30">
+          <button
+            onClick={() => setActiveTab('live')}
+            className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+              activeTab === 'live'
+                ? 'border-glow text-glow'
+                : 'border-transparent text-text-dim hover:text-text-muted'
+            }`}
+          >
+            {batch.status === 'running' ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Zap className="h-3 w-3" />
+            )}
+            Live
+          </button>
+          <button
+            onClick={() => setActiveTab('results')}
+            className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium border-b-2 transition-colors ${
+              activeTab === 'results'
+                ? 'border-glow text-glow'
+                : 'border-transparent text-text-dim hover:text-text-muted'
+            }`}
+          >
+            <Eye className="h-3 w-3" />
+            Results
+            {completedMvps.length > 0 && (
+              <span className="ml-1 rounded-full bg-void-surface px-1.5 py-0 text-[9px]">
+                {completedMvps.length}
+              </span>
+            )}
+          </button>
+
+          {/* Right side controls */}
+          <div className="ml-auto flex items-center gap-3 pr-3">
+            {activeTab === 'live' && liveMvp && (
+              <span className="text-[10px] text-text-dim">
+                {liveToolCount} tool{liveToolCount !== 1 ? 's' : ''}
+              </span>
+            )}
+            {batch.status === 'running' && (
+              <button
+                onClick={async () => {
+                  try {
+                    await api.cancelBatchExecution(batch.plan_id, batch.batch_id);
+                  } catch (e) {
+                    console.error('Cancel failed', e);
+                  }
+                }}
+                className="flex items-center gap-1 rounded-md border border-danger/30 bg-danger/10 px-2 py-1 text-[10px] font-medium text-danger hover:bg-danger/20 transition-colors"
+              >
+                <StopCircle className="h-3 w-3" />
+                Stop
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* ── Tab: Live ── */}
+        {activeTab === 'live' && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Live header showing current MVP */}
+            {liveMvp && (
+              <div className="flex items-center gap-2 border-b border-void-surface/50 bg-void-light/20 px-4 py-1.5">
+                <Bot className="h-3.5 w-3.5 text-glow" />
+                <span className="text-[11px] font-medium text-text truncate">
+                  {liveMvp.name}
+                </span>
+                {processingMvp && (
+                  <span className="flex items-center gap-1 text-[10px] text-glow">
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                    Turn {liveTurnCount + 1}/{batch.max_agent_turns ?? 10}
+                  </span>
+                )}
+              </div>
+            )}
+            {/* Auto-scrolling console — user never fights this, it just follows */}
+            <div
+              ref={liveScrollRef}
+              className="flex-1 overflow-y-auto p-4 space-y-1.5"
+            >
+              {liveTrace.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-text-dim">
+                  <Brain className="h-8 w-8 mb-2 opacity-30" />
+                  <p className="text-xs">
+                    {batch.status === 'running' ? 'Waiting for agent to start...' : 'No live trace available.'}
+                  </p>
+                </div>
+              ) : (
+                <TraceEventList trace={liveTrace} />
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Tab: Results ── */}
+        {activeTab === 'results' && (
+          <div className="flex-1 flex overflow-hidden">
+            {/* Left: MVP list */}
+            <div className="w-[260px] shrink-0 border-r border-void-surface overflow-y-auto">
+              <div className="sticky top-0 z-10 border-b border-void-surface bg-void-light/50 px-3 py-2">
+                <p className="text-[10px] font-medium uppercase tracking-wider text-text-dim">
+                  Completed MVPs
+                </p>
+              </div>
+              {batch.mvp_results.map((mvp) => {
+                const hasTrace = mvp.agent_trace && mvp.agent_trace.length > 0;
+                const isSelected = mvp.mvp_id === reviewMvpId;
+                return (
+                  <div
+                    key={mvp.mvp_id}
+                    onClick={() => hasTrace && setReviewMvpId(isSelected ? null : mvp.mvp_id)}
+                    className={`flex items-center gap-2 px-3 py-2 border-b border-void-surface/30 transition-colors ${
+                      hasTrace ? 'cursor-pointer' : 'opacity-50'
+                    } ${
+                      isSelected ? 'bg-glow/5 border-l-2 border-l-glow' : 'border-l-2 border-l-transparent hover:bg-void-light/30'
+                    }`}
+                  >
+                    <StatusIcon status={mvp.status} />
+                    <div className="flex-1 min-w-0">
+                      <p className={`truncate text-xs ${isSelected ? 'text-glow font-medium' : 'text-text-muted'}`}>
+                        {mvp.name}
+                      </p>
+                      {mvp.agent_stats ? (
+                        <p className="text-[9px] text-text-dim">
+                          {mvp.agent_stats.turns_used} turns &middot; {mvp.agent_stats.tools_called} tools &middot; {(mvp.agent_stats.total_ms / 1000).toFixed(1)}s
+                        </p>
+                      ) : mvp.status === 'pending' ? (
+                        <p className="text-[9px] text-text-dim">queued</p>
+                      ) : mvp.status === 'processing' ? (
+                        <p className="text-[9px] text-glow">running</p>
+                      ) : !hasTrace ? (
+                        <p className="text-[9px] text-text-dim">no trace</p>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Right: selected MVP trace (fully scrollable, no auto-scroll) */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {reviewMvp ? (
+                <>
+                  <div className="flex items-center gap-2 border-b border-void-surface/50 bg-void-light/20 px-4 py-1.5">
+                    <Bot className="h-3.5 w-3.5 text-nebula" />
+                    <span className="text-[11px] font-medium text-text truncate">{reviewMvp.name}</span>
+                    <StatusBadge status={reviewMvp.status} />
+                    {reviewMvp.agent_stats && (
+                      <span className="ml-auto text-[9px] text-text-dim">
+                        {reviewMvp.agent_stats.turns_used} turns &middot; {reviewMvp.agent_stats.tools_called} tools &middot; {(reviewMvp.agent_stats.total_ms / 1000).toFixed(1)}s
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-4 space-y-1.5">
+                    <TraceEventList trace={reviewTrace} />
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center flex-1 text-text-dim">
+                  <Eye className="h-8 w-8 mb-2 opacity-30" />
+                  <p className="text-xs">Select an MVP to view its agent trace</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ── MVP Results Table ──
   const MvpResultsTable = ({ results, batch }: { results: BatchMvpResult[]; batch: BatchStatus }) => (
     <div className="divide-y divide-void-surface/50">
@@ -370,6 +714,14 @@ export function BatchExecutionPanel({
               {mvp.gate_results.length > 0 && (
                 <span className="text-[10px] text-text-dim">
                   Gates: {mvp.gate_results.filter(g => g.passed).length}/{mvp.gate_results.length}
+                </span>
+              )}
+
+              {/* Agent stats badge */}
+              {mvp.agent_stats && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-glow/10 px-1.5 py-0.5 text-[10px] text-glow">
+                  <Bot className="h-3 w-3" />
+                  {mvp.agent_stats.turns_used} turns &middot; {mvp.agent_stats.tools_called} tools &middot; {(mvp.agent_stats.total_ms / 1000).toFixed(1)}s
                 </span>
               )}
 
@@ -432,7 +784,11 @@ export function BatchExecutionPanel({
                     ))}
                   </div>
                 )}
-                {!mvp.error && mvp.gate_results.length === 0 && (
+                {/* Agent execution trace */}
+                {mvp.agent_trace && mvp.agent_trace.length > 0 && (
+                  <AgentTraceView trace={mvp.agent_trace} />
+                )}
+                {!mvp.error && mvp.gate_results.length === 0 && (!mvp.agent_trace || mvp.agent_trace.length === 0) && (
                   mvp.status === 'pending' ? (
                     <p className="text-xs text-text-dim">Waiting to execute...</p>
                   ) : (
@@ -543,6 +899,57 @@ export function BatchExecutionPanel({
                 />
               </button>
             </div>
+
+            {/* Execution mode selector */}
+            <div>
+              <label className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-text-dim">
+                Execution Mode
+              </label>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setUseAgent(false)}
+                  className={`flex flex-1 items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
+                    !useAgent
+                      ? 'border-glow/50 bg-glow/5 text-glow'
+                      : 'border-void-surface bg-void-light/30 text-text-muted hover:border-text-dim/30'
+                  }`}
+                >
+                  <Zap className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <div>
+                    <div className="text-xs font-medium">Standard</div>
+                    <div className="mt-0.5 text-[10px] opacity-70">Single LLM call per phase</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => setUseAgent(true)}
+                  className={`flex flex-1 items-start gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors ${
+                    useAgent
+                      ? 'border-glow/50 bg-glow/5 text-glow'
+                      : 'border-void-surface bg-void-light/30 text-text-muted hover:border-text-dim/30'
+                  }`}
+                >
+                  <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <div>
+                    <div className="text-xs font-medium">Agentic</div>
+                    <div className="mt-0.5 text-[10px] opacity-70">Multi-turn + tools, pulls context lazily</div>
+                  </div>
+                </button>
+              </div>
+              {useAgent && (
+                <div className="mt-2 flex items-center gap-2">
+                  <label className="text-[10px] text-text-dim">Max turns:</label>
+                  <select
+                    value={maxAgentTurns}
+                    onChange={(e) => setMaxAgentTurns(Number(e.target.value))}
+                    className="rounded border border-void-surface bg-void-light px-2 py-0.5 text-xs text-text-muted"
+                  >
+                    {[5, 10, 15, 20, 30].map((n) => (
+                      <option key={n} value={n}>{n}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Launch button */}
@@ -593,6 +1000,9 @@ export function BatchExecutionPanel({
               </h3>
               <p className="mt-0.5 text-[10px] text-text-dim">
                 Policy: {batchStatus.approval_policy} | Run all: {batchStatus.run_all ? 'yes' : 'no'}
+                {batchStatus.use_agent && (
+                  <> | <Bot className="inline h-3 w-3" /> Agentic (max {batchStatus.max_agent_turns ?? 10} turns)</>
+                )}
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -622,19 +1032,24 @@ export function BatchExecutionPanel({
           {/* Progress bar */}
           <ProgressBar batch={batchStatus} />
 
-          {/* MVP results table */}
-          <div className="overflow-hidden rounded-lg border border-void-surface">
-            <div className="flex items-center gap-3 border-b border-void-surface bg-void-light/30 px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-text-dim">
-              <span className="w-5" />
-              <span className="w-5" />
-              <span className="flex-1">MVP</span>
-              <span className="w-24 text-center">Status</span>
-              <span className="w-16 text-center">Phase</span>
-              <span className="w-20 text-center">Gates</span>
-              <span className="w-24" />
+          {/* Agentic monitor: live during execution, results tab after */}
+          {batchStatus.use_agent ? (
+            <AgenticMonitorView batch={batchStatus} />
+          ) : (
+            /* Standard MVP results table */
+            <div className="overflow-hidden rounded-lg border border-void-surface">
+              <div className="flex items-center gap-3 border-b border-void-surface bg-void-light/30 px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-text-dim">
+                <span className="w-5" />
+                <span className="w-5" />
+                <span className="flex-1">MVP</span>
+                <span className="w-24 text-center">Status</span>
+                <span className="w-16 text-center">Phase</span>
+                <span className="w-20 text-center">Gates</span>
+                <span className="w-24" />
+              </div>
+              <MvpResultsTable results={batchStatus.mvp_results} batch={batchStatus} />
             </div>
-            <MvpResultsTable results={batchStatus.mvp_results} batch={batchStatus} />
-          </div>
+          )}
 
           {/* Batch-level final state */}
           {batchStatus.status !== 'running' && (
