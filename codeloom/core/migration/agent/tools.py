@@ -505,6 +505,8 @@ class _Context7DocTool:
 
     def _fetch_context7(self, framework: str, topic: str) -> str:
         """Resolve library ID then fetch targeted docs from Context7."""
+        from urllib.parse import quote as _urlquote
+
         headers = {"Authorization": f"Bearer {self._c7_key}"}
 
         # Step 1: Resolve library ID
@@ -519,34 +521,51 @@ class _Context7DocTool:
             if not raw:
                 logger.debug("Context7 search returned empty body for '%s'", framework)
                 return ""
-            search_data = search_resp.json()
+            # Fix: guard against non-JSON responses (e.g. HTML error pages)
+            try:
+                search_data = search_resp.json()
+            except Exception:
+                logger.debug("Context7 search returned non-JSON for '%s'", framework)
+                return ""
 
         results = search_data.get("results", [])
         if not results:
             return ""
 
-        lib_id = results[0].get("id", "")
+        # Fix: skip /websites/ entries — they are rejected by the docs endpoint
+        lib_id = ""
+        first_result = None
+        for r in results:
+            rid = r.get("id", "")
+            if rid and not rid.startswith("/websites/"):
+                lib_id = rid
+                first_result = r
+                break
+        if not lib_id:
+            # Fallback: take first result even if it's a website entry
+            lib_id = results[0].get("id", "")
+            first_result = results[0]
         if not lib_id:
             return ""
 
         # Step 2: Fetch docs for topic
-        params: Dict[str, Any] = {"libraryId": lib_id}
+        # Fix: build URL manually so the slash in lib_id is NOT percent-encoded.
+        # httpx.get(params={"libraryId": lib_id}) encodes "/" as "%2F" which
+        # causes a 400 Bad Request from the Context7 docs endpoint.
+        # Fix: add tokens=5000 so the API returns a useful amount of content.
+        docs_url = f"{self.C7_DOCS_URL}?libraryId={lib_id}&tokens=5000"
         if topic:
-            params["query"] = topic
+            docs_url += f"&query={_urlquote(topic, safe='')}"
 
         with httpx.Client(timeout=20) as client:
-            docs_resp = client.get(
-                self.C7_DOCS_URL,
-                params=params,
-                headers=headers,
-            )
+            docs_resp = client.get(docs_url, headers=headers)
             docs_resp.raise_for_status()
             content = docs_resp.text.strip()
             if not content:
                 logger.debug("Context7 docs returned empty body for '%s'", lib_id)
                 return ""
 
-        lib_name = results[0].get("title") or results[0].get("name") or framework
+        lib_name = (first_result or {}).get("title") or (first_result or {}).get("name") or framework
         header = f"## {lib_name} Documentation"
         if topic:
             header += f" — {topic}"
@@ -728,6 +747,25 @@ def _collect_errors(node, errors: list, max_errors: int = 10):
 
 # Which tools each phase context_type gets access to.
 _PHASE_TOOL_MAP: Dict[str, List[str]] = {
+    "architecture": [
+        "read_source_file",       # read each file for exact method signatures
+        "get_module_graph",       # enumerate all source files
+        "get_functional_context", # understand business rules and data flows
+        "search_codebase",        # find patterns across the project
+        "lookup_framework_docs",  # target framework patterns (Context7)
+        # No validate_syntax — spec produces markdown, not code
+    ],
+    "design": [
+        "read_source_file",
+        "get_source_code",
+        "get_functional_context",
+        "get_dependencies",
+        "get_module_graph",
+        "get_deep_analysis",
+        "search_codebase",
+        "lookup_framework_docs",  # Context7: look up target framework patterns
+        # No validate_syntax — design produces a text spec, not code
+    ],
     "transform": [
         "read_source_file",
         "get_unit_details",

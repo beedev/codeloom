@@ -20,6 +20,15 @@ Pipeline V2 (4-phase, Architecture-first):
   On-demand (stored on FunctionalMVP, not as phase):
     Deep Analyze — merges old Analyze + Design
 
+Pipeline V3 (5-phase, Design-before-Transform):
+  Plan-level (mvp_id = NULL):
+    1: Architecture — design target architecture first
+    2: Discovery — clustering informed by architecture output
+  Per-MVP (mvp_id set):
+    3: Design — agentic design spec with Context7 (auto-flows, no human gate)
+    4: Transform — code migration guided by design spec
+    5: Test — scoped test generation and validation
+
 Each executor:
 1. Builds context via MigrationContextBuilder
 2. Assembles the LLM prompt via prompts module
@@ -64,11 +73,20 @@ PHASE_TYPES_V2 = {
     3: "transform",
     4: "test",
 }
+PHASE_TYPES_V3 = {
+    1: "architecture",
+    2: "discovery",
+    3: "design",    # per-MVP, auto-flows into transform
+    4: "transform", # per-MVP
+    5: "test",      # per-MVP
+}
 PHASE_TYPES = PHASE_TYPES_V1  # backward compat default
 
 
 def get_phase_type(phase_number: int, version: int = 1) -> str:
     """Get the phase type string for a phase number."""
+    if version == 3:
+        return PHASE_TYPES_V3.get(phase_number, f"unknown_{phase_number}")
     mapping = PHASE_TYPES_V2 if version == 2 else PHASE_TYPES_V1
     return mapping.get(phase_number, f"unknown_{phase_number}")
 
@@ -225,9 +243,9 @@ def execute_phase_agentic(
 
     # Store final result for the caller to persist
     if agent.result:
-        # Attempt to parse output_files from transform/test phases
+        # Attempt to parse output_files from transform/test/architecture phases
         output_files = []
-        if effective_type in ("transform", "test"):
+        if effective_type in ("transform", "test", "architecture"):
             output_files = _parse_json_files(agent.result)
 
         agent.result = json.dumps({
@@ -289,6 +307,27 @@ def _build_agentic_task_prompt(
                 f"{manifest}"
             )
 
+    # V3: For design phase, inject discovery strategy as planning background
+    if context_type == "design":
+        discovery_strategy = plan.get("_discovery_strategy", "")
+        if discovery_strategy:
+            parts.append(
+                "## Migration Strategy (from Discovery Phase)\n"
+                "Use this as background context for your design decisions:\n\n"
+                + discovery_strategy[:3000]
+            )
+
+    # V3: For transform phase, inject design specification as the primary implementation spec
+    if context_type == "transform":
+        design_spec = plan.get("_design_specification", "")
+        if design_spec:
+            parts.append(
+                "## Design Specification\n"
+                "Implement EXACTLY the following design. Use the exact file paths, "
+                "patterns, and type definitions specified — do not deviate.\n\n"
+                + design_spec
+            )
+
     # Phase-specific instructions
     instructions = _PHASE_INSTRUCTIONS.get(context_type, "Analyze and produce your output.")
     parts.append(f"## Your Task\n{instructions}")
@@ -297,6 +336,51 @@ def _build_agentic_task_prompt(
 
 
 _PHASE_INSTRUCTIONS: Dict[str, str] = {
+    "architecture": (
+        "You are a senior migration architect. Your task is to produce a MIGRATION_SPEC.md "
+        "that Claude Code can execute to complete the migration from start to finish.\n\n"
+        "Follow this process:\n"
+        "1. Call get_module_graph to enumerate ALL source files in the project.\n"
+        "2. Call read_source_file for EACH source file to read its full source and extract "
+        "exact method/function signatures (name, parameters with types, return type).\n"
+        "3. Call get_functional_context to understand business rules and data flows.\n"
+        "4. Call lookup_framework_docs for the target framework's key patterns — at minimum:\n"
+        "   - The dependency injection pattern (if applicable)\n"
+        "   - The routing / controller pattern\n"
+        "   - The service layer pattern\n"
+        "   - The project configuration file format (package.json, pom.xml, .csproj, etc.)\n"
+        "5. Produce a MIGRATION_SPEC.md containing:\n\n"
+        "## Section 1: Prerequisites\n"
+        "List each install/setup step as a checkbox.\n\n"
+        "## Section 2: Infrastructure (execute first)\n"
+        "Include the COMPLETE configuration file (package.json / pom.xml / .csproj) with "
+        "ALL dependencies at exact versions. Then define the entry point file with the list "
+        "of all routes/handlers it must mount. Then the DI container file listing all "
+        "services to register (omit if target stack does not use DI).\n\n"
+        "## Section 3: Services (execute in dependency order)\n"
+        "For EACH source file, produce a subsection:\n"
+        "### N. [Service Name]\n"
+        "- Source: `[source file path]` ([LOC] LOC)\n"
+        "- Target: `[target file path]`\n"
+        "- Migration pattern: [e.g. async class, constructor injection, functional module]\n"
+        "- Methods:\n"
+        "  - `source_method(param)` → `targetMethod(param: Type): Promise<ReturnType>`\n"
+        "  (list EVERY public/exported method — no omissions)\n"
+        "- Dependencies: [packages needed by this file only]\n"
+        "- [ ] File created\n"
+        "- [ ] Compiles / syntax valid\n"
+        "- [ ] Registered in DI container\n\n"
+        "## Section 4: Verification\n"
+        "Provide the exact commands to verify the full migration compiles and tests pass.\n\n"
+        "CRITICAL OUTPUT FORMAT — your final answer MUST be a raw JSON array, nothing else:\n"
+        '[{"file_path": "MIGRATION_SPEC.md", "language": "markdown", "content": "# Migration Spec..."}]\n\n'
+        "Rules:\n"
+        "- Output ONLY the JSON array. No markdown fences, no explanation text.\n"
+        "- The content value must be the complete MIGRATION_SPEC.md — do not truncate.\n"
+        "- Use exact dependency versions from framework docs, not 'latest'.\n"
+        "- Every source file must map to exactly one target file in Section 3.\n"
+        "- Every method in every source file must appear in the Methods list."
+    ),
     "transform": (
         "Migrate this MVP's source code to the target framework.\n\n"
         "Steps:\n"
@@ -357,6 +441,40 @@ _PHASE_INSTRUCTIONS: Dict[str, str] = {
         "2. Use search_codebase to find key patterns and frameworks.\n"
         "3. Use get_unit_details to understand code organization.\n\n"
         "Output: Markdown with migration strategy and recommendations."
+    ),
+    "design": (
+        "You are a senior software architect producing a DESIGN SPECIFICATION document.\n"
+        "Do NOT write code files. Do NOT output JSON arrays. Output ONLY the design spec.\n\n"
+        "Follow this process:\n"
+        "1. Call get_source_code to read all source code for this MVP.\n"
+        "2. Call get_functional_context to understand business rules and data flows.\n"
+        "3. Call get_dependencies to understand external boundaries and integrations.\n"
+        "4. Call lookup_framework_docs for each key pattern in the target stack.\n"
+        "   Examples (adapt to the actual target stack):\n"
+        "   - lookup('Express.js', 'routing and controllers')\n"
+        "   - lookup('Express.js', 'middleware error handling')\n"
+        "   - lookup('Spring Boot', 'REST controllers and service layer')\n"
+        "   - lookup('NestJS', 'modules and dependency injection')\n"
+        "   Look up patterns specific to what you see in the source — don't guess.\n\n"
+        "5. Produce EXACTLY this structure in your output:\n\n"
+        "## MVP Design: [name]\n\n"
+        "### Current Behavior\n"
+        "[What does this MVP do? Entry points, data flow, business rules, external calls.]\n\n"
+        "### Target Architecture\n"
+        "**Files to create:**\n"
+        "- `src/[path]/[File].[ext]` — [purpose]\n"
+        "(list every file the transform agent will need to generate)\n\n"
+        "**Patterns chosen:**\n"
+        "- [Pattern name]: [how it maps from source construct, why it was chosen based on framework docs]\n\n"
+        "### Type / Interface Definitions\n"
+        "[All interfaces, types, enums, DTOs needed — with field names and types]\n\n"
+        "### Key Migration Decisions\n"
+        "[How each source pattern maps to target. Anything requiring special handling.]\n\n"
+        "### Implementation Order\n"
+        "[Which file to implement first, dependency ordering between files.]\n\n"
+        "---\n"
+        "The transform agent will implement code DIRECTLY from this specification.\n"
+        "Be precise — incorrect file paths or missing type definitions will cause failures."
     ),
 }
 

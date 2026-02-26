@@ -11,6 +11,11 @@ V2 (4-phase, default for new plans):
   Per-MVP:    Phase 3 Transform, Phase 4 Test
   On-demand:  analyze_mvp() merges old Analyze+Design into FunctionalMVP.analysis_output
 
+V3 (5-phase, Design-before-Transform):
+  Plan-level: Phase 1 Architecture, Phase 2 Discovery
+  Per-MVP:    Phase 3 Design (auto-flows, no human gate), Phase 4 Transform, Phase 5 Test
+  Design uses Context7 to produce a code-level spec that Transform implements directly.
+
 Each phase has a human approval gate. Pipeline version is set on MigrationPlan.pipeline_version.
 """
 
@@ -30,7 +35,7 @@ from .context_builder import MigrationContextBuilder
 from .doc_enricher import DocEnricher
 from .ground_truth import CodebaseGroundTruth
 from .lanes.base import aggregate_confidence, confidence_tier
-from .mvp_clusterer import MvpClusterer, _MAX_CLUSTER_SIZE
+from .mvp_clusterer import MvpClusterer, _MAX_CLUSTER_SIZE, dynamic_cluster_size_cap
 from .phases import (
     execute_phase, execute_phase_agentic,
     execute_mvp_analysis, execute_integration_analysis,
@@ -53,16 +58,24 @@ MVP_PHASES_V1 = (3, 4, 5, 6)
 PLAN_PHASES_V2 = (1, 2)
 MVP_PHASES_V2 = (3, 4)
 
+# V3: 5-phase pipeline (Architecture -> Discovery -> Design[auto] -> Transform -> Test)
+PLAN_PHASES_V3 = (1, 2)
+MVP_PHASES_V3 = (3, 4, 5)  # design(auto-flows), transform, test
+
 # Backward compat defaults (V1)
 PLAN_PHASES = PLAN_PHASES_V1
 MVP_PHASES = MVP_PHASES_V1
 
 
 def _plan_phases(v: int) -> tuple:
+    if v == 3:
+        return PLAN_PHASES_V3
     return PLAN_PHASES_V2 if v == 2 else PLAN_PHASES_V1
 
 
 def _mvp_phases(v: int) -> tuple:
+    if v == 3:
+        return MVP_PHASES_V3
     return MVP_PHASES_V2 if v == 2 else MVP_PHASES_V1
 
 
@@ -1425,12 +1438,13 @@ class MigrationEngine:
         if not mvps:
             return mvps
 
-        # Count total unique units
+        # Count total unique units and compute project-proportional size cap
         all_units = set()
         for m in mvps:
             all_units.update(m.get("unit_ids", []))
         total_units = len(all_units)
-        mega_threshold = max(total_units * 0.6, _MAX_CLUSTER_SIZE * 2)
+        size_cap = dynamic_cluster_size_cap(total_units)
+        mega_threshold = max(total_units * 0.6, size_cap * 2)
 
         # Pass 1: Merge MVPs with identical names — track old→new index mapping
         seen_names: Dict[str, int] = {}
@@ -1480,7 +1494,7 @@ class MigrationEngine:
                     "Dedup: splitting mega-cluster '%s' (%d units, threshold=%d)",
                     m.get("name", "?"), unit_count, int(mega_threshold),
                 )
-                sub_clusters = self._split_mega_cluster(m, max_size=_MAX_CLUSTER_SIZE)
+                sub_clusters = self._split_mega_cluster(m, max_size=size_cap)
                 for sc in sub_clusters:
                     merged_to_result[merged_idx] = len(pre_mega)
                     pre_mega.append(sc)
@@ -2459,13 +2473,15 @@ class MigrationEngine:
                     if mvp.analysis_output:
                         plan_data["_analysis_output"] = mvp.analysis_output.get("output", "")
 
+            # Peek at the phase type for context-aware injections
+            context_type_peek = get_phase_type(phase_number, version) if version in (2, 3) else None
+
             # For agentic test phases: inject transform output files so the agent
             # knows exactly what files were generated and needs tests.
             # Without this the agent only sees "Generated N files. See output_files."
             # and has no way to discover what was created.
-            context_type_peek = get_phase_type(phase_number, version) if version == 2 else None
             if context_type_peek == "test" and mvp_id:
-                transform_phase_num = 3 if version == 2 else 5
+                transform_phase_num = 3 if version == 2 else 4  # V2: phase 3, V3: phase 4
                 transform_phase = self._get_phase(session, pid, transform_phase_num, mvp_id)
                 if transform_phase and transform_phase.output_files:
                     plan_data["_transform_output_files"] = transform_phase.output_files
@@ -2474,7 +2490,27 @@ class MigrationEngine:
                         len(transform_phase.output_files), mvp_id,
                     )
 
-        context_type = get_phase_type(phase_number, version) if version == 2 else None
+            # V3: For design phase, inject discovery output as planning background
+            if version == 3 and context_type_peek == "design" and mvp_id:
+                discovery_phase = self._get_phase(session, pid, 2, None)  # phase 2=discovery, plan-level
+                if discovery_phase and discovery_phase.output:
+                    plan_data["_discovery_strategy"] = discovery_phase.output
+                    logger.info(
+                        "V3 design phase: injected %d chars of discovery strategy for MVP %s",
+                        len(discovery_phase.output), mvp_id,
+                    )
+
+            # V3: For transform phase, inject design spec as the primary implementation spec
+            if version == 3 and context_type_peek == "transform" and mvp_id:
+                design_phase = self._get_phase(session, pid, 3, mvp_id)  # phase 3=design, per-MVP
+                if design_phase and design_phase.output:
+                    plan_data["_design_specification"] = design_phase.output
+                    logger.info(
+                        "V3 transform phase: injected %d chars of design spec for MVP %s",
+                        len(design_phase.output), mvp_id,
+                    )
+
+        context_type = get_phase_type(phase_number, version) if version in (2, 3) else None
         started_at = datetime.utcnow()
         execution_start = time.monotonic()
 
@@ -2510,7 +2546,7 @@ class MigrationEngine:
             # Persist result (always, even if no captured_output)
             output_files = []
             effective_type = context_type or get_phase_type(phase_number, version)
-            if captured_output and effective_type in ("transform", "test"):
+            if captured_output and effective_type in ("transform", "test", "architecture"):
                 from .phases import _parse_json_files
                 output_files = _parse_json_files(captured_output)
 
@@ -3920,7 +3956,41 @@ class MigrationEngine:
         plan_dir = self._get_plan_dir(plan_id, project_name)
 
         # Write LLM markdown output to _plans/
-        if output:
+        # For code-generating phases (transform/test), write a readable file manifest
+        # instead of the raw JSON array that the agent returned.
+        md_content = output
+        if output_files and phase_type in ("transform", "test", "design"):
+            lines = [
+                f"# Phase {phase_number}: {phase_type.title()}",
+                "",
+                f"**Files generated:** {len(output_files)}",
+                "",
+                "## File Manifest",
+                "",
+            ]
+            for fd in output_files:
+                fp = fd.get("file_path", "unknown")
+                lang = fd.get("language", "")
+                content = fd.get("content", "")
+                lines.append(f"### `{fp}`")
+                if lang:
+                    lines.append(f"**Language:** {lang}  |  **Lines:** {len(content.splitlines())}")
+                lines.append("")
+                # Include first 30 lines of each file as a preview
+                preview_lines = content.splitlines()[:30]
+                preview = "\n".join(preview_lines)
+                if len(content.splitlines()) > 30:
+                    preview += f"\n... ({len(content.splitlines()) - 30} more lines)"
+                lines.append(f"```{lang}")
+                lines.append(preview)
+                lines.append("```")
+                lines.append("")
+            md_content = "\n".join(lines)
+        elif output_files and not output:
+            # output was empty but we have files — still write a manifest
+            md_content = f"Generated {len(output_files)} file(s). See code/ directory."
+
+        if md_content:
             plans_dir = os.path.join(plan_dir, "_plans")
             os.makedirs(plans_dir, exist_ok=True)
             if mvp_id is not None:
@@ -3928,17 +3998,35 @@ class MigrationEngine:
             else:
                 md_name = f"phase-{phase_number}-{phase_type}.md"
             with open(os.path.join(plans_dir, md_name), "w") as f:
-                f.write(output)
+                f.write(md_content)
 
-        # Write generated code files to code/ (unified target project)
+        # Write generated code files to code/ (unified target project).
+        # MIGRATION_SPEC.md from the architecture phase goes to the plan root instead.
         if output_files:
             code_dir = os.path.join(plan_dir, "code")
             for fd in output_files:
                 fp = fd.get("file_path", "unknown")
-                full_path = os.path.join(code_dir, fp)
-                os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                with open(full_path, "w") as f:
-                    f.write(fd.get("content", ""))
+                content = fd.get("content", "")
+                if fp == "MIGRATION_SPEC.md":
+                    # Place the spec at the plan root for easy discovery
+                    spec_path = os.path.join(plan_dir, "MIGRATION_SPEC.md")
+                    with open(spec_path, "w") as f:
+                        f.write(content)
+                    logger.info("Written MIGRATION_SPEC.md to %s", spec_path)
+                else:
+                    full_path = os.path.join(code_dir, fp)
+                    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                    with open(full_path, "w") as f:
+                        f.write(content)
+
+        # Fallback: if architecture phase produced the spec as raw text output (non-agentic
+        # path), detect and write it to the plan root so it is always discoverable.
+        if phase_type == "architecture" and output and "MIGRATION_SPEC" in output:
+            spec_path = os.path.join(plan_dir, "MIGRATION_SPEC.md")
+            if not os.path.exists(spec_path):
+                with open(spec_path, "w") as f:
+                    f.write(output)
+                logger.info("Written MIGRATION_SPEC.md (text fallback) to %s", spec_path)
 
         return plan_dir
 
@@ -4278,10 +4366,16 @@ class MigrationEngine:
 
                     mvp_result["gate_results"] = gate_results
 
+                    # V3: design phase always auto-flows into transform — no human gate
+                    effective_policy = approval_policy
+                    if version == 3 and get_phase_type(phase_num, 3) == "design":
+                        effective_policy = "auto"
+                        logger.info("V3: auto-approving design phase for MVP %s", mvp_id)
+
                     should_approve = False
-                    if approval_policy == "auto":
+                    if effective_policy == "auto":
                         should_approve = gates_all_passed and not requires_review
-                    elif approval_policy == "auto_non_blocking":
+                    elif effective_policy == "auto_non_blocking":
                         # Approve unless a blocking gate failed
                         blocking_failures = [
                             g for g in gate_results

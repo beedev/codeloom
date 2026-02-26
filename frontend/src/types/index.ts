@@ -206,7 +206,7 @@ export interface MigrationPlan {
   status: 'draft' | 'in_progress' | 'complete' | 'abandoned';
   current_phase: number;
   migration_type?: 'version_upgrade' | 'framework_migration' | 'rewrite';
-  pipeline_version?: number;  // 1=V1 (6-phase), 2=V2 (4-phase). Defaults to 1.
+  pipeline_version?: number;  // 1=V1 (6-phase), 2=V2 (4-phase), 3=V3 (5-phase with auto-flowing design). Defaults to 1.
   asset_strategies?: Record<string, AssetStrategySpec> | null;
   discovery_metadata: Record<string, unknown> | null;
   plan_phases: MigrationPhaseInfo[];

@@ -33,7 +33,25 @@ logger = logging.getLogger(__name__)
 _COHESION_MERGE_THRESHOLD = 0.3
 _COUPLING_SPLIT_THRESHOLD = 0.7
 _MIN_CLUSTER_SIZE = 3
-_MAX_CLUSTER_SIZE = 120
+_MAX_CLUSTER_SIZE = 120        # legacy absolute cap (kept for backward compat)
+_MAX_CLUSTER_PCT = 0.08        # 8% of total units — scales with project size
+_MAX_CLUSTER_FLOOR = 10        # never below 10 units (tiny projects)
+_MAX_CLUSTER_CEILING = 80      # never above 80 units regardless of project size
+
+
+def dynamic_cluster_size_cap(total_units: int) -> int:
+    """Return a project-proportional max cluster size.
+
+    Scales at 8% of total units, clamped between floor and ceiling:
+      - 125 units (tiny)   → 10  (floor)
+      - 500 units (small)  → 40
+      - 1000 units (mid)   → 80  (ceiling)
+      - 5000 units (large) → 80  (ceiling)
+
+    This prevents a handful of tightly-coupled files from forming an
+    unmanageably large MVP regardless of absolute project size.
+    """
+    return max(_MAX_CLUSTER_FLOOR, min(_MAX_CLUSTER_CEILING, int(total_units * _MAX_CLUSTER_PCT)))
 _SHARED_PACKAGE_KEYWORDS = frozenset({
     "shared", "common", "util", "utils", "helper", "helpers",
     "base", "core", "infrastructure", "framework", "lib",
@@ -138,6 +156,13 @@ class MvpClusterer:
 
         edge_lookup = self._build_edge_lookup(edges)
 
+        # Compute project-proportional size cap (8% of total units, clamped)
+        size_cap = dynamic_cluster_size_cap(len(units))
+        logger.info(
+            "Cluster size cap: %d units (8%% of %d total, floor=%d, ceiling=%d)",
+            size_cap, len(units), _MAX_CLUSTER_FLOOR, _MAX_CLUSTER_CEILING,
+        )
+
         # Try RAPTOR-driven clustering first
         raptor_summaries = self._load_raptor_l1_summaries(pid)
         if raptor_summaries:
@@ -148,7 +173,8 @@ class MvpClusterer:
             clusters = self._cluster_raptor(raptor_summaries, units, edge_lookup)
         else:
             logger.info("No RAPTOR tree found, falling back to package-based clustering")
-            p = params or {}
+            p = dict(params or {})
+            p.setdefault("max_cluster_size", size_cap)  # honour explicit override if provided
             clusters = self._cluster_package_based(units, edges, edge_lookup, p)
 
         # Common post-processing: metrics, SP refs, ranking
