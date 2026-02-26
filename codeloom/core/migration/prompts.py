@@ -295,6 +295,7 @@ def phase_2_architecture(
     source_patterns: str = "",
     migration_type: str = "framework_migration",
     asset_strategies: dict | None = None,
+    layer_summary: str = "",
 ) -> str:
     """Build prompt for Phase 2: Technical Migration Blueprint.
 
@@ -304,6 +305,8 @@ def phase_2_architecture(
         migration_type: One of "version_upgrade", "framework_migration", "rewrite".
         asset_strategies: Per-language migration strategies from the plan.
             Keys are language names, values are dicts with "strategy" and optional "target".
+        layer_summary: Verified infrastructure layer summary from CodebaseGroundTruth.
+            Constrains tech recommendations to layers that exist in the source.
     """
     stack_str = ", ".join(target_stack.get("frameworks", []))
     langs_str = ", ".join(target_stack.get("languages", []))
@@ -374,6 +377,11 @@ def phase_2_architecture(
 {framework_docs}
 """
 
+    # Ground truth layer summary — constrains tech recommendations to real layers
+    layer_summary_section = ""
+    if layer_summary:
+        layer_summary_section = f"\n{layer_summary}\n"
+
     # In V2, architecture runs first (no prior discovery). In V1, discovery output is available.
     discovery_section = ""
     if phase_1_output:
@@ -409,7 +417,7 @@ the architecture. Focus on:
 {discovery_section}
 ### Source Codebase Structure
 {codebase_context}
-{source_patterns_section}{framework_docs_section}
+{source_patterns_section}{framework_docs_section}{layer_summary_section}
 ### Instructions
 1. Identify ALL deprecated APIs used in the source code that are removed or changed
    in the target version. For each, specify the replacement API.
@@ -455,6 +463,18 @@ the architecture. Focus on:
 |----------|-----------|-----------|----------------|
 | [behavior] | [old] | [new] | [what to do] |
 {sp_output_section}
+## Architecture Diagram (PlantUML)
+
+Produce a PlantUML component diagram inside a fenced code block (```plantuml ... ```):
+
+```plantuml
+@startuml upgrade-impact
+' Show which components are affected by the version upgrade.
+' Use stereotypes or colors to distinguish: no-change, minor-update, breaking-change.
+' Group by module/layer. Label with actual class/module names from the codebase.
+@enduml
+```
+
 ## Risk Register
 | Risk | Source Pattern | Impact | Mitigation |"""
 
@@ -479,7 +499,7 @@ Target ALWAYS follows framework best practices. If source has anti-patterns
 {discovery_section}
 ### Source Codebase Structure
 {codebase_context}
-{source_patterns_section}{framework_docs_section}
+{source_patterns_section}{framework_docs_section}{layer_summary_section}
 ### File Type Conversion Rules
 CRITICAL — only convert files whose source language matches a convertible type:
 - **Source code files** (.py, .js, .ts, .java, .cs, .go, .rb, etc.) → Convert to target language
@@ -542,8 +562,34 @@ NOTE: For SQL files, the Target Language should be "sql" and Changes should be "
 |---------|---------|----------|
 | ... | ... | ... |
 
-## Architecture Diagram
-[Text-based diagram of the target architecture]
+## Architecture Diagrams (PlantUML)
+
+Produce TWO PlantUML diagrams inside fenced code blocks (```plantuml ... ```):
+
+### 1. Component Diagram — target architecture layers and dependencies
+```plantuml
+@startuml target-components
+' Use packages for layers, components for services, arrows for dependencies.
+' Show: API layer, service/business layer, data layer (if applicable),
+' external integrations, and cross-cutting concerns.
+' Label each component with the target class/module name from Module Structure Mapping.
+@enduml
+```
+
+### 2. Migration Sequence Diagram — MVP migration flow with parallel paths
+```plantuml
+@startuml migration-sequence
+' Show the order in which MVPs are migrated.
+' Use 'par' / 'end' blocks for MVPs that can be migrated in PARALLEL (no dependency between them).
+' Use 'group' for sequential phases within each MVP.
+' Mark external integration points with boundary actors.
+' Do NOT produce a flat numbered list — show actual parallelism and dependencies.
+@enduml
+```
+
+CRITICAL: The sequence diagram MUST use PlantUML parallel (`par`/`end`) and grouping
+constructs to reflect the actual MVP dependency graph. Independent MVPs run in parallel;
+dependent MVPs show sequential ordering. A flat list of numbered steps is NOT acceptable.
 
 ## Risk Register
 | Risk | Source Pattern | Impact | Mitigation |
@@ -1089,6 +1135,7 @@ def phase_5_transform(
     framework_docs: str = "",
     analysis_output: str = "",
     mvp_description: str = "",
+    prior_mvp_manifest: str = "",
 ) -> str:
     """Build prompt for Code Transform with register traceability.
 
@@ -1097,6 +1144,7 @@ def phase_5_transform(
         framework_docs: Phase-filtered framework docs from DocEnricher.
         analysis_output: On-demand MVP analysis output (V2 pipeline).
         mvp_description: Functional description from agentic MVP refinement.
+        prior_mvp_manifest: File paths already generated by prior MVP transforms.
     """
     stack_str = ", ".join(target_stack.get("frameworks", []))
     langs_str = ", ".join(target_stack.get("languages", []))
@@ -1141,6 +1189,21 @@ to ensure complete coverage in the generated code.
 {mvp_description}
 """
 
+    # Fix 1: Cross-MVP file manifest — prevents duplicate file creation
+    manifest_section = ""
+    if prior_mvp_manifest:
+        manifest_section = f"""
+### Files Already Generated by Prior MVPs
+These files ALREADY EXIST in the target codebase. Do NOT recreate them — import from them:
+
+{prior_mvp_manifest}
+
+CRITICAL RULES:
+- If a client, service, or utility you need is listed above → import it using the exact path shown.
+- Do NOT generate a new file with the same or similar name as any file listed above.
+- Match the naming convention of existing files (e.g. if prior files use *.util.ts, use *.util.ts).
+"""
+
     return f"""{MIGRATION_ROLE}
 
 ## Task: Code Migration (Per-MVP)
@@ -1162,6 +1225,7 @@ to ensure complete coverage in the generated code.
 ### Source Code
 {codebase_context}
 {analysis_section}
+{manifest_section}
 {framework_docs_section}
 ### File Type Conversion Rules
 CRITICAL — only convert files whose type is appropriate:
@@ -1182,12 +1246,59 @@ CRITICAL — only convert files whose type is appropriate:
 5. For EVERY item in the Phase 4 Design Traceability Matrix, generate corresponding code.
    Include a traceability comment in generated code: // Implements BR-1, DE-1, etc.
 6. Respect the File Type Conversion Rules above — SQL stays SQL, configs stay configs.
+7. **File naming conventions** — use this canonical structure:
+   - API clients: `src/clients/*.client.ts`
+   - Business services: `src/services/*.service.ts`
+   - Utilities/helpers: `src/utils/*.util.ts`
+   - Express controllers: `src/api/controllers/*.controller.ts`
+   - DI container: `src/container.ts` (ONE file total — never create a second one)
+   - App entry point: `src/index.ts` (ONE entry point only — do not also create src/app.ts or src/server.ts)
+   - Shared types: `src/types/*.types.ts`
+8. **No duplicate infrastructure** — if container.ts, src/index.ts, or package.json already
+   appear in the "Files Already Generated by Prior MVPs" list above, do NOT regenerate them.
+
+### Quality Requirements (MANDATORY)
+
+1. **NO STUBS OR PLACEHOLDERS**: Every method MUST contain actual migrated business logic.
+   Do NOT generate methods returning null/None, throwing NotImplementedError, or containing
+   only TODO comments. If a source method has 50 lines of logic, the migrated version must
+   have equivalent logic — not a 1-line stub.
+
+2. **MIGRATION-TODO MARKER**: For genuinely unmigrateable code only — use
+   `// MIGRATION-TODO: [specific reason]` inside an otherwise complete method body that
+   contains your best-effort migration. Never leave a method empty.
+
+3. **SINGLE ENTRY POINT**: Exactly ONE bootstrap/entry point per MVP. Do NOT generate
+   app.listen(), main(), or server startup unless this MVP owns the application entry point.
+
+4. **DEPENDENCY MANIFEST**: Include a package.json (JS/TS), pom.xml (Java), build.gradle
+   (Kotlin), .csproj (C#), or requirements.txt (Python) that declares ALL third-party
+   packages referenced in your generated code. Every import must have a corresponding
+   dependency declaration.
+
+5. **DI CONTAINER COMPLETENESS**: If the target framework uses dependency injection,
+   register ALL injectable classes with class-based tokens, not string literals.
+   Example: `container.bind(UserService).toSelf()` not `container.bind("UserService")`.
+
+6. **CORRECT IMPORTS**: Every import statement must reference an actual file path that
+   exists in your generated output or a package in the dependency manifest. No imports
+   to files you did not generate.
 
 ### Output Format
 
 Return a JSON array of migrated files:
 ```json
 [
+  {{
+    "file_path": "package.json",
+    "language": "json",
+    "content": "{{ \\"name\\": \\"mvp-name\\", \\"dependencies\\": {{...}} }}"
+  }},
+  {{
+    "file_path": "src/container.ts",
+    "language": "typescript",
+    "content": "// DI container with class-based bindings..."
+  }},
   {{
     "file_path": "src/target/path/Module.java",
     "language": "java",
@@ -1209,6 +1320,288 @@ List any unimplemented register items with reason.
 
 IMPORTANT: Return ONLY the JSON array, no markdown wrapping. The traceability
 table should be embedded as a comment in the first file's content.
+"""
+
+
+# ── Integration Analysis (MVP 99) ──────────────────────────────────
+
+
+def integration_analysis_prompt(
+    architecture_output: str,
+    target_stack: dict,
+    merged_register: str,
+    cross_mvp_dependencies: str,
+    mvp_summary_table: str,
+) -> str:
+    """Build the prompt for MVP 99 integration analysis.
+
+    Unlike regular MVP analysis which examines source code, this prompt
+    receives pre-aggregated functional requirements from ALL other MVPs
+    and asks the LLM to produce an integration-focused analysis.
+    """
+    stack_str = ", ".join(f"{k}: {v}" for k, v in target_stack.items()) if target_stack else "not specified"
+
+    return f"""\
+You are a senior software architect performing integration analysis for a
+migration project. All functional MVPs have been individually analysed.
+Your job is to produce the **Integration & Consolidation analysis** — the
+blueprint that ties every MVP together into a working application.
+
+## Target Stack
+{stack_str}
+
+## Architecture Overview
+{architecture_output[:6000] if architecture_output else "(no architecture output available)"}
+
+## MVP Summary
+{mvp_summary_table}
+
+## Aggregated Functional Requirements (from all MVPs)
+{merged_register}
+
+## Cross-MVP Dependencies (pre-computed)
+{cross_mvp_dependencies}
+
+---
+
+## Your Task
+
+Produce a **complete integration analysis** in markdown with these sections:
+
+### 1. Integration Summary
+One paragraph describing the overall integration challenge and strategy.
+
+### 2. Unified Functional Requirements Register
+
+Generate NEW integration-specific requirements (use prefix `IBR-`, `IDE-`,
+`IINT-`, `IVAL-` to distinguish from per-MVP items):
+
+#### Integration Business Rules
+| ID | Rule | Consuming MVPs | Behavior | Criticality |
+|----|------|---------------|----------|-------------|
+(e.g., IBR-1: Unified application bootstrap, IBR-2: Shared error handling middleware)
+
+#### Integration Data Entities
+| ID | Entity | Shared By MVPs | Key Fields | Constraints |
+|----|--------|---------------|-----------|-------------|
+(e.g., IDE-1: Shared configuration schema)
+
+#### Integration External Integrations
+| ID | Integration | Shared By MVPs | Protocol | Notes |
+|----|------------|---------------|----------|-------|
+(e.g., IINT-1: Consolidated API client for Twitter — used by 3 MVPs)
+
+#### Integration Validation Rules
+| ID | Validator | Applied To | Rule | Error Behavior |
+|----|-----------|-----------|------|---------------|
+
+### 3. Cross-MVP Dependency Matrix
+| MVP (depends on) | Depends On MVP | Shared Entity/Integration | Direction |
+|-------------------|---------------|--------------------------|-----------|
+
+### 4. Integration Touchpoints
+For each cross-MVP boundary, describe:
+- Which MVPs are involved
+- What needs to be shared (types, interfaces, services, config)
+- Recommended pattern (shared module, re-export, DI registration, event)
+
+### 5. Integration Artifacts Required
+List the specific files MVP 99 must generate:
+- Unified entry point / bootstrap
+- Consolidated DI container
+- Merged package manifest (package.json / pom.xml / .csproj)
+- Shared type definitions
+- Bridge modules for cross-MVP imports
+- Shared middleware / error handling
+
+### 6. Integration Risk Assessment
+| Risk | Severity | Affected MVPs | Mitigation |
+|------|----------|--------------|------------|
+
+### 7. Migration Steps
+Ordered list of integration tasks, each referencing specific MVPs and artifacts.
+
+## Rules
+- Reference actual MVP names, not placeholders like "MVP X".
+- Every integration requirement must trace back to specific per-MVP requirements.
+- Be specific about file paths and class names where possible.
+- If two MVPs have overlapping integrations (e.g., both use Twitter API), call it out explicitly.
+"""
+
+
+# ── Integration Review (MVP 99) ────────────────────────────────────
+
+def integration_review_prompt(
+    architecture_output: str,
+    cross_ref_matrix: dict,
+    requirements_coverage: dict,
+    target_stack: dict,
+    mvp_file_listing: str,
+) -> str:
+    """Build prompt for MVP 99 Integration Transform.
+
+    The LLM receives pre-computed gap analysis and resolves specific issues.
+    It does NOT need to discover gaps — only generate code to fix them.
+    """
+    import json as _json
+
+    # ── Format pre-computed gaps as a numbered punch list ──
+    unresolved = cross_ref_matrix.get("unresolved_imports", [])
+    duplicates = cross_ref_matrix.get("duplicate_exports", [])
+    entry_count = cross_ref_matrix.get("entry_point_count", 0)
+    missing_manifest = cross_ref_matrix.get("missing_manifest", False)
+    partial_di = cross_ref_matrix.get("partial_di", [])
+    uncovered_reqs = requirements_coverage.get("uncovered_requirements", [])
+
+    # Unresolved imports section
+    unresolved_section = ""
+    if unresolved:
+        items = []
+        for i, u in enumerate(unresolved[:30], 1):  # Cap at 30 items
+            items.append(
+                f"  {i}. {u['consumer_mvp']} imports `{u['import_ref']}` "
+                f"— no MVP exports it."
+            )
+        unresolved_section = (
+            f"### Unresolved Imports ({len(unresolved)})\n"
+            "For each: generate a bridge module, re-export, or shared interface.\n\n"
+            + "\n".join(items)
+        )
+
+    # Duplicate exports section
+    duplicates_section = ""
+    if duplicates:
+        items = []
+        for i, d in enumerate(duplicates[:15], 1):
+            items.append(
+                f"  {i}. `{d['symbol']}` exported by: {', '.join(d['mvps'])}"
+            )
+        duplicates_section = (
+            f"### Duplicate Exports ({len(duplicates)})\n"
+            "For each: consolidate into one canonical location or namespace.\n\n"
+            + "\n".join(items)
+        )
+
+    # Missing infrastructure section
+    infra_items = []
+    if entry_count != 1:
+        infra_items.append(
+            f"- **Entry Points**: {entry_count} found (need exactly 1). "
+            f"Generate a unified bootstrap that imports all MVP modules."
+        )
+    if missing_manifest:
+        infra_items.append(
+            "- **Package Manifest**: MISSING. Generate a consolidated "
+            "package.json / pom.xml / .csproj with ALL dependencies from all MVPs."
+        )
+    if partial_di:
+        infra_items.append(
+            f"- **DI Container**: {len(partial_di)} injectable classes not registered. "
+            f"Generate a complete DI container. Unregistered: {', '.join(partial_di[:20])}"
+        )
+    infra_section = ""
+    if infra_items:
+        infra_section = (
+            "### Missing Infrastructure\n\n" + "\n".join(infra_items)
+        )
+
+    # Uncovered requirements section
+    uncovered_section = ""
+    if uncovered_reqs:
+        items = []
+        for i, r in enumerate(uncovered_reqs[:20], 1):
+            items.append(f"  {i}. `{r['text']}` (from {r['source_mvp']})")
+        uncovered_section = (
+            f"### Uncovered Requirements ({len(uncovered_reqs)})\n"
+            "These services/components appear in functional requirements but "
+            "no MVP generated them. For each: generate an interface with a "
+            "MIGRATION-TODO body, or a full implementation if the purpose is clear.\n\n"
+            + "\n".join(items)
+        )
+
+    # All external packages section (Fix 4)
+    all_packages = cross_ref_matrix.get("all_external_packages", [])
+    packages_section = ""
+    if all_packages:
+        pkg_list = "\n".join(f"  - {p}" for p in all_packages[:60])
+        packages_section = (
+            f"### All External Packages Detected ({len(all_packages)})\n"
+            "Every package below MUST appear in the generated package.json dependencies:\n\n"
+            + pkg_list + "\n"
+        )
+
+    mandatory_section = """\
+### MANDATORY OUTPUT FILES
+You MUST generate ALL THREE of these files:
+1. `src/container.ts` — Complete DI container with EVERY injectable class bound via
+   `container.registerSingleton(ClassName, ClassName)`. Import each class at the top.
+   Include ALL classes listed in the "DI Container" gap item above.
+2. `package.json` — Include ALL packages from "All External Packages" above in dependencies.
+   Use a real version (e.g. "^1.0.0") or "*" if unknown. Include scripts: build, start, dev.
+3. `src/index.ts` — Single unified entry point. Import and mount ALL MVP route modules.
+   Call app.listen(). This is the ONLY entry point — do not also output src/app.ts or src/server.ts.
+"""
+
+    target_stack_str = _json.dumps(target_stack, indent=2) if target_stack else "{}"
+
+    return f"""{MIGRATION_ROLE}
+
+## Task: Integration & Consolidation (MVP 99)
+
+All functional MVPs have been transformed independently. Your job is to produce
+integration files that consolidate them into a single working application.
+
+You are given a **pre-computed gap analysis** below. You MUST address EVERY item
+in the gap list. Do NOT skip any item.
+
+### Architecture Blueprint (Approved)
+{architecture_output[:6000] if architecture_output else "No architecture output available."}
+
+### Target Stack
+```json
+{target_stack_str}
+```
+
+### Generated Files — Per-MVP Listing
+{mvp_file_listing[:5000] if mvp_file_listing else "No file listing available."}
+
+---
+
+## Pre-Computed Integration Gaps (address EACH item)
+
+{unresolved_section}
+
+{duplicates_section}
+
+{infra_section}
+
+{packages_section}
+
+{mandatory_section}
+
+{uncovered_section}
+
+---
+
+### Quality Requirements
+- Every generated file must contain real code, not stubs.
+- Use class-based DI tokens, not string literals.
+- Every import must reference an actual file from the MVP listings above
+  or a package in the consolidated manifest.
+- Generate ONLY integration/consolidation files. Do NOT regenerate files
+  that already exist in the MVPs.
+
+### Output Format
+Return a JSON array of integration files:
+```json
+[
+  {{"file_path": "src/main.ts", "language": "typescript", "content": "// Unified bootstrap..."}},
+  {{"file_path": "package.json", "language": "json", "content": "..."}},
+  {{"file_path": "src/container.ts", "language": "typescript", "content": "// Full DI container..."}}
+]
+```
+
+IMPORTANT: Return ONLY the JSON array, no markdown wrapping.
 """
 
 

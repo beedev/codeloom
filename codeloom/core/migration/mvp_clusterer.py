@@ -53,6 +53,7 @@ class MvpClusterer:
         project_id: str,
         params: Optional[Dict[str, Any]] = None,
         asset_strategies: Optional[Dict[str, Dict]] = None,
+        ground_truth: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Run the full clustering pipeline.
 
@@ -63,6 +64,10 @@ class MvpClusterer:
         (version_upgrade, framework_migration, rewrite) are clustered. Passive
         languages (keep_as_is, convert) get synthetic MVPs. Languages marked
         no_change are excluded entirely.
+
+        Args:
+            ground_truth: Optional CodebaseGroundTruth instance for post-clustering
+                validation (language homogeneity, self-ref elimination, orphan rescue).
 
         Returns:
             Dict with 'mvps', 'shared_concerns', and 'sp_analysis'.
@@ -159,6 +164,31 @@ class MvpClusterer:
         # Compute inter-MVP dependencies and reorder via topological sort
         self._compute_mvp_dependencies(clusters, edges)
         clusters = self._topological_sort_with_readiness(clusters)
+
+        # Ground truth validation: fix structural issues before finalizing.
+        # Imported lazily to avoid circular dependency at module level.
+        if ground_truth is not None:
+            # Fix self-referencing dependencies (belt-and-suspenders with topo sort fix)
+            ground_truth.fix_self_references(clusters)
+            # Split mixed-language clusters into per-language sub-clusters
+            clusters = ground_truth.split_mixed_language_clusters(clusters)
+            # Recompute metrics for any newly-split clusters
+            for c in clusters:
+                if not c.get("metrics"):
+                    self._compute_metrics(c, edge_lookup)
+            # Rescue sub-minimum clusters (merge into neighbor or flag for review)
+            clusters = ground_truth.rescue_orphan_clusters(clusters)
+            # Recompute metrics for merged clusters
+            for c in clusters:
+                self._compute_metrics(c, edge_lookup)
+            # Validate and log remaining issues
+            issues = ground_truth.validate_clusters(clusters)
+            if issues:
+                logger.warning(
+                    "Post-validation: %d cluster issues remain (non-blocking): %s",
+                    len(issues),
+                    "; ".join(i.message for i in issues[:5]),
+                )
 
         # Name the clusters
         for i, cluster in enumerate(clusters):
@@ -1098,12 +1128,15 @@ class MvpClusterer:
                     old_to_new[old_idx] = new_idx
                     break
 
-        # Assign final priorities and convert depends_on indices
+        # Assign final priorities and convert depends_on indices.
+        # Exclude self-references: old_to_new[d] != i guards against a cluster
+        # depending on itself after reindexing (e.g. due to cycle reordering).
         for i, cluster in enumerate(result):
             cluster["priority"] = i + 1  # Reserve 0 for Foundation
             old_deps = cluster.pop("_depends_on_indices", set())
             cluster["depends_on"] = sorted(
-                old_to_new[d] for d in old_deps if d in old_to_new
+                old_to_new[d] for d in old_deps
+                if d in old_to_new and old_to_new[d] != i
             )
 
         return result

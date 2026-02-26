@@ -250,6 +250,7 @@ export interface MvpMetrics {
   coupling: number;
   size: number;
   readiness: number;
+  integration_mvp?: boolean;
 }
 
 export interface MigrationPhaseInfo {

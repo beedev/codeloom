@@ -28,11 +28,13 @@ from ..db import DatabaseManager
 from ..db.models import CodeFile, CodeUnit, FunctionalMVP, MigrationPlan, MigrationPhase, Project
 from .context_builder import MigrationContextBuilder
 from .doc_enricher import DocEnricher
+from .ground_truth import CodebaseGroundTruth
 from .lanes.base import aggregate_confidence, confidence_tier
 from .mvp_clusterer import MvpClusterer, _MAX_CLUSTER_SIZE
 from .phases import (
     execute_phase, execute_phase_agentic,
-    execute_mvp_analysis, get_phase_type, _describe_mvp, _evaluate_mvp_coherence,
+    execute_mvp_analysis, execute_integration_analysis,
+    get_phase_type, _describe_mvp, _evaluate_mvp_coherence,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,17 @@ class MigrationEngine:
         self._pipeline = pipeline
         self._clusterer = MvpClusterer(db_manager)
         self._batch_runs: Dict[str, Dict] = {}  # batch_id -> batch state
+        self._ground_truth_cache: Dict[str, Optional[CodebaseGroundTruth]] = {}
+
+    def _get_ground_truth(self, project_id: str) -> Optional[CodebaseGroundTruth]:
+        """Get or create CodebaseGroundTruth for a project (cached per engine instance)."""
+        if project_id not in self._ground_truth_cache:
+            try:
+                self._ground_truth_cache[project_id] = CodebaseGroundTruth(self._db, project_id)
+            except Exception as e:
+                logger.warning("Failed to extract ground truth for project %s: %s", project_id, e)
+                self._ground_truth_cache[project_id] = None
+        return self._ground_truth_cache[project_id]
 
     # ── Plan Lifecycle ─────────────────────────────────────────────────
 
@@ -673,6 +686,74 @@ class MigrationEngine:
                 session.add(foundation)
                 logger.info("Foundation MVP created for plan %s", plan_id)
 
+    def _create_integration_mvp(self, plan_id: str) -> Optional[int]:
+        """Create MVP 99 — Integration & Consolidation.
+
+        Called after all functional MVPs are persisted during discovery.
+        MVP 99 has no source files — its transform phase receives all other
+        MVPs' transform outputs and produces integration artifacts (unified
+        entry point, consolidated DI container, package manifest, bridge code).
+
+        Returns:
+            mvp_id of the integration MVP, or None if creation was skipped.
+        """
+        from sqlalchemy import func as sa_func
+
+        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+
+        with self._db.get_session() as session:
+            # Idempotent: check if integration MVP already exists
+            existing = session.query(FunctionalMVP).filter(
+                FunctionalMVP.plan_id == pid,
+                FunctionalMVP.name.ilike("MVP 99%Integration%"),
+            ).first()
+            if existing:
+                logger.info(
+                    "Integration MVP already exists (mvp_id=%d) for plan %s",
+                    existing.mvp_id, plan_id,
+                )
+                return existing.mvp_id
+
+            # Priority: max(existing) + 100 so it runs LAST in any batch
+            max_priority = session.query(
+                sa_func.max(FunctionalMVP.priority)
+            ).filter(
+                FunctionalMVP.plan_id == pid
+            ).scalar() or 0
+
+            integration_mvp = FunctionalMVP(
+                plan_id=pid,
+                name="MVP 99 \u2014 Integration & Consolidation",
+                description=(
+                    "Cross-MVP integration artifacts: unified application entry "
+                    "point, consolidated dependency injection container, merged "
+                    "package manifest, bridge code for cross-MVP references, "
+                    "and gap report."
+                ),
+                status="discovered",
+                priority=max_priority + 100,
+                file_ids=[],
+                unit_ids=[],
+                sp_references=[],
+                metrics={
+                    "integration_mvp": True,
+                    "size": 0,
+                    "cohesion": 1.0,
+                    "coupling": 0.0,
+                    "readiness": 1.0,
+                    "complexity": "low",
+                },
+                current_phase=0,
+            )
+            session.add(integration_mvp)
+            session.flush()
+
+            logger.info(
+                "Integration MVP 99 created (mvp_id=%d, priority=%d) for plan %s",
+                integration_mvp.mvp_id, integration_mvp.priority, plan_id,
+            )
+            return integration_mvp.mvp_id
+
     @staticmethod
     def _derive_target_stack_from_strategies(
         strategies: Dict, migration_type: str,
@@ -828,6 +909,59 @@ class MigrationEngine:
         """
         pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
 
+        # ── Discovery lock: if discovery phase is approved, return existing MVPs ──
+        with self._db.get_session() as lock_session:
+            lock_plan = lock_session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not lock_plan:
+                raise ValueError(f"Migration plan {plan_id} not found")
+
+            lock_version = lock_plan.pipeline_version or 1
+            discovery_phase_number = 2 if lock_version == 2 else 1
+            existing_phase = self._get_phase(
+                lock_session, pid, discovery_phase_number, None
+            )
+
+            if existing_phase and existing_phase.approved:
+                existing_mvps = lock_session.query(FunctionalMVP).filter(
+                    FunctionalMVP.plan_id == pid
+                ).order_by(
+                    FunctionalMVP.priority, FunctionalMVP.mvp_id
+                ).all()
+
+                mvp_rows = [
+                    {
+                        "mvp_id": m.mvp_id,
+                        "name": m.name,
+                        "priority": m.priority,
+                        "metrics": m.metrics or {},
+                        "unit_count": len(m.unit_ids or []),
+                        "sp_count": len(m.sp_references or []),
+                    }
+                    for m in existing_mvps
+                ]
+                logger.info(
+                    "Discovery locked (phase %d approved) for plan %s: "
+                    "returning %d existing MVPs",
+                    discovery_phase_number, plan_id, len(mvp_rows),
+                )
+                return {
+                    "phase_output": {
+                        "status": "locked",
+                        "message": "Discovery approved and locked. "
+                                   "To re-run discovery, reject the discovery phase first.",
+                    },
+                    "mvps": mvp_rows,
+                    "sp_analysis": (lock_plan.discovery_metadata or {}).get(
+                        "sp_analysis", {}
+                    ),
+                    "shared_concerns": (lock_plan.discovery_metadata or {}).get(
+                        "shared_concerns", []
+                    ),
+                    "auto_analysis": {},
+                }
+
         with self._db.get_session() as session:
             plan = session.query(MigrationPlan).filter(
                 MigrationPlan.plan_id == pid
@@ -839,9 +973,13 @@ class MigrationEngine:
             version = plan.pipeline_version or 1
             asset_strategies = plan.asset_strategies  # None = include everything (backward compat)
 
+        # Ground truth — verified codebase facts for clustering validation & output grounding
+        ground_truth = self._get_ground_truth(project_id)
+
         # Step 1: Run the clustering algorithm
         cluster_result = self._clusterer.cluster(
-            project_id, clustering_params, asset_strategies=asset_strategies
+            project_id, clustering_params, asset_strategies=asset_strategies,
+            ground_truth=ground_truth,
         )
 
         # Step 1.5: Agentic MVP refinement — describe, evaluate, merge/split
@@ -859,6 +997,25 @@ class MigrationEngine:
 
         # Step 1.75: Deduplicate MVPs (merge same-name, remove mega-clusters)
         cluster_result["mvps"] = self._deduplicate_mvps(cluster_result["mvps"])
+
+        # Step 1.9: Persistence-boundary validation — runs AFTER all post-processing
+        # (agentic refinement, deduplication) so nothing can bypass it.
+        if ground_truth is not None:
+            mvps = cluster_result["mvps"]
+            ground_truth.fix_self_references(mvps)
+            mvps = ground_truth.split_mixed_language_clusters(mvps)
+            ground_truth.reconcile_file_ids(mvps)  # Recalculate all file_ids + enforce exclusive ownership
+            mvps = ground_truth.rescue_orphan_clusters(mvps)
+            # Re-assign priorities after any splits/merges
+            for idx, c in enumerate(mvps):
+                c["priority"] = idx
+            issues = ground_truth.validate_clusters(mvps)
+            if issues:
+                logger.warning(
+                    "Pre-persist validation: %d issues remain: %s",
+                    len(issues), "; ".join(i.message for i in issues[:5]),
+                )
+            cluster_result["mvps"] = mvps
 
         # Step 2: Persist MVP candidates
         mvp_rows = []
@@ -889,14 +1046,14 @@ class MigrationEngine:
                     "sp_count": len(mvp.sp_references) if mvp.sp_references is not None else 0,
                 })
 
-            # Populate depends_on_mvp_ids using the cluster dependency info
+            # Populate depends_on_mvp_ids — with self-reference filter at persistence boundary
             for i, mvp_data in enumerate(cluster_result["mvps"]):
                 dep_indices = mvp_data.get("depends_on", [])
                 if dep_indices:
                     dep_mvp_ids = [
                         index_to_mvp_id[idx]
                         for idx in dep_indices
-                        if idx in index_to_mvp_id
+                        if idx in index_to_mvp_id and idx != i  # exclude self
                     ]
                     if dep_mvp_ids:
                         mvp = session.query(FunctionalMVP).filter(
@@ -915,6 +1072,21 @@ class MigrationEngine:
                 "shared_concerns": cluster_result.get("shared_concerns", []),
                 "sp_analysis": cluster_result.get("sp_analysis", {}),
             }
+
+        # Step 2.5: Create Integration MVP 99 (runs LAST in every batch)
+        try:
+            integration_mvp_id = self._create_integration_mvp(plan_id)
+            if integration_mvp_id:
+                mvp_rows.append({
+                    "mvp_id": integration_mvp_id,
+                    "name": "MVP 99 \u2014 Integration & Consolidation",
+                    "priority": max(r.get("priority", 0) for r in mvp_rows) + 100 if mvp_rows else 100,
+                    "metrics": {"integration_mvp": True, "size": 0},
+                    "unit_count": 0,
+                    "sp_count": 0,
+                })
+        except Exception:
+            logger.warning("Integration MVP creation failed (non-fatal)", exc_info=True)
 
         # Step 3: Execute the LLM Discovery phase
         # V1: Discovery is Phase 1. V2: Discovery is Phase 2.
@@ -964,8 +1136,21 @@ class MigrationEngine:
                     mvp.analysis_status = "analyzing"
                     mvp.analysis_error = None
 
+        # Defer integration MVP — must run AFTER all others so it can read
+        # their completed analysis_output.
+        deferred_integration = None
+
         for i, mvp_row in enumerate(mvp_rows):
             mvp_id = mvp_row["mvp_id"]
+
+            if (mvp_row.get("metrics") or {}).get("integration_mvp"):
+                logger.info(
+                    "Deferring integration MVP %s (%s) to end of analysis batch",
+                    mvp_id, mvp_row.get("name", "?"),
+                )
+                deferred_integration = mvp_row
+                continue
+
             logger.info(
                 "Auto-analyzing MVP %d/%d: %s (id=%s)",
                 i + 1, total, mvp_row.get("name", "?"), mvp_id,
@@ -985,6 +1170,29 @@ class MigrationEngine:
                     if mvp and mvp.analysis_status != "failed":
                         mvp.analysis_status = "failed"
                         mvp.analysis_error = str(exc)
+
+        # Run integration MVP analysis LAST — it reads all other MVPs' outputs
+        if deferred_integration:
+            integ_id = deferred_integration["mvp_id"]
+            logger.info(
+                "Running deferred integration analysis for MVP %s (%s)",
+                integ_id, deferred_integration.get("name", "?"),
+            )
+            try:
+                result = self.analyze_integration_mvp(str(plan_id), integ_id)
+                results[integ_id] = {"status": "completed", "analysis_at": result["analysis_at"]}
+            except Exception as exc:
+                logger.warning("Integration analysis failed for MVP %s: %s", integ_id, exc)
+                results[integ_id] = {"status": "failed", "error": str(exc)}
+                with self._db.get_session() as session:
+                    mvp = session.query(FunctionalMVP).filter(
+                        FunctionalMVP.mvp_id == integ_id,
+                        FunctionalMVP.plan_id == pid,
+                    ).first()
+                    if mvp and mvp.analysis_status != "failed":
+                        mvp.analysis_status = "failed"
+                        mvp.analysis_error = str(exc)
+
         return results
 
     # ── Agentic MVP Refinement ──────────────────────────────────────────
@@ -1205,13 +1413,13 @@ class MigrationEngine:
         result.extend(new_clusters)
         return result
 
-    @staticmethod
-    def _deduplicate_mvps(mvps: List[Dict]) -> List[Dict]:
-        """Merge same-name MVPs, remove mega-clusters, deduplicate unit_ids.
+    def _deduplicate_mvps(self, mvps: List[Dict]) -> List[Dict]:
+        """Merge same-name MVPs, split mega-clusters, deduplicate unit_ids.
 
         Fixes three issues:
         1. Duplicate names: merge unit_ids/file_ids into the first occurrence
-        2. Mega-clusters: skip any MVP containing >60% of the total unique units
+        2. Mega-clusters: split any MVP containing >60% of total units into
+           directory-grouped sub-clusters (instead of dropping them)
         3. Unit overlap: ensure each unit appears in exactly one MVP
         """
         if not mvps:
@@ -1224,15 +1432,17 @@ class MigrationEngine:
         total_units = len(all_units)
         mega_threshold = max(total_units * 0.6, _MAX_CLUSTER_SIZE * 2)
 
-        # Pass 1: Merge MVPs with identical names
+        # Pass 1: Merge MVPs with identical names — track old→new index mapping
         seen_names: Dict[str, int] = {}
         merged: List[Dict] = []
+        old_to_merged: Dict[int, int] = {}  # original index → merged index
 
-        for m in mvps:
+        for orig_idx, m in enumerate(mvps):
             name = m.get("name", "Unknown")
             if name in seen_names:
                 # Merge into existing
-                target = merged[seen_names[name]]
+                target_idx = seen_names[name]
+                target = merged[target_idx]
                 target["unit_ids"] = list(
                     set(target.get("unit_ids", [])) | set(m.get("unit_ids", []))
                 )
@@ -1242,28 +1452,54 @@ class MigrationEngine:
                 # Keep the longer description
                 if len(m.get("description") or "") > len(target.get("description") or ""):
                     target["description"] = m["description"]
+                old_to_merged[orig_idx] = target_idx
                 logger.info("Dedup: merged duplicate MVP '%s'", name)
             else:
-                seen_names[name] = len(merged)
+                new_idx = len(merged)
+                seen_names[name] = new_idx
+                old_to_merged[orig_idx] = new_idx
                 merged.append(m)
 
-        # Pass 2: Remove mega-clusters (>60% of all units)
-        result = []
-        mega_units: Set[str] = set()
+        # Remap depends_on after merge (old indices → merged indices)
         for m in merged:
+            old_deps = m.get("depends_on", [])
+            if old_deps:
+                m["depends_on"] = sorted(set(
+                    old_to_merged[d] for d in old_deps
+                    if d in old_to_merged
+                ))
+
+        # Pass 2: Split mega-clusters into directory-grouped sub-clusters
+        pre_mega: List[Dict] = []
+        merged_to_result: Dict[int, int] = {}  # merged index → result index
+
+        for merged_idx, m in enumerate(merged):
             unit_count = len(m.get("unit_ids", []))
             if unit_count > mega_threshold:
                 logger.info(
-                    "Dedup: dropping mega-cluster '%s' (%d units, threshold=%d)",
+                    "Dedup: splitting mega-cluster '%s' (%d units, threshold=%d)",
                     m.get("name", "?"), unit_count, int(mega_threshold),
                 )
-                mega_units.update(m.get("unit_ids", []))
+                sub_clusters = self._split_mega_cluster(m, max_size=_MAX_CLUSTER_SIZE)
+                for sc in sub_clusters:
+                    merged_to_result[merged_idx] = len(pre_mega)
+                    pre_mega.append(sc)
             else:
-                result.append(m)
+                merged_to_result[merged_idx] = len(pre_mega)
+                pre_mega.append(m)
+
+        # Remap depends_on after mega-cluster removal
+        for m in pre_mega:
+            old_deps = m.get("depends_on", [])
+            if old_deps:
+                m["depends_on"] = sorted(set(
+                    merged_to_result[d] for d in old_deps
+                    if d in merged_to_result
+                ))
 
         # Pass 3: Ensure each unit appears in only one MVP (first-writer wins)
         claimed: Set[str] = set()
-        for m in result:
+        for m in pre_mega:
             original = m.get("unit_ids", [])
             unique = [uid for uid in original if uid not in claimed]
             claimed.update(unique)
@@ -1272,8 +1508,22 @@ class MigrationEngine:
             if len(unique) != len(original):
                 m["file_ids"] = list({fid for fid in m.get("file_ids", [])})
 
-        # Remove any MVP that became empty after dedup
-        result = [m for m in result if m.get("unit_ids")]
+        # Remove any MVP that became empty after dedup — track final indices
+        result = []
+        pre_to_final: Dict[int, int] = {}
+        for pre_idx, m in enumerate(pre_mega):
+            if m.get("unit_ids"):
+                pre_to_final[pre_idx] = len(result)
+                result.append(m)
+
+        # Final depends_on remap after empty removal + self-ref exclusion
+        for final_idx, m in enumerate(result):
+            old_deps = m.get("depends_on", [])
+            if old_deps:
+                m["depends_on"] = sorted(set(
+                    pre_to_final[d] for d in old_deps
+                    if d in pre_to_final and pre_to_final[d] != final_idx
+                ))
 
         # Reassign priorities to close gaps left by removed MVPs
         for i, m in enumerate(result):
@@ -1281,11 +1531,94 @@ class MigrationEngine:
 
         if len(result) != len(mvps):
             logger.info(
-                "Dedup: %d MVPs → %d MVPs (removed %d duplicates/mega-clusters)",
-                len(mvps), len(result), len(mvps) - len(result),
+                "Dedup: %d MVPs → %d MVPs (changed by %d after merges/splits)",
+                len(mvps), len(result), len(result) - len(mvps),
             )
 
+        # Coverage check: ensure units weren't lost during dedup
+        final_unit_count = sum(len(m.get("unit_ids", [])) for m in result)
+        if total_units > 0:
+            coverage_pct = final_unit_count / total_units * 100
+            logger.info(
+                "Dedup coverage: %d/%d units (%.1f%%) across %d MVPs",
+                final_unit_count, total_units, coverage_pct, len(result),
+            )
+            if coverage_pct < 80:
+                logger.warning(
+                    "LOW COVERAGE: Only %.1f%% of units assigned to MVPs. "
+                    "Check clustering quality.",
+                    coverage_pct,
+                )
+
         return result
+
+    # ── Mega-Cluster Splitting ────────────────────────────────────────
+
+    def _split_mega_cluster(self, cluster: Dict, max_size: int = 120) -> List[Dict]:
+        """Split an oversized cluster into sub-clusters grouped by directory.
+
+        Groups units by their file's parent directory, then packs groups
+        into sub-clusters up to max_size. Units in the same directory
+        stay together for functional cohesion.
+        """
+        unit_ids = cluster.get("unit_ids", [])
+        if len(unit_ids) <= max_size:
+            return [cluster]
+
+        dir_groups = self._group_units_by_directory(unit_ids)
+
+        sub_clusters = []
+        current_units: List[str] = []
+        idx = 0
+
+        for _dir_path, dir_unit_ids in sorted(dir_groups.items()):
+            if len(current_units) + len(dir_unit_ids) > max_size and current_units:
+                sub_clusters.append(self._make_sub_cluster(cluster, current_units, idx))
+                idx += 1
+                current_units = []
+            current_units.extend(dir_unit_ids)
+
+        if current_units:
+            sub_clusters.append(self._make_sub_cluster(cluster, current_units, idx))
+
+        logger.info(
+            "Split mega-cluster '%s' (%d units) into %d sub-clusters",
+            cluster.get("name", "?"), len(unit_ids), len(sub_clusters),
+        )
+        return sub_clusters
+
+    def _group_units_by_directory(self, unit_ids: List[str]) -> Dict[str, List[str]]:
+        """Group unit IDs by their file's parent directory."""
+        from pathlib import PurePosixPath
+
+        dir_groups: Dict[str, List[str]] = {}
+        uids = [UUID(u) if isinstance(u, str) else u for u in unit_ids]
+        with self._db.get_session() as session:
+            rows = session.execute(text("""
+                SELECT cu.unit_id, cf.file_path
+                FROM code_units cu
+                JOIN code_files cf ON cu.file_id = cf.file_id
+                WHERE cu.unit_id = ANY(:uids)
+            """), {"uids": uids}).fetchall()
+            for row in rows:
+                dir_path = str(PurePosixPath(row.file_path).parent)
+                dir_groups.setdefault(dir_path, []).append(str(row.unit_id))
+        return dir_groups
+
+    @staticmethod
+    def _make_sub_cluster(parent: Dict, unit_ids: List[str], idx: int) -> Dict:
+        """Create a sub-cluster dict from a mega-cluster split."""
+        return {
+            "name": f"{parent.get('name', 'Mega')} (Part {idx + 1})",
+            "description": parent.get("description"),
+            "package": parent.get("package", ""),
+            "unit_ids": unit_ids,
+            "file_ids": [],  # Will be reconciled by ground_truth
+            "metrics": {},
+            "sp_references": [],
+            "depends_on": [],
+            "priority": 0,  # Will be reassigned
+        }
 
     # ── MVP Refinement ─────────────────────────────────────────────────
 
@@ -1455,6 +1788,22 @@ class MigrationEngine:
             source.unit_ids = remaining_units
             source.status = "refined"
             source.diagrams = None  # Invalidate cached diagrams after split
+
+            # Recalculate file_ids for both source and new MVP from their units
+            remaining_file_ids = list({
+                str(u.file_id) for u in session.query(CodeUnit).filter(
+                    CodeUnit.unit_id.in_([UUID(uid) if isinstance(uid, str) else uid for uid in remaining_units])
+                ).all()
+            }) if remaining_units else []
+            source.file_ids = remaining_file_ids
+
+            split_file_ids = list({
+                str(u.file_id) for u in session.query(CodeUnit).filter(
+                    CodeUnit.unit_id.in_([UUID(uid) if isinstance(uid, str) else uid for uid in split_set])
+                ).all()
+            }) if split_set else []
+            new_mvp.file_ids = split_file_ids
+
             session.flush()
 
             result = {
@@ -1550,6 +1899,20 @@ class MigrationEngine:
         logger.info(f"Created {len(created)} per-MVP phases for plan {plan_id}")
         return created
 
+    # ── Model Context Window ──────────────────────────────────────────
+
+    def _get_model_context_window(self) -> int:
+        """Get context window of the configured LLM. Defaults to 200K."""
+        try:
+            llm = getattr(self._pipeline, '_llm', None)
+            if llm and hasattr(llm, 'metadata'):
+                return getattr(llm.metadata, 'context_window', 200_000)
+            if llm and hasattr(llm, 'context_window'):
+                return llm.context_window
+        except Exception:
+            pass
+        return 200_000
+
     # ── Phase Execution ────────────────────────────────────────────────
 
     def execute_phase(
@@ -1637,6 +2000,8 @@ class MigrationEngine:
                 if proj:
                     project_name = proj.name
 
+            project_id = str(plan.source_project_id)
+
             # Plan data for prompt building
             plan_data = {
                 "target_brief": plan.target_brief,
@@ -1648,8 +2013,8 @@ class MigrationEngine:
                 "_project_name": project_name,
                 "asset_strategies": plan.asset_strategies or {},
                 "migration_lane_id": plan.migration_lane_id,
+                "_ground_truth": self._get_ground_truth(project_id),
             }
-            project_id = str(plan.source_project_id)
 
             # MVP context for per-MVP phases
             mvp_data = None
@@ -1662,6 +2027,62 @@ class MigrationEngine:
                     # V2: inject on-demand analysis output into plan_data for Transform
                     if mvp.analysis_output:
                         plan_data["_analysis_output"] = mvp.analysis_output.get("output", "")
+
+                    transform_phase_num = 3 if version == 2 else 5
+
+                    # Integration MVP 99: collect all other MVPs' transform outputs + analysis
+                    if (mvp.metrics or {}).get("integration_mvp"):
+                        all_mvp_outputs: Dict[str, list] = {}
+                        all_mvp_analysis: Dict[str, Any] = {}
+
+                        other_mvps = session.query(FunctionalMVP).filter(
+                            FunctionalMVP.plan_id == pid,
+                            FunctionalMVP.mvp_id != mvp_id,
+                        ).all()
+
+                        for other in other_mvps:
+                            ph = self._get_phase(
+                                session, pid, transform_phase_num, other.mvp_id,
+                            )
+                            if ph and ph.output_files:
+                                all_mvp_outputs[other.name] = ph.output_files
+                            if other.analysis_output:
+                                all_mvp_analysis[other.name] = other.analysis_output
+
+                        plan_data["_all_mvp_transform_outputs"] = all_mvp_outputs
+                        plan_data["_all_mvp_analysis_outputs"] = all_mvp_analysis
+                        logger.info(
+                            "Integration MVP: collected transform outputs from %d MVPs "
+                            "(%d total files), analysis from %d MVPs",
+                            len(all_mvp_outputs),
+                            sum(len(f) for f in all_mvp_outputs.values()),
+                            len(all_mvp_analysis),
+                        )
+
+                    # Fix 1: Regular MVPs — inject file manifest from already-completed transforms
+                    else:
+                        prior_manifest: Dict[str, list] = {}
+                        other_mvps_for_manifest = session.query(FunctionalMVP).filter(
+                            FunctionalMVP.plan_id == pid,
+                            FunctionalMVP.mvp_id != mvp_id,
+                        ).all()
+                        for other in other_mvps_for_manifest:
+                            ph = self._get_phase(
+                                session, pid, transform_phase_num, other.mvp_id,
+                            )
+                            if ph and ph.output_files:
+                                prior_manifest[other.name] = [
+                                    f["file_path"] for f in ph.output_files
+                                    if isinstance(f, dict) and f.get("file_path")
+                                ]
+                        if prior_manifest:
+                            plan_data["_prior_mvp_file_manifest"] = prior_manifest
+                            logger.info(
+                                "Transform MVP %s: prior manifest has %d files from %d MVPs",
+                                mvp_id,
+                                sum(len(v) for v in prior_manifest.values()),
+                                len(prior_manifest),
+                            )
 
             # Inject MVP functional summaries for Discovery prompt
             all_mvps = session.query(FunctionalMVP).filter(
@@ -1848,6 +2269,17 @@ class MigrationEngine:
                     meta["requires_manual_review"] = True
                 # Clear checkpoint on success
                 meta.pop("checkpoint", None)
+
+                # Store stub quality report if present (Fix 10)
+                stub_quality = result.get("stub_quality")
+                if stub_quality and stub_quality.get("stub_count", 0) > 0:
+                    meta["stub_quality"] = stub_quality
+
+                # Store integration metadata if present (MVP 99)
+                integration_metadata = result.get("integration_metadata")
+                if integration_metadata:
+                    meta["integration_metadata"] = integration_metadata
+
                 phase.phase_metadata = meta
 
                 if mvp_id:
@@ -2633,6 +3065,10 @@ class MigrationEngine:
                 if not mvp:
                     raise ValueError(f"MVP {mvp_id} not found in plan {plan_id}")
 
+                # Integration MVP → dedicated flow (aggregates other MVPs)
+                if (mvp.metrics or {}).get("integration_mvp"):
+                    return self.analyze_integration_mvp(plan_id, mvp_id)
+
                 project_id = str(plan.source_project_id)
 
                 # Get project name for disk output path
@@ -2669,6 +3105,7 @@ class MigrationEngine:
                 previous_outputs=previous_outputs,
                 context_builder=ctx_builder,
                 mvp_context=mvp_data,
+                ground_truth=self._get_ground_truth(project_id),
             )
 
             # Store result on the MVP row — mark completed
@@ -2683,6 +3120,21 @@ class MigrationEngine:
                     mvp.analysis_at = now
                     mvp.analysis_status = "completed"
                     mvp.analysis_error = None
+
+            # Auto-generate key diagrams so they're cached for _write_mvp_documents
+            try:
+                from ..diagrams.service import DiagramService
+                diag_svc = DiagramService(self._db, self._pipeline)
+                for dtype in ("sequence", "activity"):
+                    try:
+                        diag_svc.get_diagram(str(pid), mvp_id, dtype)
+                    except Exception as diag_err:
+                        logger.debug(
+                            "Auto-generation of %s diagram for MVP %d skipped: %s",
+                            dtype, mvp_id, diag_err,
+                        )
+            except Exception as diag_import_err:
+                logger.debug("Diagram auto-generation unavailable: %s", diag_import_err)
 
             # Write MVP feature documents to disk (fire-and-forget)
             try:
@@ -2709,6 +3161,181 @@ class MigrationEngine:
                 logger.warning("Failed to embed analysis output: %s", embed_err)
 
             logger.info(f"Deep analysis complete for MVP {mvp_id} in plan {plan_id}")
+            return {
+                "output": result.get("output", ""),
+                "output_files": result.get("output_files", []),
+                "analysis_at": now.isoformat(),
+            }
+
+        except Exception as e:
+            # Mark as failed
+            with self._db.get_session() as session:
+                mvp_row = session.query(FunctionalMVP).filter(
+                    FunctionalMVP.mvp_id == mvp_id,
+                    FunctionalMVP.plan_id == pid,
+                ).first()
+                if mvp_row:
+                    mvp_row.analysis_status = "failed"
+                    mvp_row.analysis_error = str(e)
+            raise
+
+    def analyze_integration_mvp(self, plan_id: str, mvp_id: int) -> Dict:
+        """Dedicated analysis for Integration MVP (MVP 99).
+
+        Instead of analyzing source code (MVP 99 has none), this:
+        1. Collects all other MVPs' completed analysis_output
+        2. Aggregates functional requirements registers (BR, DE, INT, VAL)
+        3. Detects cross-MVP dependencies (shared entities, overlapping integrations)
+        4. Generates an integration-specific analysis via LLM
+
+        Returns:
+            Dict with 'output' (markdown), 'output_files', and 'analysis_at'.
+        """
+        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+
+        # Mark as analyzing
+        with self._db.get_session() as session:
+            mvp_row = session.query(FunctionalMVP).filter(
+                FunctionalMVP.mvp_id == mvp_id,
+                FunctionalMVP.plan_id == pid,
+            ).first()
+            if mvp_row:
+                mvp_row.analysis_status = "analyzing"
+                mvp_row.analysis_error = None
+
+        try:
+            with self._db.get_session() as session:
+                plan = session.query(MigrationPlan).filter(
+                    MigrationPlan.plan_id == pid
+                ).first()
+                if not plan:
+                    raise ValueError(f"Migration plan {plan_id} not found")
+
+                mvp = session.query(FunctionalMVP).filter(
+                    FunctionalMVP.mvp_id == mvp_id,
+                    FunctionalMVP.plan_id == pid,
+                ).first()
+                if not mvp:
+                    raise ValueError(f"MVP {mvp_id} not found in plan {plan_id}")
+
+                project_id = str(plan.source_project_id)
+
+                src_proj = session.query(Project).filter(
+                    Project.project_id == plan.source_project_id
+                ).first()
+                project_name = src_proj.name if src_proj else None
+
+                # Collect plan-level phase outputs
+                previous_outputs: Dict[int, str] = {}
+                plan_phases = session.query(MigrationPhase).filter(
+                    MigrationPhase.plan_id == pid,
+                    MigrationPhase.mvp_id.is_(None),
+                    MigrationPhase.approved == True,
+                ).order_by(MigrationPhase.phase_number).all()
+                for pp in plan_phases:
+                    previous_outputs[pp.phase_number] = pp.output or ""
+
+                # ── Collect ALL other MVPs' analysis outputs ──
+                other_mvps = session.query(FunctionalMVP).filter(
+                    FunctionalMVP.plan_id == pid,
+                    FunctionalMVP.mvp_id != mvp_id,
+                ).order_by(FunctionalMVP.priority).all()
+
+                all_mvp_analyses: Dict[str, Dict] = {}
+                skipped = 0
+                for other in other_mvps:
+                    if other.analysis_output and other.analysis_status == "completed":
+                        all_mvp_analyses[other.name] = {
+                            "mvp_id": other.mvp_id,
+                            "priority": other.priority,
+                            "unit_count": len(other.unit_ids or []),
+                            "output": other.analysis_output.get("output", ""),
+                        }
+                    else:
+                        skipped += 1
+
+                if skipped:
+                    logger.warning(
+                        "Integration analysis: %d MVPs skipped (not yet analyzed)", skipped,
+                    )
+
+                plan_data = {
+                    "target_brief": plan.target_brief,
+                    "target_stack": plan.target_stack or {},
+                    "constraints": plan.constraints or {},
+                    "migration_type": plan.migration_type or "framework_migration",
+                    "discovery_metadata": plan.discovery_metadata or {},
+                    "_project_name": project_name,
+                }
+                mvp_data = self._mvp_to_dict(mvp)
+
+            # Execute integration analysis (outside the session — LLM call)
+            logger.info(
+                "Running integration analysis for MVP %d with %d MVP analyses",
+                mvp_id, len(all_mvp_analyses),
+            )
+            result = execute_integration_analysis(
+                plan=plan_data,
+                previous_outputs=previous_outputs,
+                mvp_context=mvp_data,
+                all_mvp_analyses=all_mvp_analyses,
+            )
+
+            # Store result on the MVP row
+            now = datetime.utcnow()
+            with self._db.get_session() as session:
+                mvp = session.query(FunctionalMVP).filter(
+                    FunctionalMVP.mvp_id == mvp_id,
+                    FunctionalMVP.plan_id == pid,
+                ).first()
+                if mvp:
+                    mvp.analysis_output = {"output": result.get("output", "")}
+                    mvp.analysis_at = now
+                    mvp.analysis_status = "completed"
+                    mvp.analysis_error = None
+
+            # Auto-generate diagrams (same as analyze_mvp)
+            try:
+                from ..diagrams.service import DiagramService
+                diag_svc = DiagramService(self._db, self._pipeline)
+                for dtype in ("sequence", "activity"):
+                    try:
+                        diag_svc.get_diagram(str(pid), mvp_id, dtype)
+                    except Exception as diag_err:
+                        logger.debug(
+                            "Auto-generation of %s diagram for MVP %d skipped: %s",
+                            dtype, mvp_id, diag_err,
+                        )
+            except Exception:
+                logger.debug("Diagram auto-generation unavailable for integration MVP")
+
+            # Write MVP documents to disk
+            try:
+                self._write_mvp_documents(
+                    plan_id=str(pid),
+                    mvp_id=mvp_id,
+                    project_name=plan_data.get("_project_name"),
+                )
+            except Exception as disk_err:
+                logger.warning("Failed to write integration MVP documents: %s", disk_err)
+
+            # Embed analysis output into vector store
+            try:
+                from .phases import _embed_analysis_output
+                _embed_analysis_output(
+                    analysis_output=result.get("output", ""),
+                    project_id=project_id,
+                    plan_id=str(pid),
+                    mvp_id=mvp_id,
+                    mvp_name=mvp_data.get("name", f"MVP-{mvp_id}"),
+                    pipeline=self._pipeline,
+                )
+            except Exception as embed_err:
+                logger.warning("Failed to embed integration analysis: %s", embed_err)
+
+            logger.info(
+                "Integration analysis complete for MVP %d in plan %s", mvp_id, plan_id,
+            )
             return {
                 "output": result.get("output", ""),
                 "output_files": result.get("output_files", []),

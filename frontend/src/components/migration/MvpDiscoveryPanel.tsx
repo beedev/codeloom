@@ -54,6 +54,7 @@ export function MvpDiscoveryPanel({
   const [showDiagrams, setShowDiagrams] = useState<Record<number, boolean>>({});
   const [isAnalyzingAll, setIsAnalyzingAll] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState<string | null>(null);
+  const [isAnalyzingIntegration, setIsAnalyzingIntegration] = useState(false);
 
   // Cache fetched details so we don't re-fetch on re-expand
   const [detailCache, setDetailCache] = useState<Record<number, MvpDetail>>({});
@@ -170,6 +171,27 @@ export function MvpDiscoveryPanel({
 
   const unanalyzedCount = mvps.filter(m => !m.analysis_output?.output).length;
 
+  // ── Integration MVP (MVP 99) ──
+
+  const integrationMvp = mvps.find(m => m.metrics?.integration_mvp);
+  const otherMvpsAnalyzed = mvps.filter(m => !m.metrics?.integration_mvp && m.analysis_output?.output).length;
+  const otherMvpsTotal = mvps.filter(m => !m.metrics?.integration_mvp).length;
+
+  const handleAnalyzeIntegration = useCallback(async () => {
+    if (!integrationMvp) return;
+    setIsAnalyzingIntegration(true);
+    setError(null);
+    try {
+      await api.analyzeMvp(planId, integrationMvp.mvp_id);
+      setDetailCache({});
+      onMvpsChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to analyze integration MVP');
+    } finally {
+      setIsAnalyzingIntegration(false);
+    }
+  }, [planId, integrationMvp, onMvpsChanged]);
+
   return (
     <div className="flex flex-col gap-4 p-4">
       {/* Header */}
@@ -205,6 +227,21 @@ export function MvpDiscoveryPanel({
             {isAnalyzingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
             {isAnalyzingAll ? (analyzeProgress || 'Analyzing...') : `Deep Analyze${unanalyzedCount > 0 ? ` (${unanalyzedCount})` : ''}`}
           </button>
+          {integrationMvp && (
+            <button
+              onClick={handleAnalyzeIntegration}
+              disabled={isAnalyzingIntegration || otherMvpsAnalyzed < otherMvpsTotal}
+              className="flex items-center gap-1.5 rounded-lg border border-purple-500/50 bg-purple-500/10 px-3 py-1.5 text-xs font-medium text-purple-400 hover:bg-purple-500/20 disabled:opacity-50"
+              title={
+                otherMvpsAnalyzed < otherMvpsTotal
+                  ? `Analyze all other MVPs first (${otherMvpsAnalyzed}/${otherMvpsTotal} done)`
+                  : 'Run integration analysis — aggregates all MVP requirements'
+              }
+            >
+              {isAnalyzingIntegration ? <Loader2 className="h-3 w-3 animate-spin" /> : <LayoutGrid className="h-3 w-3" />}
+              {isAnalyzingIntegration ? 'Integrating...' : 'Analyze Integration'}
+            </button>
+          )}
           <button
             onClick={onCreatePhases}
             disabled={isCreatingPhases || mvps.length === 0}

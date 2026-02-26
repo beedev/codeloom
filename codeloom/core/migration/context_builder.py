@@ -21,8 +21,41 @@ logger = logging.getLogger(__name__)
 
 # Approximate chars-per-token ratio for budget management
 CHARS_PER_TOKEN = 4
-DEFAULT_TOKEN_BUDGET = 12_000
+DEFAULT_TOKEN_BUDGET = 12_000  # Fallback only; compute_phase_budget() is preferred
 ANALYSIS_SOURCE_BUDGET = 6_000  # Token budget for source code in analysis phases
+
+# Phase-specific budget multipliers relative to base.
+# Base = min(model_context_window * 0.25, 50_000).
+_PHASE_BUDGET_MULTIPLIERS = {
+    1: 0.5,   # Discovery — summaries, metrics
+    2: 0.75,  # Architecture — summaries + relationships
+    3: 1.0,   # Analyze — source excerpts + analysis
+    4: 1.0,   # Design — design docs + source refs
+    5: 2.0,   # Transform — FULL source code needed
+    6: 1.5,   # Test — source + generated code refs
+}
+
+
+def compute_phase_budget(phase_number: int, model_context_window: int = 200_000) -> int:
+    """Compute token budget for a phase based on model context window.
+
+    Strategy: Use 25% of context window as base budget for codebase data,
+    then scale per-phase. Caps at 40% of context to leave room for
+    prompt instructions + LLM output.
+
+    Args:
+        phase_number: Migration phase (1-6).
+        model_context_window: Model's total context window in tokens.
+
+    Returns:
+        Token budget for codebase context in this phase.
+    """
+    base = min(int(model_context_window * 0.25), 50_000)
+    multiplier = _PHASE_BUDGET_MULTIPLIERS.get(phase_number, 1.0)
+    budget = int(base * multiplier)
+    floor = DEFAULT_TOKEN_BUDGET
+    ceiling = int(model_context_window * 0.40)
+    return max(floor, min(budget, ceiling))
 
 
 class MigrationContextBuilder:
@@ -48,22 +81,36 @@ class MigrationContextBuilder:
         token_budget: int = DEFAULT_TOKEN_BUDGET,
         mvp_context: Optional[Dict[str, Any]] = None,
         context_type: Optional[str] = None,
+        model_context_window: int = 200_000,
     ) -> str:
         """Build context string for a specific phase.
 
         Args:
             phase_number: 1-6 (V1) or 1-4 (V2)
             previous_outputs: {phase_number: output_text} for completed phases
-            token_budget: Max tokens for the context block
+            token_budget: Max tokens for the context block. If the default
+                (12_000) is passed, automatically scales using
+                compute_phase_budget() based on model_context_window.
             mvp_context: MVP dict for per-MVP phases. Contains unit_ids,
                 file_ids, sp_references, metrics, name, etc.
             context_type: Semantic type override (e.g. "architecture", "discovery").
                 Decouples phase number from context builder for V2 pipeline.
                 If None, falls back to phase-number dispatch.
+            model_context_window: Model's total context window in tokens.
+                Used to compute phase-specific budgets when token_budget
+                is the default.
 
         Returns:
             Formatted context string for the LLM prompt
         """
+        # Auto-scale budget if caller used the default (backward-compatible)
+        if token_budget == DEFAULT_TOKEN_BUDGET:
+            token_budget = compute_phase_budget(phase_number, model_context_window)
+            logger.debug(
+                "Phase %d budget: %d tokens (model context: %dK)",
+                phase_number, token_budget, model_context_window // 1000,
+            )
+
         _type_builders = {
             "discovery": self._build_phase_1_context,
             "architecture": self._build_phase_2_context,
@@ -1659,6 +1706,14 @@ class MigrationContextBuilder:
                 source = row.source or ""
                 entry_len = len(source) + len(row.qualified_name or "") + 50
                 if used + entry_len > char_budget:
+                    skipped = len(rows) - len(results)
+                    logger.warning(
+                        "Source code truncated: included %d/%d units (%.0f%%), "
+                        "budget=%d tokens. %d units omitted.",
+                        len(results), len(rows),
+                        len(results) / len(rows) * 100 if rows else 100,
+                        budget, skipped,
+                    )
                     break
                 used += entry_len
                 results.append(dict(row._mapping))

@@ -302,7 +302,7 @@ class CodeIngestionService:
                 logger.error(f"Failed to embed/store: {e}")
                 result.errors.append(f"Embedding failed: {e}")
 
-        primary_language = max(languages_seen, key=lambda l: l == "python") if languages_seen else None
+        primary_language = self._compute_primary_language(project_id) if languages_seen else None
         self._update_project_stats(
             project_id=project_id,
             file_count=result.files_processed,
@@ -479,6 +479,21 @@ class CodeIngestionService:
                     project.ast_status = status
         except Exception as e:
             logger.error(f"Failed to update project status: {e}")
+
+    def _compute_primary_language(self, project_id: str) -> Optional[str]:
+        """Compute primary language from actual file counts in DB."""
+        try:
+            from sqlalchemy import text
+            with self._db.get_session() as session:
+                row = session.execute(text("""
+                    SELECT language FROM code_files
+                    WHERE project_id = :pid AND language IS NOT NULL
+                    GROUP BY language ORDER BY COUNT(*) DESC LIMIT 1
+                """), {"pid": UUID(project_id)}).first()
+            return row[0] if row else None
+        except Exception as e:
+            logger.warning("Failed to compute primary language: %s", e)
+            return None
 
     def _update_project_stats(
         self,

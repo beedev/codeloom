@@ -445,8 +445,8 @@ class _Context7DocTool:
     the library isn't in Context7's catalog.
     """
 
-    C7_SEARCH_URL = "https://api.context7.com/v2/search"
-    C7_DOCS_URL = "https://api.context7.com/v2/context"
+    C7_SEARCH_URL = "https://context7.com/api/v2/libs/search"
+    C7_DOCS_URL = "https://context7.com/api/v2/context"
 
     def __init__(self, target_stack: Optional[Dict[str, Any]] = None):
         self._c7_key = os.environ.get("CONTEXT7_API_KEY", "")
@@ -511,10 +511,14 @@ class _Context7DocTool:
         with httpx.Client(timeout=15) as client:
             search_resp = client.get(
                 self.C7_SEARCH_URL,
-                params={"query": framework},
+                params={"libraryName": framework},
                 headers=headers,
             )
             search_resp.raise_for_status()
+            raw = search_resp.text.strip()
+            if not raw:
+                logger.debug("Context7 search returned empty body for '%s'", framework)
+                return ""
             search_data = search_resp.json()
 
         results = search_data.get("results", [])
@@ -526,9 +530,9 @@ class _Context7DocTool:
             return ""
 
         # Step 2: Fetch docs for topic
-        params: Dict[str, Any] = {"libraryId": lib_id, "tokens": 10000}
+        params: Dict[str, Any] = {"libraryId": lib_id}
         if topic:
-            params["topic"] = topic
+            params["query"] = topic
 
         with httpx.Client(timeout=20) as client:
             docs_resp = client.get(
@@ -537,13 +541,12 @@ class _Context7DocTool:
                 headers=headers,
             )
             docs_resp.raise_for_status()
-            docs_data = docs_resp.json()
+            content = docs_resp.text.strip()
+            if not content:
+                logger.debug("Context7 docs returned empty body for '%s'", lib_id)
+                return ""
 
-        content = docs_data.get("content", "")
-        if not content:
-            return ""
-
-        lib_name = results[0].get("name", framework)
+        lib_name = results[0].get("title") or results[0].get("name") or framework
         header = f"## {lib_name} Documentation"
         if topic:
             header += f" — {topic}"
@@ -558,8 +561,8 @@ class _Context7DocTool:
         with httpx.Client(timeout=15) as client:
             resp = client.post(
                 "https://api.tavily.com/search",
+                headers={"Authorization": f"Bearer {self._tavily_key}"},
                 json={
-                    "api_key": self._tavily_key,
                     "query": query,
                     "search_depth": "advanced",
                     "max_results": 3,

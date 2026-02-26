@@ -30,7 +30,7 @@ Each executor:
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from llama_index.core import Settings
 
@@ -297,7 +297,15 @@ _PHASE_INSTRUCTIONS: Dict[str, str] = {
         "Rules:\n"
         "- Output ONLY the JSON array. No markdown, no explanation, no code fences.\n"
         "- Each object must have 'file_path', 'content' (full source code), and 'language'.\n"
-        "- Include ALL migrated files in a single array."
+        "- Include ALL migrated files in a single array.\n\n"
+        "Quality Rules (MANDATORY):\n"
+        "- NO STUBS: Every method must have real migrated logic, not placeholders.\n"
+        "- COMPLETE BODIES: 50-line source = ~50-line migrated output.\n"
+        "- Use // MIGRATION-TODO only inside otherwise complete method bodies.\n"
+        "- SINGLE ENTRY POINT: Max one main()/app.listen() per MVP.\n"
+        "- Include package.json/pom.xml/.csproj with ALL referenced packages.\n"
+        "- DI registrations must use class-based tokens, not string literals.\n"
+        "- Every import must reference a file in your output or a declared dependency."
     ),
     "analyze": (
         "Produce a Functional Requirements Register for this MVP.\n\n"
@@ -340,6 +348,7 @@ def _call_llm(
     prompt: str,
     context_type: Optional[str] = None,
     temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
 ) -> str:
     """Call the LLM with a prompt and return the response text.
 
@@ -351,6 +360,8 @@ def _call_llm(
             None → use default Settings.llm
         temperature: Optional temperature override for this call.
             Use 0.0 for deterministic output. Restores original after call.
+        max_tokens: Optional max output tokens. Passed to the provider to
+            prevent truncation for phases that need large outputs (transform).
     """
     llm = _get_phase_llm(context_type)
     if llm is None:
@@ -368,7 +379,10 @@ def _call_llm(
         llm.temperature = temperature
 
     try:
-        response = llm.complete(prompt, gateway_purpose="migration")
+        kwargs: Dict[str, Any] = {"gateway_purpose": "migration"}
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        response = llm.complete(prompt, **kwargs)
         return response.text.strip()
     finally:
         if original_temp is not None:
@@ -681,6 +695,20 @@ def _execute_architecture(
         enricher = DocEnricher()
         framework_docs_str = enricher.get_phase_docs(fw_docs, 2, budget=3000)
 
+    # Ground truth constraints (layer summary + language guidance)
+    ground_truth = plan.get("_ground_truth")
+    layer_summary_str = ""
+    if ground_truth:
+        # Prepend verified language distribution so LLM sees correct stats first
+        lang_summary = ground_truth.format_language_summary()
+        if lang_summary:
+            codebase_context = lang_summary + "\n\n" + codebase_context
+
+        layer_summary_str = ground_truth.format_layer_summary()
+        lang_guidance = ground_truth.format_language_guidance(plan.get("target_stack", {}))
+        if lang_guidance:
+            layer_summary_str = layer_summary_str + "\n\n" + lang_guidance if layer_summary_str else lang_guidance
+
     prompt = prompts.phase_2_architecture(
         target_brief=plan["target_brief"],
         target_stack=plan["target_stack"],
@@ -691,10 +719,45 @@ def _execute_architecture(
         source_patterns=source_patterns_str,
         migration_type=plan.get("migration_type", "framework_migration"),
         asset_strategies=plan.get("asset_strategies") or None,
+        layer_summary=layer_summary_str,
     )
 
     output = _call_llm(prompt)
+
+    # Spot-check output against ground truth
+    if ground_truth:
+        issues = ground_truth.validate_phase_output("architecture", output)
+        if issues:
+            logger.warning(
+                "Phase 2 (architecture) output has %d grounding issues: %s",
+                len(issues), "; ".join(i.message for i in issues[:5]),
+            )
+
     return {"output": output, "output_files": []}
+
+
+def _build_language_override(plan: Dict, mvp_context: Optional[Dict]) -> str:
+    """Build a language incompatibility override for per-MVP prompts.
+
+    If the MVP's dominant language is incompatible with the plan's target
+    framework, returns a CRITICAL instruction to keep-as-is. Otherwise empty.
+    """
+    ground_truth = plan.get("_ground_truth")
+    if not ground_truth or not mvp_context or not mvp_context.get("unit_ids"):
+        return ""
+    mvp_lang = ground_truth.get_mvp_dominant_language(mvp_context["unit_ids"])
+    if not mvp_lang:
+        return ""
+    if ground_truth.is_language_compatible(mvp_lang, plan.get("target_stack", {})):
+        return ""
+    return (
+        f"\n\nCRITICAL: This MVP contains **{mvp_lang}** code which is NOT compatible "
+        f"with the target framework ({plan.get('target_brief', '')}).\n"
+        f"Do NOT migrate this code to the target framework. Instead:\n"
+        f"- Analyze and document it as-is\n"
+        f"- Flag it for separate handling or exclusion from migration\n"
+        f"- Do NOT generate target-framework equivalents for {mvp_lang} code\n"
+    )
 
 
 # ── Phase 3: Analyze (Per-MVP) ───────────────────────────────────────
@@ -752,6 +815,9 @@ def _execute_analyze(
         framework_docs=framework_docs_str,
     )
 
+    # Language compatibility override for incompatible MVPs
+    prompt += _build_language_override(plan, mvp_context)
+
     # Append deep analysis context after the main prompt
     if deep_context_str:
         prompt += f"\n\n{deep_context_str}"
@@ -759,8 +825,20 @@ def _execute_analyze(
     output = _call_llm(prompt, context_type="understanding")
 
     # SRC validation loop: check register coverage
+    ground_truth = plan.get("_ground_truth")
     if mvp_context and mvp_context.get("unit_ids"):
-        output = _src_validate_register(output, mvp_context["unit_ids"], prompt)
+        output = _src_validate_register(
+            output, mvp_context["unit_ids"], prompt, ground_truth=ground_truth,
+        )
+
+    # Spot-check output against ground truth
+    if ground_truth:
+        issues = ground_truth.validate_phase_output("analyze", output)
+        if issues:
+            logger.warning(
+                "Phase 3 (analyze) output has %d grounding issues: %s",
+                len(issues), "; ".join(i.message for i in issues[:5]),
+            )
 
     return {"output": output, "output_files": []}
 
@@ -802,6 +880,8 @@ def _execute_design(
         functional_context=functional_str,
     )
 
+    prompt += _build_language_override(plan, mvp_context)
+
     output = _call_llm(prompt)
     return {"output": output, "output_files": []}
 
@@ -815,9 +895,19 @@ def _execute_transform(
 ) -> Dict[str, Any]:
     """Transform: Generate migrated code for this MVP.
 
-    V1: Phase 5 (Design output in prev[4]).
-    V2: Phase 3 (Architecture output in prev[1], optional analysis_output on plan).
-    """
+    For MVP 99 (integration_mvp=True), delegates to the three-pass
+    integration transform instead of the standard code migration."""
+
+    # Integration MVP: branch to three-pass architecture
+    if mvp_context and (mvp_context.get("metrics") or {}).get("integration_mvp"):
+        return _execute_integration_transform(
+            plan, prev, ctx, budget, mvp_context,
+            all_mvp_transform_outputs=plan.get("_all_mvp_transform_outputs"),
+            all_mvp_analysis_outputs=plan.get("_all_mvp_analysis_outputs"),
+        )
+
+    # V1: Phase 5 (Design output in prev[4]).
+    # V2: Phase 3 (Architecture output in prev[1], optional analysis_output on plan).
     codebase_context = ctx.build_phase_context(5, prev, budget, mvp_context=mvp_context, context_type="transform")
 
     # V1: prior_phase_output is Design (phase 4). V2: it's Architecture (phase 1 or 2).
@@ -836,6 +926,20 @@ def _execute_transform(
     mvp_description = ""
     if mvp_context:
         mvp_description = mvp_context.get("description", "")
+
+    # Fix 1: Cross-MVP file manifest — tells this MVP what prior MVPs already generated
+    prior_manifest_str = ""
+    prior_manifest = plan.get("_prior_mvp_file_manifest", {})
+    if prior_manifest:
+        lines: List[str] = []
+        for mvp_name, paths in prior_manifest.items():
+            for p in paths:
+                lines.append(f"  {p}  [{mvp_name}]")
+        prior_manifest_str = "\n".join(lines)
+        logger.info(
+            "Transform: injecting prior MVP manifest (%d files from %d MVPs)",
+            len(lines), len(prior_manifest),
+        )
 
     # Framework docs
     framework_docs_str = ""
@@ -866,7 +970,10 @@ def _execute_transform(
         framework_docs=framework_docs_str,
         analysis_output=analysis_output,
         mvp_description=mvp_description,
+        prior_mvp_manifest=prior_manifest_str,
     )
+
+    prompt += _build_language_override(plan, mvp_context)
 
     # Append deep analysis context after the main prompt
     if deep_context_str:
@@ -894,16 +1001,53 @@ def _execute_transform(
     if lane_augmentation:
         prompt += f"\n\n## Migration Lane Context\n\n{lane_augmentation}"
 
-    raw = _call_llm(prompt, context_type="generation")
+    raw = _call_llm(prompt, context_type="generation", max_tokens=16_384)
     output_files = _parse_json_files(raw)
 
+    # Retry once if parse failed but raw text contains code indicators
+    if not output_files and raw and ("```" in raw or "import " in raw):
+        logger.warning(
+            "Transform parse failed (%d chars raw output). "
+            "Retrying with explicit JSON instruction.",
+            len(raw),
+        )
+        retry_prompt = (
+            "Your previous response contained code but was not in the required JSON format.\n\n"
+            "Reformat your ENTIRE response as a JSON array. Each element must have:\n"
+            '{"file_path": "src/...", "content": "...", "language": "typescript"}\n\n'
+            "Previous response to reformat:\n\n" + raw[:30_000]
+        )
+        retry_raw = _call_llm(retry_prompt, context_type="generation", max_tokens=16_384)
+        output_files = _parse_json_files(retry_raw)
+        if output_files:
+            logger.info("Retry succeeded: parsed %d files", len(output_files))
+
     if output_files:
+        total_content_len = sum(len(f.get("content", "")) for f in output_files)
         output = f"Generated {len(output_files)} migrated file(s).\n\nSee output_files for generated code."
+        logger.info(
+            "Transform output: %d files, %d chars total content",
+            len(output_files), total_content_len,
+        )
     else:
         output = raw
         output_files = []
+        logger.warning(
+            "Transform produced no parseable files (%d chars raw output)",
+            len(raw) if raw else 0,
+        )
 
-    return {"output": output, "output_files": output_files}
+    # Stub quality check (soft gate — log and report, never blocks)
+    stub_quality = _check_stub_quality(output_files) if output_files else {}
+    if stub_quality.get("stub_count", 0) > 0:
+        logger.warning(
+            "Transform stub quality: %d/%d files contain stubs — %s",
+            stub_quality["stub_count"],
+            stub_quality["total_files"],
+            ", ".join(f["file_path"] for f in stub_quality.get("stub_files", [])[:5]),
+        )
+
+    return {"output": output, "output_files": output_files, "stub_quality": stub_quality}
 
 
 # ── Phase 6: Test (Per-MVP) ──────────────────────────────────────────
@@ -994,6 +1138,7 @@ def execute_mvp_analysis(
     context_builder: MigrationContextBuilder,
     mvp_context: Dict[str, Any],
     token_budget: int = 18_000,
+    ground_truth: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run on-demand deep analysis for an MVP (merges old Analyze + Design).
 
@@ -1068,18 +1213,266 @@ def execute_mvp_analysis(
         framework_docs=framework_docs_str,
     )
 
+    prompt += _build_language_override(plan, mvp_context)
+
     output = _call_llm(prompt)
 
     # SRC validation loop: check register coverage
     if mvp_context and mvp_context.get("unit_ids"):
-        output = _src_validate_register(output, mvp_context["unit_ids"], prompt)
+        output = _src_validate_register(
+            output, mvp_context["unit_ids"], prompt, ground_truth=ground_truth,
+        )
+
+    # Spot-check output against ground truth
+    if ground_truth:
+        issues = ground_truth.validate_phase_output("analyze", output)
+        if issues:
+            logger.warning(
+                "MVP analysis output has %d grounding issues: %s",
+                len(issues), "; ".join(i.message for i in issues[:5]),
+            )
+
+    return {"output": output, "output_files": []}
+
+
+# ── Integration MVP Analysis ────────────────────────────────────────
+
+# Regex patterns to extract register rows from MVP analysis markdown tables.
+# Each register type has its own prefix (BR-, DE-, INT-, VAL-).
+_REGISTER_ROW_RE = re.compile(
+    r"^\|\s*((?:BR|DE|INT|VAL)-\d+)\s*\|(.+)$", re.MULTILINE,
+)
+
+
+def _parse_mvp_registers(analysis_text: str) -> Dict[str, List[str]]:
+    """Extract functional requirements register rows from an MVP's analysis output.
+
+    Returns dict with keys 'BR', 'DE', 'INT', 'VAL', each containing
+    a list of full table-row strings (with ID prefix).
+    """
+    registers: Dict[str, List[str]] = {"BR": [], "DE": [], "INT": [], "VAL": []}
+    for match in _REGISTER_ROW_RE.finditer(analysis_text):
+        reg_id = match.group(1)          # e.g. "BR-3"
+        full_row = match.group(0).strip()  # full "| BR-3 | ... |" line
+        prefix = reg_id.split("-")[0]      # "BR"
+        if prefix in registers:
+            registers[prefix].append(full_row)
+    return registers
+
+
+def _merge_registers(
+    all_mvp_analyses: Dict[str, Dict],
+) -> Tuple[str, Dict[str, List[Tuple[str, str]]]]:
+    """Aggregate functional requirements from all MVPs into a single register.
+
+    Returns:
+        (merged_markdown, per_type_rows) where per_type_rows maps
+        register type → list of (mvp_name, row_text) tuples.
+    """
+    per_type: Dict[str, List[Tuple[str, str]]] = {
+        "BR": [], "DE": [], "INT": [], "VAL": [],
+    }
+
+    for mvp_name, mvp_info in sorted(all_mvp_analyses.items()):
+        analysis_text = mvp_info.get("output", "")
+        regs = _parse_mvp_registers(analysis_text)
+        for reg_type, rows in regs.items():
+            for row in rows:
+                per_type[reg_type].append((mvp_name, row))
+
+    # Build markdown
+    lines: List[str] = []
+    type_labels = {
+        "BR": "Business Rules",
+        "DE": "Data Entities",
+        "INT": "External Integrations",
+        "VAL": "Validation Rules",
+    }
+    for reg_type, label in type_labels.items():
+        entries = per_type[reg_type]
+        lines.append(f"### {label} ({len(entries)} total)")
+        if entries:
+            for mvp_name, row in entries:
+                lines.append(f"- **[{mvp_name}]** {row}")
+        else:
+            lines.append("_(none found)_")
+        lines.append("")
+
+    return "\n".join(lines), per_type
+
+
+def _detect_cross_mvp_dependencies(
+    per_type_rows: Dict[str, List[Tuple[str, str]]],
+) -> str:
+    """Detect shared entities and integrations across MVPs.
+
+    Returns a markdown summary of cross-MVP dependencies.
+    """
+    # Track which MVPs reference each entity/integration name
+    entity_mvps: Dict[str, set] = {}
+    integration_mvps: Dict[str, set] = {}
+
+    for mvp_name, row in per_type_rows.get("DE", []):
+        # Extract entity name from table row: "| DE-1 | EntityName | ..."
+        parts = [p.strip() for p in row.split("|") if p.strip()]
+        if len(parts) >= 2:
+            entity_name = parts[1].strip()
+            entity_mvps.setdefault(entity_name, set()).add(mvp_name)
+
+    for mvp_name, row in per_type_rows.get("INT", []):
+        parts = [p.strip() for p in row.split("|") if p.strip()]
+        if len(parts) >= 2:
+            integration_name = parts[1].strip()
+            integration_mvps.setdefault(integration_name, set()).add(mvp_name)
+
+    lines: List[str] = []
+
+    # Shared entities (referenced by 2+ MVPs)
+    shared_entities = {k: v for k, v in entity_mvps.items() if len(v) >= 2}
+    lines.append(f"### Shared Data Entities ({len(shared_entities)})")
+    if shared_entities:
+        for entity, mvps in sorted(shared_entities.items()):
+            lines.append(f"- **{entity}**: {', '.join(sorted(mvps))}")
+    else:
+        lines.append("_(no shared entities detected)_")
+    lines.append("")
+
+    # Shared integrations (referenced by 2+ MVPs)
+    shared_integrations = {k: v for k, v in integration_mvps.items() if len(v) >= 2}
+    lines.append(f"### Shared External Integrations ({len(shared_integrations)})")
+    if shared_integrations:
+        for integ, mvps in sorted(shared_integrations.items()):
+            lines.append(f"- **{integ}**: {', '.join(sorted(mvps))}")
+    else:
+        lines.append("_(no shared integrations detected)_")
+    lines.append("")
+
+    # Summary stats
+    total_entities = len(entity_mvps)
+    total_integrations = len(integration_mvps)
+    lines.append(f"### Summary")
+    lines.append(f"- Total unique entities: {total_entities} ({len(shared_entities)} shared)")
+    lines.append(f"- Total unique integrations: {total_integrations} ({len(shared_integrations)} shared)")
+
+    return "\n".join(lines)
+
+
+def execute_integration_analysis(
+    plan: Dict[str, Any],
+    previous_outputs: Dict[int, str],
+    mvp_context: Dict[str, Any],
+    all_mvp_analyses: Dict[str, Dict],
+) -> Dict[str, Any]:
+    """Run integration analysis for MVP 99 — aggregates all other MVPs.
+
+    Instead of analyzing source code (MVP 99 has none), this:
+    1. Parses each MVP's functional requirements register (BR, DE, INT, VAL)
+    2. Merges into a unified cross-project register
+    3. Detects cross-MVP dependencies (shared entities, overlapping integrations)
+    4. Generates integration-specific analysis via LLM
+
+    Args:
+        plan: Migration plan dict (target_brief, target_stack, etc.)
+        previous_outputs: Plan-level phase outputs (architecture, discovery)
+        mvp_context: MVP 99 dict (for metadata only — has no units)
+        all_mvp_analyses: Dict[mvp_name → {mvp_id, priority, unit_count, output}]
+
+    Returns:
+        Dict with 'output' (markdown) and 'output_files' (always [])
+    """
+    if not all_mvp_analyses:
+        logger.warning("Integration analysis: no MVP analyses available — skipping LLM call")
+        return {
+            "output": "## Integration Analysis\n\n"
+                      "No completed MVP analyses found. Run analysis for individual MVPs first.",
+            "output_files": [],
+        }
+
+    # ── Step 1: Parse + merge registers (deterministic) ──
+    merged_register, per_type_rows = _merge_registers(all_mvp_analyses)
+
+    total_items = sum(len(v) for v in per_type_rows.values())
+    logger.info(
+        "Integration analysis: merged %d register items from %d MVPs "
+        "(BR=%d, DE=%d, INT=%d, VAL=%d)",
+        total_items, len(all_mvp_analyses),
+        len(per_type_rows["BR"]), len(per_type_rows["DE"]),
+        len(per_type_rows["INT"]), len(per_type_rows["VAL"]),
+    )
+
+    # ── Step 2: Cross-MVP dependency detection (deterministic) ──
+    cross_deps = _detect_cross_mvp_dependencies(per_type_rows)
+
+    # ── Step 3: Build MVP summary table ──
+    mvp_lines = ["| MVP | Priority | Units | Status |", "|-----|----------|-------|--------|"]
+    for mvp_name, info in sorted(all_mvp_analyses.items(), key=lambda x: x[1].get("priority", 0)):
+        mvp_lines.append(
+            f"| {mvp_name} | {info.get('priority', '?')} | "
+            f"{info.get('unit_count', 0)} | analyzed |"
+        )
+    mvp_summary_table = "\n".join(mvp_lines)
+
+    # ── Step 4: LLM integration analysis ──
+    architecture_output = previous_outputs.get(1, "") or previous_outputs.get(2, "")
+
+    prompt = prompts.integration_analysis_prompt(
+        architecture_output=architecture_output,
+        target_stack=plan.get("target_stack", {}),
+        merged_register=merged_register,
+        cross_mvp_dependencies=cross_deps,
+        mvp_summary_table=mvp_summary_table,
+    )
+
+    output = _call_llm(prompt)
+
+    logger.info(
+        "Integration analysis complete: %d chars output, %d register items aggregated",
+        len(output), total_items,
+    )
 
     return {"output": output, "output_files": []}
 
 
 # ── SRC Validation ───────────────────────────────────────────────────
 
-_REGISTER_ID_RE = re.compile(r"\b(BR|DE|INT|VAL)-\d+\b")
+_REGISTER_ID_RE = re.compile(r"\b(?:BR|DE|INT|VAL)-\d+\b")
+
+_REGISTER_ENTRY_RE = re.compile(
+    r"\|\s*((?:BR|DE|INT|VAL)-\d+)\s*\|([^|]+)\|",
+)
+
+
+def _extract_register_summary(output: str, max_entries: int = 30) -> str:
+    """Extract register entries with descriptions for gap-prompt context.
+
+    Returns a concise summary of already-covered entries so the LLM
+    knows what's been documented and can generate genuinely new items.
+    """
+    entries = _REGISTER_ENTRY_RE.findall(output)
+    if not entries:
+        return ""
+    lines = ["Already covered entries:"]
+    for reg_id, desc in entries[:max_entries]:
+        lines.append(f"- {reg_id}: {desc.strip()}")
+    return "\n".join(lines)
+
+
+def _strip_duplicate_rows(extension: str, existing_ids: set) -> str:
+    """Remove table rows from extension whose register ID already exists."""
+    if not existing_ids:
+        return extension
+    lines = extension.split("\n")
+    filtered = []
+    stripped = 0
+    for line in lines:
+        match = _REGISTER_ENTRY_RE.search(line)
+        if match and match.group(1) in existing_ids:
+            stripped += 1
+            continue
+        filtered.append(line)
+    if stripped:
+        logger.info("SRC dedup: stripped %d duplicate register rows", stripped)
+    return "\n".join(filtered)
 
 
 def _src_validate_register(
@@ -1087,17 +1480,24 @@ def _src_validate_register(
     unit_ids: List[str],
     original_prompt: str,
     max_iterations: int = 3,
+    ground_truth: Optional[Any] = None,
 ) -> str:
     """SRC validation loop for Phase 3 Functional Requirements Register.
 
     Checks that the register covers enough MVP units, and re-prompts the
-    LLM to fill gaps if coverage is below 95%.
+    LLM to fill gaps if coverage is below target. When ground_truth is
+    provided, the gap prompt is anchored to verified codebase facts to
+    prevent hallucination. Without ground_truth, falls back to extracting
+    context from original_prompt.
 
     Args:
         output: LLM-generated Phase 3 output
         unit_ids: MVP's unit IDs to check coverage against
-        original_prompt: The original Phase 3 prompt for re-prompting
+        original_prompt: The original Phase 3 prompt (used as fallback
+            context if ground_truth is not available)
         max_iterations: Maximum re-prompt attempts
+        ground_truth: Optional CodebaseGroundTruth instance for grounded
+            re-prompting with verified unit names from DB.
 
     Returns:
         Final output with improved register coverage.
@@ -1112,6 +1512,19 @@ def _src_validate_register(
     # with code units. A class with 50 methods is still ~1 DE + a few BRs.
     # Target: 10% of units or 50, whichever is smaller, minimum 10.
     target = max(10, min(int(total_units * 0.10), 50))
+
+    # Extract codebase anchor once (before loop).
+    # Prefer ground_truth (verified DB facts) over prompt parsing (fragile).
+    codebase_anchor = ""
+    if ground_truth is not None:
+        codebase_anchor = ground_truth.build_src_gap_context(unit_ids, set())
+    elif original_prompt:
+        # Fallback: extract the MVP Functional Context section from prompt
+        codebase_anchor = _extract_prompt_section(
+            original_prompt, "MVP Functional Context", max_chars=3000,
+        ) or _extract_prompt_section(
+            original_prompt, "Current MVP", max_chars=2000,
+        )
 
     for iteration in range(max_iterations):
         # Parse register IDs from output
@@ -1130,31 +1543,84 @@ def _src_validate_register(
             register_count, target, total_units, iteration,
         )
 
-        # Build gap prompt — only include register summary, NOT the full output,
-        # to avoid context bloat that causes LLM repetition degeneration.
+        # Build entry-aware summary so LLM sees what's already covered
+        existing_ids_str = ", ".join(sorted(register_ids)) if register_ids else "none yet"
+        existing_summary = _extract_register_summary(best_output)
+
+        # Build gap prompt with codebase context to prevent hallucination.
         gap_prompt = (
-            f"The Functional Requirements Register currently has {register_count} "
-            f"items but needs at least {target} to adequately cover this MVP's "
-            f"{total_units} code units.\n\n"
-            f"Please output ONLY the new register entries to add. "
-            f"Look for:\n"
-            f"- Service methods without a BR (Business Rule) entry\n"
-            f"- Entity/model classes without a DE (Data Entity) entry\n"
-            f"- Units with HTTP/REST/queue patterns without an INT (Integration) entry\n"
-            f"- Units with validation annotations without a VAL (Validation) entry\n\n"
-            f"Start numbering from BR-{register_count + 1}, DE-{register_count + 1}, etc. "
+            f"You are extending a Functional Requirements Register for a codebase migration.\n\n"
+            f"The register currently has {register_count} items "
+            f"but needs at least {target} to cover this MVP's {total_units} code units.\n\n"
+        )
+
+        if existing_summary:
+            gap_prompt += f"{existing_summary}\n\n"
+        else:
+            gap_prompt += f"Already covered IDs: {existing_ids_str}\n\n"
+
+        if codebase_anchor:
+            gap_prompt += (
+                f"Here are the ACTUAL code units in this MVP. Use ONLY these real names "
+                f"and qualified paths. Do NOT invent classes, methods, or entities that "
+                f"are not listed here:\n\n"
+                f"{codebase_anchor}\n\n"
+            )
+
+        gap_prompt += (
+            f"Generate ONLY new register entries for units NOT already covered. "
+            f"Do NOT repeat any of the entries listed above.\n\n"
+            f"Categories:\n"
+            f"- BR-N: Business rules (service methods, handlers, use cases)\n"
+            f"- DE-N: Data entities (model/entity classes with fields)\n"
+            f"- INT-N: External integrations (HTTP clients, queues, adapters)\n"
+            f"- VAL-N: Validation rules (validators, constraints)\n\n"
+            f"Start numbering from BR-{register_count + 1}, DE-{register_count + 1}, etc.\n"
             f"Output ONLY the new markdown tables — no preamble, no repetition of existing entries."
         )
 
         try:
             extension = _call_llm(gap_prompt)
             if extension and len(extension) > 50:
+                # Strip rows whose IDs already exist (dedup)
+                extension = _strip_duplicate_rows(extension, register_ids)
+
+                # Spot-check for hallucinated entities if ground truth available
+                if ground_truth is not None:
+                    issues = ground_truth._check_hallucinated_entities(extension)
+                    if issues:
+                        logger.warning(
+                            "SRC iteration %d: %d potentially hallucinated entities detected",
+                            iteration + 1, len(issues),
+                        )
                 best_output = best_output + "\n\n## Register Extension (SRC Iteration " + str(iteration + 1) + ")\n\n" + extension
         except Exception as e:
             logger.warning("SRC re-prompt failed (iteration %d): %s", iteration, e)
             break
 
     return best_output
+
+
+def _extract_prompt_section(prompt: str, header_prefix: str, max_chars: int = 4000) -> str:
+    """Extract a markdown section from prompt by header prefix.
+
+    Scans for a line starting with ## or ### followed by header_prefix,
+    returns everything up to the next same-level header or EOF.
+    Truncates to max_chars to keep token budget bounded.
+
+    Used as fallback context extraction when ground_truth is not available.
+    """
+    pattern = re.compile(
+        rf"^(#{2,3}\s+{re.escape(header_prefix)}.*?)(?=\n#{2,3}\s|\Z)",
+        re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(prompt)
+    if not match:
+        return ""
+    section = match.group(1).strip()
+    if len(section) > max_chars:
+        section = section[:max_chars] + "\n[... truncated]"
+    return section
 
 
 # ── Analysis Embedding ────────────────────────────────────────────────
@@ -1408,3 +1874,697 @@ def _guess_language(file_path: str) -> str:
         if file_path.endswith(ext):
             return lang
     return ""
+
+
+# ── Stub Detection ────────────────────────────────────────────────────
+
+# Compiled once at module level for performance
+_STUB_PATTERNS = [
+    re.compile(r"(?i)not\s+(?:yet\s+)?implemented"),
+    re.compile(r"(?i)\bplaceholder\b"),
+    re.compile(r"(?i)\bdummy\b"),
+    # "stub" but not the JSON field "is_sp_stub"
+    re.compile(r"(?i)(?<!is_sp_)\bstub\b"),
+    re.compile(r"throw\s+new\s+NotImplementedError"),
+    re.compile(r"raise\s+NotImplementedError"),
+    re.compile(r"(?i)(?://|#)\s*TODO:\s*implement"),
+    # Python pass-only body
+    re.compile(r"^\s*pass\s*$", re.MULTILINE),
+    # Empty return as sole body: return null/None/undefined/0/""/[]/{}
+    re.compile(r"^\s*return\s+(?:null|None|undefined|0|\"\"|\[\]|\{\})\s*;?\s*(?://.*)?$", re.MULTILINE),
+]
+
+
+def _check_stub_quality(output_files: List[Dict]) -> Dict:
+    """Scan transform output files for stub/placeholder patterns.
+
+    Uses a heuristic: files with <5 non-blank non-comment lines that also
+    match a stub pattern are flagged.  Large files with an occasional TODO
+    inside real logic are acceptable and NOT flagged.
+
+    Returns:
+        {stub_count, stub_files: [{file_path, patterns_found}],
+         total_files, stub_ratio}
+    """
+    if not output_files:
+        return {}
+
+    stub_files: List[Dict] = []
+
+    for fd in output_files:
+        fp = fd.get("file_path", "unknown")
+        content = fd.get("content", "")
+        if not content:
+            # Completely empty file is a stub
+            stub_files.append({"file_path": fp, "patterns_found": ["empty_file"]})
+            continue
+
+        # Count substantive lines (non-blank, non-comment-only)
+        lines = content.splitlines()
+        substantive = 0
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(("//", "#", "/*", "*", "*/", "<!--")):
+                continue
+            # import/using/package lines are boilerplate, not logic
+            if stripped.startswith(("import ", "from ", "using ", "package ")):
+                continue
+            substantive += 1
+
+        # Check each pattern
+        found_patterns: List[str] = []
+        for pat in _STUB_PATTERNS:
+            if pat.search(content):
+                found_patterns.append(pat.pattern[:60])
+
+        if not found_patterns:
+            continue
+
+        # Heuristic: small file with stub pattern = stub.
+        # Large file with stub pattern = acceptable (TODO in real code).
+        if substantive < 5:
+            stub_files.append({"file_path": fp, "patterns_found": found_patterns})
+        elif len(found_patterns) >= 3:
+            # Multiple stub patterns even in a larger file = likely hollow
+            stub_files.append({"file_path": fp, "patterns_found": found_patterns})
+
+    total = len(output_files)
+    stub_count = len(stub_files)
+
+    return {
+        "stub_count": stub_count,
+        "stub_files": stub_files,
+        "total_files": total,
+        "stub_ratio": round(stub_count / total, 3) if total else 0.0,
+    }
+
+
+# ── Contract Card Extraction (Deterministic) ──────────────────────────
+
+_CONTRACT_PATTERNS: Dict[str, Dict[str, List[re.Pattern]]] = {
+    "python": {
+        "imports": [
+            re.compile(r"^import\s+(\S+)", re.MULTILINE),
+            re.compile(r"^from\s+(\S+)\s+import", re.MULTILINE),
+        ],
+        "provides_class": [re.compile(r"^class\s+(\w+)", re.MULTILINE)],
+        "provides_func": [re.compile(r"^def\s+(\w+)", re.MULTILINE)],
+        "di": [re.compile(r"@inject", re.IGNORECASE)],
+        "entry_points": [re.compile(r'if\s+__name__\s*==\s*["\']__main__["\']')],
+    },
+    "java": {
+        "imports": [re.compile(r"^import\s+(.+?);", re.MULTILINE)],
+        "provides_class": [
+            re.compile(r"public\s+(?:class|interface|enum)\s+(\w+)"),
+        ],
+        "di": [
+            re.compile(r"@(?:Inject|Autowired|Component|Service|Repository|Controller|Bean)\b"),
+        ],
+        "entry_points": [re.compile(r"public\s+static\s+void\s+main\s*\(")],
+        "routes": [
+            re.compile(r'@(?:Request|Get|Post|Put|Delete|Patch)Mapping\s*\(\s*(?:value\s*=\s*)?["\']([^"\']+)["\']'),
+        ],
+    },
+    "csharp": {
+        "imports": [re.compile(r"^using\s+(.+?);", re.MULTILINE)],
+        "provides_class": [
+            re.compile(r"public\s+(?:class|interface|struct|record)\s+(\w+)"),
+        ],
+        "di": [re.compile(r"\[Inject\]"), re.compile(r"services\.Add(?:Scoped|Transient|Singleton)")],
+        "entry_points": [re.compile(r"static\s+(?:async\s+)?(?:Task\s+)?(?:void\s+)?Main\s*\(")],
+        "routes": [
+            re.compile(r'\[(?:Http(?:Get|Post|Put|Delete|Patch)|Route)\s*\(\s*["\']([^"\']+)["\']'),
+        ],
+    },
+    "typescript": {
+        "imports": [
+            re.compile(r"import\s+\{([^}]+)\}\s+from\s+['\"]([^'\"]+)['\"]"),
+            re.compile(r"import\s+(\w+)\s+from\s+['\"]([^'\"]+)['\"]"),
+        ],
+        "provides_class": [
+            re.compile(r"export\s+(?:class|function|interface|type|const|enum)\s+(\w+)"),
+        ],
+        "di": [re.compile(r"@Injectable\s*\("), re.compile(r"container\.bind\(")],
+        "entry_points": [
+            re.compile(r"app\.listen\s*\("),
+            re.compile(r"createServer\s*\("),
+            re.compile(r"bootstrap\s*\(\s*\)"),
+        ],
+        "routes": [
+            re.compile(r"@(?:Get|Post|Put|Delete|Patch)\s*\(\s*['\"]([^'\"]+)['\"]"),
+            re.compile(r"(?:app|router)\.(?:get|post|put|delete|patch)\s*\(\s*['\"]([^'\"]+)['\"]"),
+        ],
+    },
+    "javascript": {},  # Populated below
+}
+# JS shares TS patterns
+_CONTRACT_PATTERNS["javascript"] = _CONTRACT_PATTERNS["typescript"]
+
+
+def _extract_contract_cards(
+    all_mvp_files: Dict[str, List[Dict]],
+) -> List[Dict]:
+    """Extract contract cards from all MVP transform outputs.
+
+    Language-agnostic regex extraction of provides/consumes/routes/DI
+    from each MVP's generated files.
+
+    Args:
+        all_mvp_files: {mvp_name: [output_file_dict, ...]}
+
+    Returns:
+        List of per-file contract cards.
+    """
+    cards: List[Dict] = []
+
+    for mvp_name, files in all_mvp_files.items():
+        for fd in files:
+            fp = fd.get("file_path", "unknown")
+            content = fd.get("content", "")
+            lang = (fd.get("language", "") or _guess_language(fp)).lower()
+            if not content:
+                continue
+
+            # Resolve pattern set — fall back to all patterns combined
+            patterns = _CONTRACT_PATTERNS.get(lang, {})
+            if not patterns:
+                # Try to match by extension patterns
+                for plang, ppats in _CONTRACT_PATTERNS.items():
+                    if plang in lang:
+                        patterns = ppats
+                        break
+
+            provides: List[str] = []
+            consumes: List[str] = []
+            routes: List[str] = []
+            di_registrations: List[str] = []
+            entry_points: List[str] = []
+
+            # Provides (classes, functions, interfaces)
+            for pat in patterns.get("provides_class", []):
+                provides.extend(pat.findall(content))
+            for pat in patterns.get("provides_func", []):
+                # Exclude __dunder__ methods and test_ functions
+                for m in pat.findall(content):
+                    if not m.startswith("_") and not m.startswith("test_"):
+                        provides.append(m)
+
+            # Consumes (imports)
+            for pat in patterns.get("imports", []):
+                matches = pat.findall(content)
+                for m in matches:
+                    # findall may return tuples for multi-group patterns
+                    if isinstance(m, tuple):
+                        consumes.extend(part.strip() for part in m if part.strip())
+                    else:
+                        consumes.append(m.strip())
+
+            # Routes
+            for pat in patterns.get("routes", []):
+                routes.extend(pat.findall(content))
+
+            # DI registrations
+            for pat in patterns.get("di", []):
+                di_registrations.extend(pat.findall(content) or [pat.pattern[:30]])
+
+            # Entry points
+            for pat in patterns.get("entry_points", []):
+                if pat.search(content):
+                    entry_points.append(pat.pattern[:50])
+
+            cards.append({
+                "mvp_name": mvp_name,
+                "file_path": fp,
+                "language": lang,
+                "provides": list(set(provides)),
+                "consumes": list(set(consumes)),
+                "routes": list(set(routes)),
+                "di_registrations": di_registrations,
+                "entry_points": entry_points,
+            })
+
+    return cards
+
+
+def _build_cross_reference_matrix(cards: List[Dict]) -> Dict:
+    """Build cross-reference matrix from contract cards using pure set operations.
+
+    Zero LLM involvement — deterministic gap detection.
+    """
+    # Index by MVP
+    provides_by_mvp: Dict[str, set] = {}
+    consumes_by_mvp: Dict[str, set] = {}
+    all_provides: set = set()
+    entry_points_all: List[Dict] = []
+    has_manifest = False
+    injectable_classes: set = set()
+    di_registered: set = set()
+
+    for card in cards:
+        mvp = card["mvp_name"]
+
+        # Provides
+        pvd = set(card.get("provides", []))
+        provides_by_mvp.setdefault(mvp, set()).update(pvd)
+        all_provides.update(pvd)
+
+        # Consumes — extract just the symbol name (last segment of import path)
+        raw_consumes = card.get("consumes", [])
+        cleaned = set()
+        for c in raw_consumes:
+            # "com.example.UserService" → "UserService"
+            # "./services/UserService" → "UserService"
+            parts = re.split(r"[./\\]", c)
+            last = parts[-1].strip() if parts else c.strip()
+            if last and not last.startswith(("@", "{", "}")):
+                cleaned.add(last)
+        consumes_by_mvp.setdefault(mvp, set()).update(cleaned)
+
+        # Entry points
+        if card.get("entry_points"):
+            entry_points_all.append({
+                "mvp_name": mvp,
+                "file_path": card["file_path"],
+                "patterns": card["entry_points"],
+            })
+
+        # Manifest detection
+        fp_lower = card["file_path"].lower()
+        if fp_lower in ("package.json", "pom.xml", "requirements.txt") or fp_lower.endswith(".csproj"):
+            has_manifest = True
+
+        # DI tracking
+        if card.get("di_registrations"):
+            injectable_classes.update(card.get("provides", []))
+        # Look for container.bind() or services.Add() patterns
+        for reg in card.get("di_registrations", []):
+            if isinstance(reg, str):
+                di_registered.add(reg)
+
+    # Unresolved imports: what each MVP consumes that no other MVP provides
+    unresolved: List[Dict] = []
+    for mvp, consumes in consumes_by_mvp.items():
+        own_provides = provides_by_mvp.get(mvp, set())
+        other_provides = all_provides - own_provides
+        # Also exclude well-known stdlib/framework modules
+        for symbol in consumes - other_provides - own_provides:
+            # Skip single-char or all-lowercase likely stdlib names
+            if len(symbol) <= 2:
+                continue
+            unresolved.append({
+                "consumer_mvp": mvp,
+                "import_ref": symbol,
+            })
+
+    # Duplicate exports: symbols provided by 2+ MVPs
+    duplicates: List[Dict] = []
+    symbol_to_mvps: Dict[str, List[str]] = {}
+    for mvp, pvd in provides_by_mvp.items():
+        for s in pvd:
+            symbol_to_mvps.setdefault(s, []).append(mvp)
+    for s, mvps in symbol_to_mvps.items():
+        if len(mvps) > 1:
+            duplicates.append({"symbol": s, "mvps": mvps})
+
+    # Partial DI
+    partial_di: List[str] = sorted(injectable_classes - di_registered)
+
+    return {
+        "unresolved_imports": unresolved,
+        "duplicate_exports": duplicates,
+        "entry_point_count": len(entry_points_all),
+        "entry_points": entry_points_all,
+        "missing_manifest": not has_manifest,
+        "partial_di": partial_di,
+        "provides_by_mvp": {k: sorted(v) for k, v in provides_by_mvp.items()},
+        "total_provides": len(all_provides),
+        "total_consumes": sum(len(v) for v in consumes_by_mvp.values()),
+    }
+
+
+def _check_requirements_coverage(
+    all_mvp_analysis: Dict[str, Any],
+    all_provides: set,
+) -> Dict:
+    """Check functional requirements coverage against generated code.
+
+    Extracts key entity nouns from each MVP's analysis_output and checks
+    if they appear in the provides set from contract cards.
+
+    Args:
+        all_mvp_analysis: {mvp_name: analysis_output_dict_or_str}
+        all_provides: union of all provides symbols across all MVPs
+
+    Returns:
+        {uncovered_requirements: [{text, source_mvp}], coverage_ratio}
+    """
+    import json as _json
+
+    provides_lower = {p.lower() for p in all_provides}
+    uncovered: List[Dict] = []
+    total_reqs = 0
+    covered_count = 0
+
+    for mvp_name, analysis in all_mvp_analysis.items():
+        # Extract requirements text from analysis_output
+        reqs_text = ""
+        if isinstance(analysis, dict):
+            # Look for functional requirements register in various keys
+            for key in ("functional_requirements", "requirements", "register",
+                        "business_rules", "output"):
+                if key in analysis:
+                    val = analysis[key]
+                    reqs_text += _json.dumps(val) if isinstance(val, (dict, list)) else str(val)
+                    reqs_text += "\n"
+            if not reqs_text and analysis:
+                reqs_text = _json.dumps(analysis)
+        elif isinstance(analysis, str):
+            reqs_text = analysis
+
+        if not reqs_text:
+            continue
+
+        # Extract key entities (capitalised words, likely class/service names)
+        # Pattern: 2+ word sequences starting with uppercase
+        entity_pattern = re.compile(r"\b([A-Z][a-zA-Z]{2,}(?:Service|Controller|Repository|Manager|Handler|Factory|Gateway|Provider|Adapter|Client|Engine|Processor|Orchestrator|Builder)?)\b")
+        entities = set(entity_pattern.findall(reqs_text))
+
+        for entity in entities:
+            total_reqs += 1
+            if entity.lower() in provides_lower:
+                covered_count += 1
+            else:
+                # Only report if it looks like a service/class name (not generic words)
+                if any(suffix in entity for suffix in (
+                    "Service", "Controller", "Repository", "Manager",
+                    "Handler", "Factory", "Gateway", "Provider",
+                    "Adapter", "Client", "Engine", "Processor",
+                    "Orchestrator", "Builder",
+                )):
+                    uncovered.append({
+                        "text": entity,
+                        "source_mvp": mvp_name,
+                    })
+
+    coverage_ratio = round(covered_count / total_reqs, 3) if total_reqs else 1.0
+
+    return {
+        "uncovered_requirements": uncovered,
+        "coverage_ratio": coverage_ratio,
+        "total_entities_checked": total_reqs,
+        "covered_count": covered_count,
+    }
+
+
+# ── Integration Transform (MVP 99) ────────────────────────────────────
+
+def _execute_integration_transform(
+    plan: Dict,
+    prev: Dict[int, str],
+    ctx: "MigrationContextBuilder",
+    budget: int,
+    mvp_context: Optional[Dict] = None,
+    all_mvp_transform_outputs: Optional[Dict[str, List[Dict]]] = None,
+    all_mvp_analysis_outputs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Integration Transform for MVP 99 — three-pass architecture.
+
+    Pass 1: Deterministic contract card extraction + cross-reference matrix
+    Pass 2: Requirements coverage check
+    Pass 3: LLM resolves pre-computed gaps
+    Verify: Re-run Pass 1 on combined output → gap report
+    """
+    if not all_mvp_transform_outputs:
+        return {
+            "output": "Integration skipped: no MVP transform outputs available.",
+            "output_files": [],
+        }
+
+    # ── Pass 1: Contract cards + cross-reference matrix ──
+    cards = _extract_contract_cards(all_mvp_transform_outputs)
+    cross_ref = _build_cross_reference_matrix(cards)
+
+    logger.info(
+        "Integration Pass 1: %d contract cards, %d unresolved imports, "
+        "%d duplicate exports, %d entry points, manifest=%s",
+        len(cards),
+        len(cross_ref["unresolved_imports"]),
+        len(cross_ref["duplicate_exports"]),
+        cross_ref["entry_point_count"],
+        "present" if not cross_ref["missing_manifest"] else "MISSING",
+    )
+
+    # Fix 4: Collect all external packages across all MVPs for package.json generation
+    import re as _re_pkg
+    _imp_re = _re_pkg.compile(r'''import\s+.*?\s+from\s+['"]([^'"./][^'"]*?)['"]''')
+    _builtins = {'path', 'fs', 'os', 'util', 'crypto', 'http', 'https', 'stream', 'events', 'url', 'buffer'}
+    _all_pkgs: set = set()
+    for _mvp_files in all_mvp_transform_outputs.values():
+        for _f in _mvp_files:
+            if _f.get("language") in ("typescript", "javascript"):
+                for _m in _imp_re.finditer(_f.get("content", "")):
+                    _raw = _m.group(1)
+                    _pkg = '/'.join(_raw.split('/')[:2]) if _raw.startswith('@') else _raw.split('/')[0]
+                    if _pkg not in _builtins:
+                        _all_pkgs.add(_pkg)
+    cross_ref["all_external_packages"] = sorted(_all_pkgs)
+    logger.info("Integration Pass 1: detected %d unique external packages", len(_all_pkgs))
+
+    # ── Pass 2: Requirements coverage ──
+    all_provides = set()
+    for mvp_provides in cross_ref.get("provides_by_mvp", {}).values():
+        all_provides.update(mvp_provides)
+
+    req_coverage = _check_requirements_coverage(
+        all_mvp_analysis_outputs or {}, all_provides,
+    )
+
+    logger.info(
+        "Integration Pass 2: requirements coverage=%.1f%%, "
+        "%d uncovered requirements",
+        req_coverage["coverage_ratio"] * 100,
+        len(req_coverage["uncovered_requirements"]),
+    )
+
+    # ── Pass 3: LLM integration review ──
+    # Build architecture context from previous outputs
+    architecture_output = prev.get(1, "") or prev.get(2, "") or ""
+    if len(architecture_output) > 8000:
+        architecture_output = architecture_output[:8000] + "\n... [truncated]"
+
+    # Fix 4: Build enriched file listing with provides from contract cards
+    card_by_file: Dict[str, Dict] = {c.get("file_path", ""): c for c in cards}
+    mvp_listing_parts: List[str] = []
+    for mvp_name, files in all_mvp_transform_outputs.items():
+        file_summaries = []
+        for fd in files[:30]:
+            fp = fd.get("file_path", "unknown")
+            card = card_by_file.get(fp, {})
+            provides = card.get("provides", [])
+            provides_str = f"  → {', '.join(provides[:4])}" if provides else ""
+            file_summaries.append(f"    - {fp}{provides_str}")
+        mvp_listing_parts.append(
+            f"  **{mvp_name}** ({len(files)} files):\n" + "\n".join(file_summaries)
+        )
+    mvp_file_listing = "\n".join(mvp_listing_parts)
+
+    prompt = prompts.integration_review_prompt(
+        architecture_output=architecture_output,
+        cross_ref_matrix=cross_ref,
+        requirements_coverage=req_coverage,
+        target_stack=plan.get("target_stack", {}),
+        mvp_file_listing=mvp_file_listing,
+    )
+
+    raw = _call_llm(prompt, context_type="generation", max_tokens=16_384)
+    output_files = _parse_json_files(raw)
+
+    if not output_files and raw:
+        logger.warning(
+            "Integration review parse failed (%d chars). Retrying with JSON instruction.",
+            len(raw),
+        )
+        retry_prompt = (
+            "Your previous response contained code but was not in the required JSON format.\n\n"
+            "Reformat your ENTIRE response as a JSON array. Each element must have:\n"
+            '{"file_path": "src/...", "content": "...", "language": "typescript"}\n\n'
+            "Previous response to reformat:\n\n" + raw[:30_000]
+        )
+        retry_raw = _call_llm(retry_prompt, context_type="generation", max_tokens=16_384)
+        output_files = _parse_json_files(retry_raw)
+
+    # ── Verification pass: re-check combined output ──
+    gap_report: Dict = {}
+    if output_files:
+        # Combine all MVP files + integration files for re-check
+        combined: Dict[str, List[Dict]] = dict(all_mvp_transform_outputs)
+        combined["MVP 99 \u2014 Integration"] = output_files
+
+        verify_cards = _extract_contract_cards(combined)
+        verify_matrix = _build_cross_reference_matrix(verify_cards)
+
+        resolved_count = (
+            len(cross_ref["unresolved_imports"])
+            - len(verify_matrix["unresolved_imports"])
+        )
+
+        gap_report = {
+            "remaining_unresolved": verify_matrix["unresolved_imports"],
+            "remaining_duplicates": verify_matrix["duplicate_exports"],
+            "entry_point_count_after": verify_matrix["entry_point_count"],
+            "manifest_present_after": not verify_matrix["missing_manifest"],
+            "resolved_count": resolved_count,
+            "total_gaps_before": len(cross_ref["unresolved_imports"]),
+        }
+
+        logger.info(
+            "Integration verification: resolved %d/%d unresolved imports, "
+            "%d remaining, entry_points=%d",
+            resolved_count,
+            len(cross_ref["unresolved_imports"]),
+            len(verify_matrix["unresolved_imports"]),
+            verify_matrix["entry_point_count"],
+        )
+
+    output_text = (
+        f"Integration Transform: generated {len(output_files)} integration file(s)."
+    )
+    if gap_report:
+        output_text += (
+            f"\nResolved {gap_report.get('resolved_count', 0)}/"
+            f"{gap_report.get('total_gaps_before', 0)} gaps."
+        )
+        remaining = len(gap_report.get("remaining_unresolved", []))
+        if remaining:
+            output_text += f"\n{remaining} unresolved imports remain (see gap_report)."
+
+    # Run stub check on integration output too
+    stub_quality = _check_stub_quality(output_files) if output_files else {}
+
+    # Fix 2: Deterministic post-pass — patch DI container + package.json
+    if output_files:
+        output_files = _post_transform_consolidate(
+            all_mvp_transform_outputs, output_files, plan.get("target_stack", {})
+        )
+
+    return {
+        "output": output_text,
+        "output_files": output_files,
+        "stub_quality": stub_quality,
+        "integration_metadata": {
+            "cross_ref_matrix": cross_ref,
+            "requirements_coverage": req_coverage,
+            "gap_report": gap_report,
+        },
+    }
+
+
+def _post_transform_consolidate(
+    all_mvp_outputs: Dict[str, List[Dict]],
+    integration_files: List[Dict],
+    target_stack: Dict,
+) -> List[Dict]:
+    """Fix 2: Deterministic post-pass after integration LLM transform.
+
+    Scans all generated files and patches:
+    1. container.ts — adds any @injectable()/@singleton() classes not yet bound
+    2. package.json — adds any external imports not yet declared as dependencies
+    """
+    import re as _re
+    import json as _json
+
+    injectable_re = _re.compile(r'@(?:injectable|singleton)\(\)', _re.MULTILINE)
+    class_re = _re.compile(r'(?:export\s+)?(?:abstract\s+)?class\s+(\w+)')
+    import_re = _re.compile(r'''import\s+.*?\s+from\s+['"]([^'"./][^'"]*?)['"]''')
+    known_builtins = {
+        'path', 'fs', 'os', 'util', 'crypto', 'http', 'https',
+        'stream', 'events', 'url', 'buffer', 'assert', 'child_process',
+    }
+
+    # ── Collect all @injectable/@singleton class names ──
+    all_injectable: List[str] = []
+    for mvp_files in all_mvp_outputs.values():
+        for f in mvp_files:
+            content = f.get("content", "")
+            if injectable_re.search(content):
+                for m in class_re.finditer(content):
+                    all_injectable.append(m.group(1))
+    for f in integration_files:
+        content = f.get("content", "")
+        if injectable_re.search(content):
+            for m in class_re.finditer(content):
+                all_injectable.append(m.group(1))
+
+    # ── Collect all external package imports ──
+    external_pkgs: set = set()
+    for mvp_files in all_mvp_outputs.values():
+        for f in mvp_files:
+            if f.get("language") in ("typescript", "javascript"):
+                for m in import_re.finditer(f.get("content", "")):
+                    raw = m.group(1)
+                    pkg = '/'.join(raw.split('/')[:2]) if raw.startswith('@') else raw.split('/')[0]
+                    if pkg not in known_builtins:
+                        external_pkgs.add(pkg)
+    for f in integration_files:
+        if f.get("language") in ("typescript", "javascript"):
+            for m in import_re.finditer(f.get("content", "")):
+                raw = m.group(1)
+                pkg = '/'.join(raw.split('/')[:2]) if raw.startswith('@') else raw.split('/')[0]
+                if pkg not in known_builtins:
+                    external_pkgs.add(pkg)
+
+    amended = list(integration_files)
+
+    # ── Patch container.ts: add missing DI bindings ──
+    container_idx = next(
+        (i for i, f in enumerate(amended) if 'container' in f.get('file_path', '').lower()),
+        None,
+    )
+    if container_idx is not None and all_injectable:
+        existing = amended[container_idx]['content']
+        unregistered = [c for c in all_injectable if c not in existing]
+        if unregistered:
+            bindings = '\n'.join(
+                f'container.registerSingleton({c}, {c});' for c in unregistered
+            )
+            amended[container_idx] = dict(amended[container_idx])
+            amended[container_idx]['content'] = (
+                existing.rstrip().rstrip('}').rstrip()
+                + f'\n\n// Auto-patched by post-transform consolidation\n{bindings}\n}}\n'
+            )
+            logger.info(
+                "Post-transform: patched %d missing DI bindings into container.ts: %s",
+                len(unregistered),
+                ', '.join(unregistered[:10]),
+            )
+
+    # ── Patch package.json: add missing dependencies ──
+    pkg_idx = next(
+        (i for i, f in enumerate(amended) if f.get('file_path', '').endswith('package.json')),
+        None,
+    )
+    if pkg_idx is not None and external_pkgs:
+        try:
+            pkg_data = _json.loads(amended[pkg_idx]['content'])
+            have = (
+                set(pkg_data.get('dependencies', {}).keys())
+                | set(pkg_data.get('devDependencies', {}).keys())
+            )
+            missing = external_pkgs - have
+            if missing:
+                pkg_data.setdefault('dependencies', {})
+                for p in sorted(missing):
+                    pkg_data['dependencies'][p] = '*'
+                amended[pkg_idx] = dict(amended[pkg_idx])
+                amended[pkg_idx]['content'] = _json.dumps(pkg_data, indent=2)
+                logger.info(
+                    "Post-transform: added %d missing packages to package.json: %s",
+                    len(missing),
+                    ', '.join(sorted(missing)[:15]),
+                )
+        except Exception as exc:
+            logger.warning("Post-transform: could not patch package.json: %s", exc)
+
+    return amended
