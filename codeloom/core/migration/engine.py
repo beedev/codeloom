@@ -2459,6 +2459,21 @@ class MigrationEngine:
                     if mvp.analysis_output:
                         plan_data["_analysis_output"] = mvp.analysis_output.get("output", "")
 
+            # For agentic test phases: inject transform output files so the agent
+            # knows exactly what files were generated and needs tests.
+            # Without this the agent only sees "Generated N files. See output_files."
+            # and has no way to discover what was created.
+            context_type_peek = get_phase_type(phase_number, version) if version == 2 else None
+            if context_type_peek == "test" and mvp_id:
+                transform_phase_num = 3 if version == 2 else 5
+                transform_phase = self._get_phase(session, pid, transform_phase_num, mvp_id)
+                if transform_phase and transform_phase.output_files:
+                    plan_data["_transform_output_files"] = transform_phase.output_files
+                    logger.info(
+                        "Agentic test phase: injected %d transform files into plan_data for MVP %s",
+                        len(transform_phase.output_files), mvp_id,
+                    )
+
         context_type = get_phase_type(phase_number, version) if version == 2 else None
         started_at = datetime.utcnow()
         execution_start = time.monotonic()
@@ -2502,10 +2517,14 @@ class MigrationEngine:
             with self._db.get_session() as session:
                 phase = self._get_phase(session, pid, phase_number, mvp_id)
                 if phase:
-                    if captured_output or output_files:
-                        phase.status = "complete"
+                    # For transform/test phases, "complete" requires at least 1 output file.
+                    # An agent returning "[]" (2 chars, valid JSON, 0 files) is an error,
+                    # not a successful completion.
+                    eff_type_check = context_type or get_phase_type(phase_number, version)
+                    if eff_type_check in ("transform", "test"):
+                        phase.status = "complete" if output_files else "error"
                     else:
-                        phase.status = "error"
+                        phase.status = "complete" if captured_output else "error"
                     phase.output = captured_output if not output_files else (
                         f"Generated {len(output_files)} file(s). See output_files."
                     )
