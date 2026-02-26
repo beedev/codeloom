@@ -2443,10 +2443,13 @@ def _execute_integration_transform(
     # Run stub check on integration output too
     stub_quality = _check_stub_quality(output_files) if output_files else {}
 
-    # Fix 2: Deterministic post-pass — patch DI container + package.json
+    # Round 9: Lane-agnostic DI generation + package.json patch
     if output_files:
         output_files = _post_transform_consolidate(
-            all_mvp_transform_outputs, output_files, plan.get("target_stack", {})
+            all_mvp_transform_outputs,
+            output_files,
+            plan.get("target_stack", {}),
+            plan=plan,
         )
 
     return {
@@ -2461,86 +2464,382 @@ def _execute_integration_transform(
     }
 
 
+# ── DI Framework Detection + Lane-Agnostic Generators ─────────────────────
+
+
+def _detect_di_framework(
+    all_files: List[Dict],
+    plan: Optional[Dict] = None,
+) -> str:
+    """Detect DI framework from generated code signatures.
+
+    Priority order:
+    1. Code signatures in generated files (most reliable — what did the LLM produce?)
+    2. BaseLane.di_framework override (optional per-lane declaration)
+    3. target_stack.frameworks / .languages keywords (secondary signal)
+
+    Returns one of: "tsyringe" | "spring" | "microsoft_di" | "nestjs" | "inversify" | "none"
+    """
+    import re as _re
+
+    # Aggregate content by language for fast scanning
+    java_content = ""
+    csharp_content = ""
+    ts_content = ""
+    for f in all_files:
+        lang = (f.get("language") or "").lower()
+        c = f.get("content", "")
+        if lang == "java":
+            java_content += c
+        elif lang in ("csharp", "c#"):
+            csharp_content += c
+        elif lang in ("typescript", "javascript"):
+            ts_content += c
+
+    # ── 1. Code-signature detection (highest priority) ──
+    # NestJS: @Module decorator (check before tsyringe — both use @Injectable)
+    if _re.search(r'@Module\s*\(', ts_content):
+        return "nestjs"
+    # InversifyJS: container.bind() is distinctive
+    if _re.search(r'container\.bind\s*\(', ts_content):
+        return "inversify"
+    # tsyringe: @injectable()/@singleton() decorators
+    if _re.search(r'@(?:injectable|singleton)\s*\(\s*\)', ts_content, _re.IGNORECASE):
+        return "tsyringe"
+    # Angular: @NgModule providers (no separate container needed)
+    if _re.search(r'providers\s*:\s*\[', ts_content) and _re.search(r'@NgModule', ts_content):
+        return "none"
+    # Spring Boot (Java)
+    if _re.search(r'@(?:Service|Component|Repository|Controller|Bean|Autowired)\b', java_content):
+        return "spring"
+    # .NET Core / ASP.NET Core
+    if _re.search(r'services\.Add(?:Scoped|Transient|Singleton)', csharp_content):
+        return "microsoft_di"
+    if _re.search(r'public\s+class\s+\w+\s*:\s*I\w+', csharp_content):
+        return "microsoft_di"
+
+    # ── 2. BaseLane.di_framework property (optional override) ──
+    if plan:
+        try:
+            from .lanes import LaneRegistry
+            asset_strategies = plan.get("asset_strategies") or {}
+            lane_ids: set = set()
+            for spec in asset_strategies.values():
+                if isinstance(spec, dict):
+                    if spec.get("lane_id"):
+                        lane_ids.add(spec["lane_id"])
+                    for st in (spec.get("sub_types") or {}).values():
+                        if isinstance(st, dict) and st.get("lane_id"):
+                            lane_ids.add(st["lane_id"])
+            if not lane_ids and plan.get("migration_lane_id"):
+                lane_ids.add(plan["migration_lane_id"])
+            for lid in lane_ids:
+                lane = LaneRegistry.get_lane(lid)
+                if lane and getattr(lane, "di_framework", None):
+                    return lane.di_framework  # type: ignore[return-value]
+        except Exception:
+            pass
+
+    # ── 3. target_stack hints (fallback) ──
+    if plan:
+        ts_data = plan.get("target_stack") or {}
+        fw = [f.lower() for f in ts_data.get("frameworks", [])]
+        lang = [ll.lower() for ll in ts_data.get("languages", [])]
+        if any("spring" in f or "springboot" in f for f in fw):
+            return "spring"
+        if any(k in f for f in fw for k in ("dotnet", ".net", "aspnet")):
+            return "microsoft_di"
+        if "nestjs" in fw or "nest" in fw:
+            return "nestjs"
+        if any(k in f for f in fw for k in ("express", "koa", "fastify", "node")):
+            return "tsyringe"
+        if "java" in lang:
+            return "spring"
+        if "csharp" in lang or "c#" in lang:
+            return "microsoft_di"
+        if "typescript" in lang or "javascript" in lang:
+            return "tsyringe"
+
+    return "none"
+
+
+def _gen_tsyringe_container(all_files: List[Dict]) -> Optional[Dict]:
+    """Generate a complete tsyringe container.ts from scratch.
+
+    Uses line-by-line lookahead to match each @injectable()/@singleton()
+    decorator to the class declared in the next 1-5 lines.  This avoids
+    the "collect all classes in decorated file" bug from the old patch approach.
+    """
+    import re as _re
+    _dec_re = _re.compile(r'@(?:injectable|singleton)\s*\(\s*\)', _re.IGNORECASE)
+    _cls_re = _re.compile(r'(?:export\s+)?(?:abstract\s+)?class\s+(\w+)')
+
+    injectable: Dict[str, str] = {}   # {ClassName: import_path}
+    for f in all_files:
+        if (f.get("language") or "").lower() not in ("typescript", "javascript"):
+            continue
+        fp = f.get("file_path", "")
+        lines = f.get("content", "").splitlines()
+        for i, line in enumerate(lines):
+            if _dec_re.search(line):
+                # Look ahead up to 5 lines for the decorated class name
+                for j in range(i + 1, min(i + 6, len(lines))):
+                    m = _cls_re.search(lines[j])
+                    if m:
+                        cls = m.group(1)
+                        # Build relative import path without extension
+                        imp = fp
+                        if imp.startswith("src/"):
+                            imp = "./" + imp[4:]
+                        for ext in (".ts", ".js"):
+                            if imp.endswith(ext):
+                                imp = imp[:-len(ext)]
+                                break
+                        injectable[cls] = imp
+                        break   # one class per decorator occurrence
+
+    if not injectable:
+        return None
+
+    out: List[str] = [
+        "import 'reflect-metadata';",
+        "import { container } from 'tsyringe';",
+        "",
+    ]
+    for cls, path in sorted(injectable.items(), key=lambda x: x[1]):
+        out.append(f"import {{ {cls} }} from '{path}';")
+    out += [
+        "",
+        "// DI registrations — auto-generated by CodeLoom post-transform pass",
+    ]
+    for cls in sorted(injectable):
+        out.append(f"container.registerSingleton({cls}, {cls});")
+    out += ["", "export { container };", ""]
+
+    logger.info(
+        "Post-transform [tsyringe]: generated container.ts with %d bindings: %s",
+        len(injectable),
+        ", ".join(sorted(injectable)[:10]),
+    )
+    return {"file_path": "src/container.ts", "language": "typescript",
+            "content": "\n".join(out)}
+
+
+def _gen_spring_bootstrap(all_files: List[Dict]) -> Optional[Dict]:
+    """Verify @SpringBootApplication exists; generate Application.java if missing.
+
+    Spring Boot uses classpath component scanning — no explicit container file
+    is needed.  We just ensure the entry-point annotation is present.
+    """
+    import re as _re
+    for f in all_files:
+        if (f.get("language") or "").lower() == "java":
+            if _re.search(r'@SpringBootApplication', f.get("content", "")):
+                return None  # Already present — nothing to do
+
+    # Not found — generate a minimal Application.java
+    pkg = "com.example.app"
+    for f in all_files:
+        if (f.get("language") or "").lower() == "java":
+            m = _re.search(r'^package\s+([\w.]+)\s*;', f.get("content", ""), _re.MULTILINE)
+            if m:
+                parts = m.group(1).split(".")
+                pkg = ".".join(parts[:3]) if len(parts) >= 3 else m.group(1)
+                break
+
+    content = (
+        f"package {pkg};\n\n"
+        "import org.springframework.boot.SpringApplication;\n"
+        "import org.springframework.boot.autoconfigure.SpringBootApplication;\n\n"
+        "@SpringBootApplication\n"
+        "public class Application {\n"
+        "    public static void main(String[] args) {\n"
+        "        SpringApplication.run(Application.class, args);\n"
+        "    }\n"
+        "}\n"
+    )
+    pkg_path = pkg.replace(".", "/")
+    logger.info("Post-transform [spring]: generated Application.java (package=%s)", pkg)
+    return {"file_path": f"src/main/java/{pkg_path}/Application.java",
+            "language": "java", "content": content}
+
+
+def _gen_dotnet_program(all_files: List[Dict]) -> Optional[Dict]:
+    """Generate Program.cs with services.AddScoped<IFoo, Foo> for all class:IFoo pairs.
+
+    Scans C# files for public class Foo : IFoo declarations.  Skips classes
+    that are already registered in an existing Startup/Program file.
+    """
+    import re as _re
+    _pair_re = _re.compile(r'public\s+class\s+(\w+)\s*:\s*(I\w+)')
+    _existing_re = _re.compile(
+        r'services\.Add(?:Scoped|Transient|Singleton)\s*<\s*\w+\s*,\s*(\w+)\s*>'
+    )
+    registered: set = set()
+    pairs: list = []
+    for f in all_files:
+        if (f.get("language") or "").lower() not in ("csharp", "c#"):
+            continue
+        c = f.get("content", "")
+        if "ConfigureServices" in c or "builder.Services" in c:
+            for m in _existing_re.finditer(c):
+                registered.add(m.group(1))
+        for m in _pair_re.finditer(c):
+            cls, iface = m.group(1), m.group(2)
+            if iface.startswith("I") and len(iface) > 1:
+                pairs.append((iface, cls))
+
+    new_pairs = list({(i, c) for i, c in pairs if c not in registered})
+    if not new_pairs:
+        return None
+
+    reg = "\n".join(
+        f"builder.Services.AddScoped<{i}, {c}>();"
+        for i, c in sorted(new_pairs, key=lambda x: x[1])
+    )
+    content = (
+        "// Program.cs — auto-generated by CodeLoom post-transform pass\n"
+        "var builder = WebApplication.CreateBuilder(args);\n\n"
+        f"// Service registrations\n{reg}\n\n"
+        "builder.Services.AddControllers();\n"
+        "builder.Services.AddEndpointsApiExplorer();\n"
+        "builder.Services.AddSwaggerGen();\n\n"
+        "var app = builder.Build();\n"
+        "app.UseHttpsRedirection();\n"
+        "app.UseAuthorization();\n"
+        "app.MapControllers();\n"
+        "app.Run();\n"
+    )
+    logger.info("Post-transform [microsoft_di]: generated Program.cs with %d registrations",
+                len(new_pairs))
+    return {"file_path": "src/Program.cs", "language": "csharp", "content": content}
+
+
+def _gen_nestjs_module(all_files: List[Dict]) -> Optional[Dict]:
+    """Generate AppModule.ts importing all detected @Module()-decorated modules.
+
+    Used for NestJS migrations — NestJS uses module-based DI, so a root
+    AppModule that imports all feature modules is the equivalent of a container.
+    """
+    import re as _re
+    _mod_re = _re.compile(r'@Module\s*\(')
+    _cls_re = _re.compile(r'(?:export\s+)?class\s+(\w+Module)\b')
+    modules: Dict[str, str] = {}   # {ModuleName: import_path}
+    for f in all_files:
+        if (f.get("language") or "").lower() not in ("typescript", "javascript"):
+            continue
+        c = f.get("content", "")
+        if not _mod_re.search(c):
+            continue
+        fp = f.get("file_path", "")
+        imp = fp
+        if imp.startswith("src/"):
+            imp = "./" + imp[4:]
+        for ext in (".ts", ".js"):
+            if imp.endswith(ext):
+                imp = imp[:-len(ext)]
+                break
+        for m in _cls_re.finditer(c):
+            modules[m.group(1)] = imp
+
+    # Return None if an AppModule already exists (nothing to do)
+    if any("app" in name.lower() for name in modules):
+        return None
+    if not modules:
+        return None
+
+    imports_str = "\n".join(
+        f"import {{ {n} }} from '{p}';" for n, p in sorted(modules.items(), key=lambda x: x[1])
+    )
+    mod_list = ", ".join(sorted(modules.keys()))
+    content = (
+        "import { Module } from '@nestjs/common';\n"
+        f"{imports_str}\n\n"
+        "@Module({\n"
+        f"  imports: [{mod_list}],\n"
+        "})\n"
+        "export class AppModule {}\n"
+    )
+    logger.info("Post-transform [nestjs]: generated AppModule.ts importing %d modules",
+                len(modules))
+    return {"file_path": "src/app.module.ts", "language": "typescript", "content": content}
+
+
+# DI generator dispatch table — add new frameworks here without touching any other code
+_DI_GENERATORS: Dict[str, Any] = {
+    "tsyringe":     _gen_tsyringe_container,
+    "spring":       _gen_spring_bootstrap,
+    "microsoft_di": _gen_dotnet_program,
+    "nestjs":       _gen_nestjs_module,
+    # "inversify": _gen_inversify_container,  # Add when InversifyJS lane is implemented
+}
+
+
 def _post_transform_consolidate(
     all_mvp_outputs: Dict[str, List[Dict]],
     integration_files: List[Dict],
     target_stack: Dict,
+    plan: Optional[Dict] = None,
 ) -> List[Dict]:
-    """Fix 2: Deterministic post-pass after integration LLM transform.
+    """Deterministic post-pass: generate DI container + patch package.json.
 
-    Scans all generated files and patches:
-    1. container.ts — adds any @injectable()/@singleton() classes not yet bound
-    2. package.json — adds any external imports not yet declared as dependencies
+    DI generation is framework-agnostic — detects the target DI framework
+    from code signatures in generated files, then dispatches to the correct
+    generator.  New frameworks: add a generator function + entry to _DI_GENERATORS.
+
+    package.json patching is unchanged — scans all TS/JS files for external
+    imports and adds any missing packages to dependencies.
     """
     import re as _re
     import json as _json
 
-    injectable_re = _re.compile(r'@(?:injectable|singleton)\(\)', _re.MULTILINE)
-    class_re = _re.compile(r'(?:export\s+)?(?:abstract\s+)?class\s+(\w+)')
+    # Flatten all files for detection and generation
+    all_files: List[Dict] = []
+    for files in all_mvp_outputs.values():
+        all_files.extend(files)
+    all_files.extend(integration_files)
+
+    amended = list(integration_files)
+
+    # ── DI container generation (lane-agnostic dispatch) ──
+    effective_plan = plan or {"target_stack": target_stack}
+    di_fw = _detect_di_framework(all_files, effective_plan)
+    logger.info("Post-transform: detected DI framework = %s", di_fw)
+
+    generator = _DI_GENERATORS.get(di_fw)
+    if generator:
+        new_file = generator(all_files)
+        if new_file:
+            fp = new_file["file_path"]
+            # Replace existing file with the same path, or append
+            idx = next((i for i, f in enumerate(amended)
+                        if f.get("file_path") == fp), None)
+            if idx is not None:
+                amended[idx] = new_file
+                logger.info("Post-transform [%s]: replaced %s", di_fw, fp)
+            else:
+                amended.append(new_file)
+                logger.info("Post-transform [%s]: appended new %s", di_fw, fp)
+        else:
+            logger.info("Post-transform [%s]: no container action needed (already complete)", di_fw)
+    else:
+        logger.info("Post-transform: no DI generator registered for '%s' — skipping", di_fw)
+
+    # ── package.json: add missing external dependencies (unchanged) ──
     import_re = _re.compile(r'''import\s+.*?\s+from\s+['"]([^'"./][^'"]*?)['"]''')
     known_builtins = {
         'path', 'fs', 'os', 'util', 'crypto', 'http', 'https',
         'stream', 'events', 'url', 'buffer', 'assert', 'child_process',
     }
-
-    # ── Collect all @injectable/@singleton class names ──
-    all_injectable: List[str] = []
-    for mvp_files in all_mvp_outputs.values():
-        for f in mvp_files:
-            content = f.get("content", "")
-            if injectable_re.search(content):
-                for m in class_re.finditer(content):
-                    all_injectable.append(m.group(1))
-    for f in integration_files:
-        content = f.get("content", "")
-        if injectable_re.search(content):
-            for m in class_re.finditer(content):
-                all_injectable.append(m.group(1))
-
-    # ── Collect all external package imports ──
     external_pkgs: set = set()
-    for mvp_files in all_mvp_outputs.values():
-        for f in mvp_files:
-            if f.get("language") in ("typescript", "javascript"):
-                for m in import_re.finditer(f.get("content", "")):
-                    raw = m.group(1)
-                    pkg = '/'.join(raw.split('/')[:2]) if raw.startswith('@') else raw.split('/')[0]
-                    if pkg not in known_builtins:
-                        external_pkgs.add(pkg)
-    for f in integration_files:
-        if f.get("language") in ("typescript", "javascript"):
+    for f in all_files:
+        if (f.get("language") or "").lower() in ("typescript", "javascript"):
             for m in import_re.finditer(f.get("content", "")):
                 raw = m.group(1)
                 pkg = '/'.join(raw.split('/')[:2]) if raw.startswith('@') else raw.split('/')[0]
                 if pkg not in known_builtins:
                     external_pkgs.add(pkg)
 
-    amended = list(integration_files)
-
-    # ── Patch container.ts: add missing DI bindings ──
-    container_idx = next(
-        (i for i, f in enumerate(amended) if 'container' in f.get('file_path', '').lower()),
-        None,
-    )
-    if container_idx is not None and all_injectable:
-        existing = amended[container_idx]['content']
-        unregistered = [c for c in all_injectable if c not in existing]
-        if unregistered:
-            bindings = '\n'.join(
-                f'container.registerSingleton({c}, {c});' for c in unregistered
-            )
-            amended[container_idx] = dict(amended[container_idx])
-            amended[container_idx]['content'] = (
-                existing.rstrip().rstrip('}').rstrip()
-                + f'\n\n// Auto-patched by post-transform consolidation\n{bindings}\n}}\n'
-            )
-            logger.info(
-                "Post-transform: patched %d missing DI bindings into container.ts: %s",
-                len(unregistered),
-                ', '.join(unregistered[:10]),
-            )
-
-    # ── Patch package.json: add missing dependencies ──
     pkg_idx = next(
         (i for i, f in enumerate(amended) if f.get('file_path', '').endswith('package.json')),
         None,

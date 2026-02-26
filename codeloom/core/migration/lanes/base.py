@@ -165,6 +165,21 @@ class MigrationLane(ABC):
         """
         ...
 
+    # ── DI Framework ──────────────────────────────────────────────
+
+    @property
+    def di_framework(self) -> Optional[str]:
+        """Optional: DI framework used in the target stack.
+
+        Return a framework ID to override code-pattern auto-detection, or
+        ``None`` (default) to let ``_detect_di_framework()`` infer it from
+        the generated file content.
+
+        Known IDs: ``"spring"``, ``"microsoft_di"``, ``"tsyringe"``,
+        ``"nestjs"``, ``"inversify"``.
+        """
+        return None
+
     # ── Lifecycle ─────────────────────────────────────────────────
 
     @property
