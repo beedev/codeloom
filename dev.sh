@@ -282,6 +282,70 @@ case "${1:-}" in
     build|b)
         build_all
         ;;
+    setup-mcp)
+        print_status "Registering CodeLoom MCP server with Claude Code CLI..."
+
+        if [ ! -f ".env" ]; then
+            print_error ".env file not found. Copy .env.example to .env first."
+            exit 1
+        fi
+
+        source .env 2>/dev/null || true
+
+        CODELOOM_DIR="$(cd "$(dirname "$0")" && pwd)"
+        MCP_CONFIG="$HOME/.claude/mcp.json"
+
+        # Ensure ~/.claude directory exists
+        mkdir -p "$HOME/.claude"
+
+        # Use Python in venv to safely merge JSON
+        if [ -d "venv" ]; then
+            source venv/bin/activate 2>/dev/null || true
+        fi
+        python3 - <<PYEOF
+import json, os, sys
+
+config_path = os.path.expanduser("~/.claude/mcp.json")
+existing = {}
+if os.path.exists(config_path):
+    try:
+        with open(config_path) as f:
+            existing = json.load(f)
+    except Exception:
+        pass
+
+codeloom_dir = "${CODELOOM_DIR}"
+db_url = "${DATABASE_URL:-postgresql://codeloom:codeloom@localhost:5432/codeloom_dev}"
+llm_provider = "${LLM_PROVIDER:-ollama}"
+
+entry = {
+    "codeloom": {
+        "command": sys.executable,
+        "args": ["-m", "codeloom.mcp"],
+        "cwd": codeloom_dir,
+        "env": {
+            "DATABASE_URL": db_url,
+            "LLM_PROVIDER": llm_provider,
+            "PYTHONPATH": codeloom_dir,
+            "PYTHONUNBUFFERED": "1",
+        }
+    }
+}
+
+# Merge mcpServers key (Claude Code uses "mcpServers" in mcp.json)
+if "mcpServers" not in existing:
+    existing["mcpServers"] = {}
+existing["mcpServers"].update(entry)
+
+with open(config_path, "w") as f:
+    json.dump(existing, f, indent=2)
+print(f"  ✓ MCP config written to {config_path}")
+print(f"  ✓ Server: codeloom → python -m codeloom.mcp")
+PYEOF
+
+        print_success "CodeLoom MCP server registered with Claude Code"
+        echo "  Next: Start a Claude Code session and run: /migrate"
+        ;;
     setup-tools)
         echo -e "\n${BLUE}Building optional enrichment tools...${NC}\n"
 
@@ -356,6 +420,7 @@ case "${1:-}" in
         echo "  status, st     Show status of all services"
         echo "  logs           Follow Docker container logs"
         echo "  setup-tools    Build optional Java/C# enrichment tools"
+        echo "  setup-mcp      Register CodeLoom MCP server with Claude Code CLI"
         echo ""
         echo "Database: PostgreSQL on localhost:5432 (shared by both modes)"
         echo ""

@@ -6,6 +6,7 @@ alembic==1.17.2
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anthropic>=0.75.0
+mcp>=1.0.0
 anyio==4.12.0
 appdirs==1.4.4
 asgiref==3.11.0

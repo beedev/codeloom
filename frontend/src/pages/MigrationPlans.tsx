@@ -15,6 +15,8 @@ import {
   Trash2,
   Clock,
   ChevronRight,
+  Terminal,
+  Copy,
 } from 'lucide-react';
 import { Layout } from '../components/Layout.tsx';
 import * as api from '../services/api.ts';
@@ -40,6 +42,7 @@ export function MigrationPlans() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [copiedPlanId, setCopiedPlanId] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setIsLoading(true);
@@ -69,6 +72,14 @@ export function MigrationPlans() {
     } catch {
       // Silently fail — plan stays in list
     }
+  }, []);
+
+  const handleCopyMigrateCmd = useCallback((planId: string) => {
+    const cmd = `claude /migrate --project ${planId}`;
+    navigator.clipboard.writeText(cmd).then(() => {
+      setCopiedPlanId(planId);
+      setTimeout(() => setCopiedPlanId(null), 2000);
+    });
   }, []);
 
   const projectMap = new Map(projects.map((p) => [p.project_id, p]));
@@ -132,6 +143,8 @@ export function MigrationPlans() {
                     project={plan.source_project_id ? projectMap.get(plan.source_project_id) : undefined}
                     onOpen={() => navigate(`/migration/${plan.plan_id}`)}
                     onDelete={() => handleDelete(plan.plan_id)}
+                    onCopyMigrateCmd={() => handleCopyMigrateCmd(plan.plan_id)}
+                    isCopied={copiedPlanId === plan.plan_id}
                   />
                 ))}
               </div>
@@ -184,11 +197,15 @@ function PlanCard({
   project,
   onOpen,
   onDelete,
+  onCopyMigrateCmd,
+  isCopied,
 }: {
   plan: MigrationPlan;
   project?: Project;
   onOpen: () => void;
   onDelete: () => void;
+  onCopyMigrateCmd: () => void;
+  isCopied: boolean;
 }) {
   const approvedPhases = plan.plan_phases.filter((p) => p.approved).length;
   const totalPhases = plan.plan_phases.length;
@@ -281,6 +298,26 @@ function PlanCard({
         >
           Open
           <ChevronRight className="h-3 w-3" />
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onCopyMigrateCmd();
+          }}
+          className="flex items-center gap-1.5 rounded-md border border-void-surface px-3 py-1.5 text-xs text-text-dim transition-colors hover:bg-void-surface hover:text-text"
+          title="Copy claude /migrate command"
+        >
+          {isCopied ? (
+            <>
+              <Copy className="h-3.5 w-3.5" />
+              <span>Copied!</span>
+            </>
+          ) : (
+            <>
+              <Terminal className="h-3.5 w-3.5" />
+              <span>Migrate with Claude</span>
+            </>
+          )}
         </button>
       </div>
     </div>

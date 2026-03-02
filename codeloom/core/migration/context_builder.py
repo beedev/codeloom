@@ -253,6 +253,14 @@ class MigrationContextBuilder:
             except Exception as e:
                 logger.warning("MVP source code extraction failed: %s", e)
 
+            # Deep understanding context from Understanding Engine
+            try:
+                deep_ctx = self.get_deep_analysis_context(unit_ids)
+                if deep_ctx:
+                    sections.append(deep_ctx)
+            except Exception as e:
+                logger.debug("Deep analysis context skipped: %s", e)
+
             # Call paths for integration context
             try:
                 call_paths = self._get_mvp_call_paths(unit_ids, limit=20)
@@ -328,6 +336,14 @@ class MigrationContextBuilder:
 
         if mvp_context and mvp_context.get("unit_ids"):
             unit_ids = mvp_context["unit_ids"]
+
+            # Deep understanding context from Understanding Engine
+            try:
+                deep_ctx = self.get_deep_analysis_context(unit_ids)
+                if deep_ctx:
+                    sections.append(deep_ctx)
+            except Exception as e:
+                logger.debug("Deep analysis context skipped: %s", e)
 
             # Full source code for MVP units only
             sources = self._get_mvp_source_code(unit_ids, budget)

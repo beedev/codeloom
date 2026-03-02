@@ -2225,6 +2225,29 @@ class MigrationEngine:
                 context_type=context_type,
             )
 
+            # ── Ground truth advisory validation ──
+            try:
+                gt = self._get_ground_truth(project_id)
+                if gt is not None:
+                    from codeloom.core.migration.ground_truth import OutputIssue
+                    gt_issues = gt.validate_phase_output(
+                        phase_type or get_phase_type(phase_number, version),
+                        result.get("output", ""),
+                    )
+                    if gt_issues:
+                        if "metadata" not in result:
+                            result["metadata"] = {}
+                        result["metadata"]["ground_truth_warnings"] = [
+                            {"type": i.issue_type, "message": i.message}
+                            for i in gt_issues
+                        ]
+                        logger.warning(
+                            "Ground truth: %d advisory issues for phase %d",
+                            len(gt_issues), phase_number,
+                        )
+            except Exception as _gt_err:
+                logger.debug("Ground truth validation skipped: %s", _gt_err)
+
             # ── Enterprise: execution metrics ──
             duration_ms = int((time.monotonic() - execution_start) * 1000)
             completed_at = datetime.utcnow()
@@ -2514,6 +2537,31 @@ class MigrationEngine:
         started_at = datetime.utcnow()
         execution_start = time.monotonic()
 
+        # ── Agentic: lane prompt augmentation ──────────────────────────
+        # Mirror the synchronous path's lane injection so the agent receives
+        # the same framework-specific guidance that the sync executor does.
+        try:
+            active_lanes = self._get_active_lanes(plan_data)
+            if active_lanes:
+                lane_augmentations = []
+                lane_ctx = {"target_stack": plan_data.get("target_stack", {})}
+                phase_type_str = context_type or get_phase_type(phase_number, version)
+                for lane in active_lanes:
+                    try:
+                        aug = lane.augment_prompt(phase_type_str, "", lane_ctx)
+                        if aug:
+                            lane_augmentations.append(aug)
+                    except Exception as lane_err:
+                        logger.debug("Agentic lane augmentation failed: %s", lane_err)
+                if lane_augmentations:
+                    plan_data["_lane_prompt_augmentation"] = "\n\n".join(lane_augmentations)
+                    logger.info(
+                        "Agentic phase %d: injected lane augmentations from %d lane(s)",
+                        phase_number, len(active_lanes),
+                    )
+        except Exception as _lane_err:
+            logger.debug("Agentic lane detection skipped: %s", _lane_err)
+
         try:
             from .agent.events import OutputEvent
             ctx_builder = MigrationContextBuilder(self._db, project_id)
@@ -2582,6 +2630,32 @@ class MigrationEngine:
                         ).first()
                         if mvp_obj:
                             mvp_obj.current_phase = phase_number
+
+            # ── Ground truth advisory validation (agentic path) ──
+            try:
+                gt = self._get_ground_truth(project_id)
+                if gt is not None and captured_output:
+                    from codeloom.core.migration.ground_truth import OutputIssue
+                    gt_issues = gt.validate_phase_output(
+                        context_type or get_phase_type(phase_number, version),
+                        captured_output,
+                    )
+                    if gt_issues:
+                        with self._db.get_session() as _gt_session:
+                            _gt_phase = self._get_phase(_gt_session, pid, phase_number, mvp_id)
+                            if _gt_phase:
+                                _gt_meta = dict(_gt_phase.phase_metadata or {})
+                                _gt_meta["ground_truth_warnings"] = [
+                                    {"type": i.issue_type, "message": i.message}
+                                    for i in gt_issues
+                                ]
+                                _gt_phase.phase_metadata = _gt_meta
+                        logger.warning(
+                            "Agentic ground truth: %d advisory issues for phase %d",
+                            len(gt_issues), phase_number,
+                        )
+            except Exception as _gt_err:
+                logger.debug("Agentic ground truth validation skipped: %s", _gt_err)
 
             # Write to disk (fire-and-forget — DB is source of truth)
             if captured_output or output_files:
