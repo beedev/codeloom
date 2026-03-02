@@ -340,12 +340,13 @@ class CodeLoomMCPServer:
             understanding_status = {}
             try:
                 analysis_rows = session.execute(
-                    text("SELECT status, COUNT(*) AS cnt FROM deep_analyses WHERE project_id = :pid GROUP BY status"),
+                    text("SELECT tier, COUNT(*) AS cnt FROM deep_analyses WHERE project_id = :pid GROUP BY tier"),
                     {"pid": pid},
                 ).fetchall()
-                understanding_status = {r.status: r.cnt for r in analysis_rows}
+                understanding_status = {r.tier: r.cnt for r in analysis_rows}
             except Exception as _ue:
-                logger.debug("deep_analyses table unavailable: %s", _ue)
+                logger.debug("deep_analyses unavailable: %s", _ue)
+                session.rollback()  # Clear aborted txn so subsequent queries succeed
 
             # Migration plans
             plans = (
@@ -460,13 +461,14 @@ class CodeLoomMCPServer:
             for uid in (mvp.unit_ids or [])[:50]:
                 cu = session.query(CodeUnit).filter(CodeUnit.unit_id == uid).first()
                 if cu:
+                    cf = session.query(CodeFile).filter(CodeFile.file_id == cu.file_id).first()
                     unit_summaries.append(
                         {
                             "unit_id": str(cu.unit_id),
                             "name": cu.name,
                             "unit_type": cu.unit_type,
                             "language": cu.language,
-                            "file_path": cu.file_path or "",
+                            "file_path": (cf.file_path if cf else "") or "",
                             "signature": (cu.signature or "")[:200],
                         }
                     )
@@ -703,7 +705,7 @@ class CodeLoomMCPServer:
         }
 
     async def _get_source_unit(self, args: Dict) -> Dict:
-        from codeloom.core.db.models import CodeUnit
+        from codeloom.core.db.models import CodeUnit, CodeFile
 
         unit_id = args["unit_id"]
         uid = UUID(unit_id)
@@ -713,17 +715,18 @@ class CodeLoomMCPServer:
             if not cu:
                 return {"error": f"Code unit {unit_id} not found"}
 
+            cf = session.query(CodeFile).filter(CodeFile.file_id == cu.file_id).first()
             return {
                 "unit_id": str(cu.unit_id),
                 "name": cu.name,
                 "qualified_name": cu.qualified_name or "",
                 "unit_type": cu.unit_type,
                 "language": cu.language,
-                "file_path": cu.file_path or "",
+                "file_path": (cf.file_path if cf else "") or "",
                 "signature": cu.signature or "",
-                "source_code": cu.source_code or "",
+                "source_code": cu.source or "",
                 "docstring": cu.docstring or "",
-                "metadata": cu.metadata_ or {},
+                "metadata": cu.unit_metadata or {},
             }
 
     async def _search_codebase(self, args: Dict) -> Dict:
@@ -740,22 +743,24 @@ class CodeLoomMCPServer:
         top_k = min(20, max(1, int(args.get("top_k", 5))))
 
         try:
-            # stateless_query is synchronous; requires message/project_id/user_id
+            # stateless_query is synchronous; requires message/project_id/user_id.
+            # Use nil UUID as MCP sentinel — avoids UUID parse error on conversation save.
             response = self._pipeline.stateless_query(
                 message=query,
                 project_id=project_id,
-                user_id="mcp-server",  # sentinel — no per-user auth in MCP context
+                user_id="00000000-0000-0000-0000-000000000000",
                 max_sources=top_k,
                 include_history=False,
             )
+            # format_sources returns dicts with keys: filename, snippet, score
             sources = response.get("sources", [])
             results = []
             for src in sources:
                 if isinstance(src, dict):
                     results.append({
-                        "text": str(src.get("text", src.get("content", "")))[:500],
+                        "text": src.get("snippet", src.get("text", src.get("content", "")))[:500],
                         "score": src.get("score"),
-                        "metadata": src.get("metadata", {}),
+                        "file_path": src.get("filename", ""),
                     })
                 else:
                     # NodeWithScore or similar object
@@ -763,7 +768,7 @@ class CodeLoomMCPServer:
                     results.append({
                         "text": text[:500],
                         "score": getattr(src, "score", None),
-                        "metadata": getattr(src, "metadata", {}),
+                        "file_path": getattr(getattr(src, "node", src), "metadata", {}).get("file_name", ""),
                     })
             return {"project_id": project_id, "query": query, "results": results}
         except Exception as exc:
