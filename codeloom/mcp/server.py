@@ -297,9 +297,11 @@ _TOOL_DEFINITIONS: List[Tool] = [
     Tool(
         name="codeloom_complete_transform",
         description=(
-            "Mark an MVP's transform phase (phase 3) as complete after user approval. "
-            "Records the transform summary markdown and list of output files (paths only, no content) "
-            "in CodeLoom so the result is visible in the UI. Updates MVP status to 'migrated'."
+            "Record the outcome of an MVP's transform phase in CodeLoom. "
+            "Pass status='complete' (default) to mark success: sets MVP to 'migrated'. "
+            "Pass status='failed' when compile fails after all fix rounds: sets MVP to 'needs_review' "
+            "so the CodeLoom UI shows it needs manual intervention. "
+            "Records transform_summary and output file paths (no code content) for UI display."
         ),
         inputSchema={
             "type": "object",
@@ -308,7 +310,7 @@ _TOOL_DEFINITIONS: List[Tool] = [
                 "mvp_id": {"type": "integer", "description": "MVP ID"},
                 "transform_summary": {
                     "type": "string",
-                    "description": "Markdown summary: files generated, transforms applied, notes",
+                    "description": "Markdown summary: files generated, transforms applied, compile result, errors",
                 },
                 "output_files": {
                     "type": "array",
@@ -320,6 +322,12 @@ _TOOL_DEFINITIONS: List[Tool] = [
                             "language": {"type": "string"},
                         },
                     },
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["complete", "failed"],
+                    "default": "complete",
+                    "description": "complete = success (MVP → migrated); failed = compile unresolved (MVP → needs_review)",
                 },
             },
             "required": ["plan_id", "mvp_id", "transform_summary"],
@@ -1299,6 +1307,7 @@ class CodeLoomMCPServer:
         mvp_id = int(args["mvp_id"])
         transform_summary = args["transform_summary"]
         output_files = args.get("output_files", [])
+        status = args.get("status", "complete")  # "complete" | "failed"
 
         pid = UUID(plan_id)
 
@@ -1320,11 +1329,16 @@ class CodeLoomMCPServer:
                 {"file_path": f.get("file_path", ""), "language": f.get("language", "")}
                 for f in output_files
             ]
-            phase.status = "complete"
             phase.output = transform_summary
             phase.output_files = files_meta
-            phase.approved = True
-            phase.approved_at = datetime.utcnow()
+
+            if status == "failed":
+                phase.status = "failed"
+                phase.approved = False
+            else:
+                phase.status = "complete"
+                phase.approved = True
+                phase.approved_at = datetime.utcnow()
 
             # Update MVP status
             mvp = (
@@ -1333,16 +1347,17 @@ class CodeLoomMCPServer:
                 .first()
             )
             if mvp:
-                mvp.status = "migrated"
+                mvp.status = "needs_review" if status == "failed" else "migrated"
 
             session.commit()
 
+        mvp_final_status = "needs_review" if status == "failed" else "migrated"
         return {
             "plan_id": plan_id,
             "mvp_id": mvp_id,
-            "status": "migrated",
+            "status": mvp_final_status,
             "phase": "transform",
-            "complete": True,
+            "complete": status != "failed",
             "output_files_count": len(output_files),
         }
 
