@@ -551,6 +551,7 @@ class CodeLoomMCPServer:
                         "pipeline_version": plan.pipeline_version,
                         "mvp_count": mvp_count,
                         "created_at": plan.created_at.isoformat() if plan.created_at else None,
+                        "output_dir": (plan.discovery_metadata or {}).get("output_dir", ""),
                     }
                 )
 
@@ -566,7 +567,7 @@ class CodeLoomMCPServer:
         }
 
     async def _list_mvps(self, args: Dict) -> Dict:
-        from codeloom.core.db.models import FunctionalMVP, MigrationPhase
+        from codeloom.core.db.models import FunctionalMVP, MigrationPhase, CodeFile
 
         plan_id = args["plan_id"]
         pid = UUID(plan_id)
@@ -599,6 +600,14 @@ class CodeLoomMCPServer:
                 confidence = None
                 if mvp.analysis_output and isinstance(mvp.analysis_output, dict):
                     confidence = mvp.analysis_output.get("confidence_score")
+
+                # Resolve file_ids → file_paths so the run workflow can do import audits
+                source_file_paths = []
+                for fid in (mvp.file_ids or []):
+                    cf = session.query(CodeFile).filter(CodeFile.file_id == fid).first()
+                    if cf and cf.file_path:
+                        source_file_paths.append(cf.file_path)
+
                 result.append(
                     {
                         "mvp_id": mvp.mvp_id,
@@ -606,7 +615,9 @@ class CodeLoomMCPServer:
                         "description": (mvp.description or "")[:300],
                         "status": mvp.status,
                         "priority": mvp.priority,
+                        "unit_ids": [str(uid) for uid in (mvp.unit_ids or [])],
                         "unit_count": len(mvp.unit_ids or []),
+                        "source_file_paths": source_file_paths,
                         "file_count": len(mvp.file_ids or []),
                         "confidence": confidence,
                         "phases": phase_summary,
