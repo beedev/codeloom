@@ -1,8 +1,9 @@
 """CodeLoom MCP Server implementation.
 
-Exposes 15 tools covering project intelligence, MVP management, phase execution,
+Exposes 16 tools covering project intelligence, MVP management, phase execution,
 source code access, RAG search, ground truth validation, lane detection, and
-full-autonomy migration (list_units, save_plan, save_mvps, complete_transform).
+full-autonomy migration (list_units, get_import_graph, save_plan, save_mvps,
+complete_transform, start_transform).
 
 All tool handlers are registered on the mcp.server.Server instance and communicate
 via JSON-encoded TextContent responses.
@@ -324,6 +325,44 @@ _TOOL_DEFINITIONS: List[Tool] = [
             "required": ["plan_id", "mvp_id", "transform_summary"],
         },
     ),
+    Tool(
+        name="codeloom_start_transform",
+        description=(
+            "Mark an MVP's transform phase as in-progress. Call this before starting file generation "
+            "so the CodeLoom UI shows the MVP as actively being migrated. "
+            "Sets MVP status to 'in_progress' and phase 3 status to 'in_progress'."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string", "description": "Migration plan UUID"},
+                "mvp_id": {"type": "integer", "description": "MVP ID"},
+            },
+            "required": ["plan_id", "mvp_id"],
+        },
+    ),
+    Tool(
+        name="codeloom_get_import_graph",
+        description=(
+            "Analyze import relationships between source files using ASG edges. "
+            "Returns: (1) shared_files — files imported by `shared_threshold` or more other files, "
+            "sorted by fan-in count descending. These MUST go into Foundation MVP during clustering. "
+            "(2) import_edges — every source→target import pair (capped at 2000). "
+            "Use during /migrate init before MVP clustering to identify shared infrastructure."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project UUID"},
+                "shared_threshold": {
+                    "type": "integer",
+                    "default": 3,
+                    "description": "Min importer count to flag a file as shared infrastructure (default: 3)",
+                },
+            },
+            "required": ["project_id"],
+        },
+    ),
 ]
 
 
@@ -389,6 +428,8 @@ class CodeLoomMCPServer:
             "codeloom_save_plan": self._save_plan,
             "codeloom_save_mvps": self._save_mvps,
             "codeloom_complete_transform": self._complete_transform,
+            "codeloom_start_transform": self._start_transform,
+            "codeloom_get_import_graph": self._get_import_graph,
         }
         handler = dispatch_table.get(name)
         if handler is None:
@@ -1292,6 +1333,109 @@ class CodeLoomMCPServer:
             "phase": "transform",
             "complete": True,
             "output_files_count": len(output_files),
+        }
+
+    async def _start_transform(self, args: Dict) -> Dict:
+        from codeloom.core.db.models import MigrationPhase, FunctionalMVP
+        from datetime import datetime
+
+        plan_id = args["plan_id"]
+        mvp_id = int(args["mvp_id"])
+        pid = UUID(plan_id)
+
+        with self._db.get_session() as session:
+            phase = (
+                session.query(MigrationPhase)
+                .filter(
+                    MigrationPhase.plan_id == pid,
+                    MigrationPhase.mvp_id == mvp_id,
+                    MigrationPhase.phase_number == 3,
+                )
+                .first()
+            )
+            if not phase:
+                return {"error": f"Phase 3 not found for plan {plan_id} mvp {mvp_id}"}
+
+            phase.status = "in_progress"
+
+            mvp = (
+                session.query(FunctionalMVP)
+                .filter(FunctionalMVP.plan_id == pid, FunctionalMVP.mvp_id == mvp_id)
+                .first()
+            )
+            if mvp:
+                mvp.status = "in_progress"
+                mvp.updated_at = datetime.utcnow()
+
+            session.commit()
+
+        return {
+            "plan_id": plan_id,
+            "mvp_id": mvp_id,
+            "status": "in_progress",
+            "phase": "transform",
+        }
+
+    async def _get_import_graph(self, args: Dict) -> Dict:
+        from codeloom.core.db.models import CodeEdge, CodeUnit, CodeFile
+        from sqlalchemy.orm import aliased
+
+        project_id = args["project_id"]
+        shared_threshold = int(args.get("shared_threshold", 3))
+        pid = UUID(project_id)
+
+        with self._db.get_session() as session:
+            SrcUnit = aliased(CodeUnit)
+            TgtUnit = aliased(CodeUnit)
+            SrcFile = aliased(CodeFile)
+            TgtFile = aliased(CodeFile)
+
+            rows = (
+                session.query(
+                    SrcFile.file_path.label("source_file"),
+                    TgtFile.file_path.label("target_file"),
+                )
+                .select_from(CodeEdge)
+                .join(SrcUnit, CodeEdge.source_unit_id == SrcUnit.unit_id)
+                .join(TgtUnit, CodeEdge.target_unit_id == TgtUnit.unit_id)
+                .join(SrcFile, SrcUnit.file_id == SrcFile.file_id)
+                .join(TgtFile, TgtUnit.file_id == TgtFile.file_id)
+                .filter(
+                    CodeEdge.project_id == pid,
+                    CodeEdge.edge_type == "imports",
+                )
+                .distinct()
+                .all()
+            )
+
+            # Build fan-in map: target_file → set of unique importer file_paths
+            fan_in: Dict[str, set] = {}
+            edges = []
+            for row in rows:
+                src = row.source_file or ""
+                tgt = row.target_file or ""
+                if not src or not tgt or src == tgt:
+                    continue
+                edges.append({"source": src, "target": tgt})
+                fan_in.setdefault(tgt, set()).add(src)
+
+            shared_files = [
+                {
+                    "file_path": fp,
+                    "importer_count": len(importers),
+                    "imported_by": sorted(list(importers))[:10],
+                }
+                for fp, importers in fan_in.items()
+                if len(importers) >= shared_threshold
+            ]
+            shared_files.sort(key=lambda x: x["importer_count"], reverse=True)
+
+        return {
+            "project_id": project_id,
+            "total_import_edges": len(edges),
+            "shared_files": shared_files,
+            "import_edges": edges[:2000],
+            "truncated": len(edges) > 2000,
         }
 
     # ── Internal helpers ────────────────────────────────────────────────
