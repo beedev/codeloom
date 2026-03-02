@@ -1,7 +1,8 @@
 """CodeLoom MCP Server implementation.
 
-Exposes 11 tools covering project intelligence, MVP management, phase execution,
-source code access, RAG search, ground truth validation, and lane detection.
+Exposes 15 tools covering project intelligence, MVP management, phase execution,
+source code access, RAG search, ground truth validation, lane detection, and
+full-autonomy migration (list_units, save_plan, save_mvps, complete_transform).
 
 All tool handlers are registered on the mcp.server.Server instance and communicate
 via JSON-encoded TextContent responses.
@@ -190,6 +191,139 @@ _TOOL_DEFINITIONS: List[Tool] = [
             "required": ["source_framework", "target_stack_json"],
         },
     ),
+    # ── Full-autonomy migration tools ────────────────────────────────────
+    Tool(
+        name="codeloom_list_units",
+        description=(
+            "List all code units in a project for discovery. Paginated to handle large codebases. "
+            "Filter by language or unit_type. Returns file_path for each unit."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project UUID"},
+                "language": {
+                    "type": "string",
+                    "description": "Optional filter: python, typescript, javascript, java, csharp, etc.",
+                },
+                "unit_type": {
+                    "type": "string",
+                    "description": "Optional filter: function, class, method, module",
+                },
+                "page": {"type": "integer", "default": 1, "description": "Page number (1-based)"},
+                "page_size": {"type": "integer", "default": 50, "description": "Results per page (max 100)"},
+            },
+            "required": ["project_id"],
+        },
+    ),
+    Tool(
+        name="codeloom_save_plan",
+        description=(
+            "Save a Claude-generated migration plan (architecture + discovery docs) to CodeLoom DB "
+            "for viewing inside the CodeLoom UI. Creates a new MigrationPlan with two completed "
+            "plan-level phases (architecture + discovery). Returns plan_id for subsequent MVP saving."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Source project UUID"},
+                "target_brief": {
+                    "type": "string",
+                    "description": "One-line description of the migration target (e.g. 'Migrate to TypeScript Express REST API')",
+                },
+                "target_stack": {
+                    "type": "string",
+                    "description": 'JSON string: {"languages": ["typescript"], "frameworks": ["expressjs"]}',
+                },
+                "architecture_doc": {
+                    "type": "string",
+                    "description": "Markdown: architecture decisions, target patterns, DI strategy, file structure",
+                },
+                "discovery_doc": {
+                    "type": "string",
+                    "description": "Markdown: codebase summary, module breakdown, migration strategy rationale",
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Target output directory for generated code files (e.g. migration-output/<project_id>/)",
+                },
+            },
+            "required": ["project_id", "target_brief", "target_stack", "architecture_doc", "discovery_doc"],
+        },
+    ),
+    Tool(
+        name="codeloom_save_mvps",
+        description=(
+            "Save Claude-defined MVP cluster definitions to CodeLoom DB. "
+            "Pass source_file_paths (relative paths from codeloom_list_units); the tool "
+            "automatically resolves them to CodeFile and CodeUnit records. "
+            "Creates Phase 3 (transform) and Phase 4 (test) rows for each MVP."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string", "description": "Migration plan UUID from codeloom_save_plan"},
+                "mvps": {
+                    "type": "array",
+                    "description": "List of MVP definitions",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Short MVP name (e.g. 'Foundation & Setup')"},
+                            "description": {"type": "string", "description": "What this MVP covers"},
+                            "priority": {
+                                "type": "integer",
+                                "description": "Migration order — lower = earlier (0-based)",
+                            },
+                            "source_file_paths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Source file paths as returned by codeloom_list_units",
+                            },
+                            "depends_on_names": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Names of MVPs this one depends on (tool resolves to IDs)",
+                            },
+                        },
+                        "required": ["name", "priority", "source_file_paths"],
+                    },
+                },
+            },
+            "required": ["plan_id", "mvps"],
+        },
+    ),
+    Tool(
+        name="codeloom_complete_transform",
+        description=(
+            "Mark an MVP's transform phase (phase 3) as complete after user approval. "
+            "Records the transform summary markdown and list of output files (paths only, no content) "
+            "in CodeLoom so the result is visible in the UI. Updates MVP status to 'migrated'."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string", "description": "Migration plan UUID"},
+                "mvp_id": {"type": "integer", "description": "MVP ID"},
+                "transform_summary": {
+                    "type": "string",
+                    "description": "Markdown summary: files generated, transforms applied, notes",
+                },
+                "output_files": {
+                    "type": "array",
+                    "description": "List of generated output files (metadata only — code stays on disk)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "language": {"type": "string"},
+                        },
+                    },
+                },
+            },
+            "required": ["plan_id", "mvp_id", "transform_summary"],
+        },
+    ),
 ]
 
 
@@ -250,6 +384,11 @@ class CodeLoomMCPServer:
             "codeloom_search_codebase": self._search_codebase,
             "codeloom_validate_output": self._validate_output,
             "codeloom_get_lane_info": self._get_lane_info,
+            # Full-autonomy migration tools
+            "codeloom_list_units": self._list_units,
+            "codeloom_save_plan": self._save_plan,
+            "codeloom_save_mvps": self._save_mvps,
+            "codeloom_complete_transform": self._complete_transform,
         }
         handler = dispatch_table.get(name)
         if handler is None:
@@ -865,6 +1004,294 @@ class CodeLoomMCPServer:
             "target_frameworks": lane.target_frameworks,
             "transform_rules": rules,
             "quality_gates": gates,
+        }
+
+    # ── Full-autonomy migration handlers ────────────────────────────────
+
+    async def _list_units(self, args: Dict) -> Dict:
+        from codeloom.core.db.models import CodeUnit, CodeFile
+        from sqlalchemy import func
+
+        project_id = args["project_id"]
+        pid = UUID(project_id)
+        language = args.get("language")
+        unit_type = args.get("unit_type")
+        page = max(1, int(args.get("page", 1)))
+        page_size = min(100, max(1, int(args.get("page_size", 50))))
+        offset = (page - 1) * page_size
+
+        with self._db.get_session() as session:
+            q = (
+                session.query(CodeUnit, CodeFile.file_path)
+                .join(CodeFile, CodeUnit.file_id == CodeFile.file_id)
+                .filter(CodeUnit.project_id == pid)
+            )
+            if language:
+                q = q.filter(CodeUnit.language == language)
+            if unit_type:
+                q = q.filter(CodeUnit.unit_type == unit_type)
+
+            total = q.count()
+            rows = q.order_by(CodeFile.file_path, CodeUnit.name).offset(offset).limit(page_size).all()
+
+            units = [
+                {
+                    "unit_id": str(cu.unit_id),
+                    "name": cu.name,
+                    "qualified_name": cu.qualified_name or "",
+                    "unit_type": cu.unit_type,
+                    "language": cu.language,
+                    "file_path": file_path or "",
+                    "signature": (cu.signature or "")[:200],
+                }
+                for cu, file_path in rows
+            ]
+
+        return {
+            "project_id": project_id,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size,
+            "units": units,
+        }
+
+    async def _save_plan(self, args: Dict) -> Dict:
+        from codeloom.core.db.models import MigrationPlan, MigrationPhase, User
+        import uuid as _uuid
+        from datetime import datetime
+
+        project_id = args["project_id"]
+        target_brief = args["target_brief"]
+        target_stack_str = args["target_stack"]
+        architecture_doc = args["architecture_doc"]
+        discovery_doc = args["discovery_doc"]
+        output_dir = args.get("output_dir", f"migration-output/{project_id}/")
+
+        try:
+            target_stack = json.loads(target_stack_str)
+        except json.JSONDecodeError:
+            return {"error": f"target_stack is not valid JSON: {target_stack_str[:100]}"}
+
+        pid = UUID(project_id)
+        plan_id = _uuid.uuid4()
+
+        with self._db.get_session() as session:
+            # Resolve user_id — use first admin user or any user in the system
+            user = session.query(User).order_by(User.created_at).first()
+            if not user:
+                return {"error": "No users found in DB — cannot create plan without a user_id"}
+            user_id = user.user_id
+
+            plan = MigrationPlan(
+                plan_id=plan_id,
+                user_id=user_id,
+                source_project_id=pid,
+                target_brief=target_brief,
+                target_stack=target_stack,
+                status="in_progress",
+                pipeline_version=2,
+                migration_type="framework_migration",
+                discovery_metadata={
+                    "output_dir": output_dir,
+                    "orchestrator": "claude_code_cli",
+                },
+            )
+            session.add(plan)
+            session.flush()  # Get plan_id assigned
+
+            # Phase 1: Architecture (plan-level, already complete)
+            arch_phase = MigrationPhase(
+                plan_id=plan_id,
+                mvp_id=None,
+                phase_number=1,
+                phase_type="architecture",
+                status="complete",
+                output=architecture_doc,
+                approved=True,
+                approved_at=datetime.utcnow(),
+            )
+            session.add(arch_phase)
+
+            # Phase 2: Discovery (plan-level, already complete)
+            disc_phase = MigrationPhase(
+                plan_id=plan_id,
+                mvp_id=None,
+                phase_number=2,
+                phase_type="discovery",
+                status="complete",
+                output=discovery_doc,
+                approved=True,
+                approved_at=datetime.utcnow(),
+            )
+            session.add(disc_phase)
+            session.commit()
+
+        return {
+            "plan_id": str(plan_id),
+            "status": "in_progress",
+            "output_dir": output_dir,
+            "message": f"Plan created with 2 completed plan-level phases. View in CodeLoom UI at /migration.",
+        }
+
+    async def _save_mvps(self, args: Dict) -> Dict:
+        from codeloom.core.db.models import FunctionalMVP, MigrationPhase, CodeFile, CodeUnit
+
+        plan_id = args["plan_id"]
+        mvps_input = args["mvps"]
+        pid = UUID(plan_id)
+
+        created = []
+        name_to_id: Dict[str, int] = {}
+
+        with self._db.get_session() as session:
+            for mvp_def in mvps_input:
+                name = mvp_def["name"]
+                description = mvp_def.get("description", "")
+                priority = int(mvp_def.get("priority", 0))
+                source_file_paths = mvp_def.get("source_file_paths", [])
+
+                # Resolve file paths → CodeFile records
+                file_ids: List[str] = []
+                unit_ids: List[str] = []
+                for path in source_file_paths:
+                    matches = (
+                        session.query(CodeFile)
+                        .filter(
+                            CodeFile.file_path.endswith(path) | (CodeFile.file_path == path)
+                        )
+                        .all()
+                    )
+                    for cf in matches:
+                        fid = str(cf.file_id)
+                        if fid not in file_ids:
+                            file_ids.append(fid)
+                        # Collect all units in this file
+                        units = (
+                            session.query(CodeUnit.unit_id)
+                            .filter(CodeUnit.file_id == cf.file_id)
+                            .all()
+                        )
+                        for (uid,) in units:
+                            uid_str = str(uid)
+                            if uid_str not in unit_ids:
+                                unit_ids.append(uid_str)
+
+                mvp = FunctionalMVP(
+                    plan_id=pid,
+                    name=name,
+                    description=description,
+                    priority=priority,
+                    status="discovered",
+                    file_ids=file_ids,
+                    unit_ids=unit_ids,
+                )
+                session.add(mvp)
+                session.flush()  # Get mvp_id
+
+                # Phase 3: Transform (pending)
+                session.add(MigrationPhase(
+                    plan_id=pid,
+                    mvp_id=mvp.mvp_id,
+                    phase_number=3,
+                    phase_type="transform",
+                    status="pending",
+                ))
+                # Phase 4: Test (pending)
+                session.add(MigrationPhase(
+                    plan_id=pid,
+                    mvp_id=mvp.mvp_id,
+                    phase_number=4,
+                    phase_type="test",
+                    status="pending",
+                ))
+
+                name_to_id[name] = mvp.mvp_id
+                created.append({
+                    "mvp_id": mvp.mvp_id,
+                    "name": name,
+                    "file_count": len(file_ids),
+                    "unit_count": len(unit_ids),
+                    "priority": priority,
+                })
+
+            # Resolve depends_on_names → mvp_ids
+            for i, mvp_def in enumerate(mvps_input):
+                depends_on_names = mvp_def.get("depends_on_names", [])
+                if depends_on_names:
+                    dep_ids = [name_to_id[n] for n in depends_on_names if n in name_to_id]
+                    if dep_ids:
+                        mvp_id_val = created[i]["mvp_id"]
+                        mvp_obj = (
+                            session.query(FunctionalMVP)
+                            .filter(FunctionalMVP.mvp_id == mvp_id_val)
+                            .first()
+                        )
+                        if mvp_obj:
+                            mvp_obj.depends_on_mvp_ids = dep_ids
+
+            session.commit()
+
+        return {
+            "plan_id": plan_id,
+            "mvp_count": len(created),
+            "mvps": created,
+            "message": f"{len(created)} MVPs saved. Each has Phase 3 (transform) and Phase 4 (test) rows pending.",
+        }
+
+    async def _complete_transform(self, args: Dict) -> Dict:
+        from codeloom.core.db.models import MigrationPhase, FunctionalMVP
+        from datetime import datetime
+
+        plan_id = args["plan_id"]
+        mvp_id = int(args["mvp_id"])
+        transform_summary = args["transform_summary"]
+        output_files = args.get("output_files", [])
+
+        pid = UUID(plan_id)
+
+        with self._db.get_session() as session:
+            phase = (
+                session.query(MigrationPhase)
+                .filter(
+                    MigrationPhase.plan_id == pid,
+                    MigrationPhase.mvp_id == mvp_id,
+                    MigrationPhase.phase_number == 3,
+                )
+                .first()
+            )
+            if not phase:
+                return {"error": f"Phase 3 not found for plan {plan_id} mvp {mvp_id}"}
+
+            # Store file metadata only (no code content — code stays on disk)
+            files_meta = [
+                {"file_path": f.get("file_path", ""), "language": f.get("language", "")}
+                for f in output_files
+            ]
+            phase.status = "complete"
+            phase.output = transform_summary
+            phase.output_files = files_meta
+            phase.approved = True
+            phase.approved_at = datetime.utcnow()
+
+            # Update MVP status
+            mvp = (
+                session.query(FunctionalMVP)
+                .filter(FunctionalMVP.plan_id == pid, FunctionalMVP.mvp_id == mvp_id)
+                .first()
+            )
+            if mvp:
+                mvp.status = "migrated"
+
+            session.commit()
+
+        return {
+            "plan_id": plan_id,
+            "mvp_id": mvp_id,
+            "status": "migrated",
+            "phase": "transform",
+            "complete": True,
+            "output_files_count": len(output_files),
         }
 
     # ── Internal helpers ────────────────────────────────────────────────
