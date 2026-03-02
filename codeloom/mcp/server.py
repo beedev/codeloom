@@ -210,6 +210,8 @@ class CodeLoomMCPServer:
         self._db = db_manager
         self._pipeline = pipeline
         self.server = Server("codeloom")
+        # Tracks in-flight agentic executions to prevent double-execution
+        self._active_executions: set = set()
 
         # Register handlers
         self._register_handlers()
@@ -334,12 +336,16 @@ class CodeLoomMCPServer:
             ).fetchall()
             edge_stats = {r.edge_type: r.cnt for r in edge_rows}
 
-            # Understanding engine status
-            analysis_rows = session.execute(
-                text("SELECT status, COUNT(*) AS cnt FROM deep_analyses WHERE project_id = :pid GROUP BY status"),
-                {"pid": pid},
-            ).fetchall()
-            understanding_status = {r.status: r.cnt for r in analysis_rows}
+            # Understanding engine status (table may not exist in minimal deployments)
+            understanding_status = {}
+            try:
+                analysis_rows = session.execute(
+                    text("SELECT status, COUNT(*) AS cnt FROM deep_analyses WHERE project_id = :pid GROUP BY status"),
+                    {"pid": pid},
+                ).fetchall()
+                understanding_status = {r.status: r.cnt for r in analysis_rows}
+            except Exception as _ue:
+                logger.debug("deep_analyses table unavailable: %s", _ue)
 
             # Migration plans
             plans = (
@@ -502,24 +508,25 @@ class CodeLoomMCPServer:
             try:
                 from codeloom.core.migration.ground_truth import CodebaseGroundTruth
                 gt = CodebaseGroundTruth(self._db, str(plan.source_project_id))
-                gt_summary = gt.get_summary()
+                gt_summary = gt.format_layer_summary()
             except Exception as _ge:
                 logger.debug("Ground truth summary skipped: %s", _ge)
 
-        return {
-            "plan_id": plan_id,
-            "mvp_id": mvp_id,
-            "name": mvp.name,
-            "description": mvp.description or "",
-            "status": mvp.status,
-            "unit_count": len(mvp.unit_ids or []),
-            "source_units": unit_summaries,
-            "sp_references": mvp.sp_references or [],
-            "lane_info": lane_info,
-            "deep_narratives": deep_narratives,
-            "ground_truth_summary": gt_summary,
-            "analysis_output": mvp.analysis_output,
-        }
+            # Build return dict inside session scope to avoid DetachedInstanceError
+            return {
+                "plan_id": plan_id,
+                "mvp_id": mvp_id,
+                "name": mvp.name,
+                "description": mvp.description or "",
+                "status": mvp.status,
+                "unit_count": len(mvp.unit_ids or []),
+                "source_units": unit_summaries,
+                "sp_references": list(mvp.sp_references or []),
+                "lane_info": lane_info,
+                "deep_narratives": deep_narratives,
+                "ground_truth_summary": gt_summary,
+                "analysis_output": mvp.analysis_output,
+            }
 
     async def _execute_phase(self, args: Dict) -> Dict:
         plan_id = args["plan_id"]
@@ -545,9 +552,20 @@ class CodeLoomMCPServer:
                 return {"status": "error", "error": str(exc)}
 
         # Agentic — run in background thread so we return immediately
+        exec_key = (plan_id, phase_number, mvp_id)
+        if exec_key in self._active_executions:
+            return {
+                "status": "already_running",
+                "message": (
+                    f"Agentic execution already in progress for plan {plan_id} "
+                    f"phase {phase_number}" + (f" mvp {mvp_id}" if mvp_id else "")
+                    + ". Poll codeloom_get_phase_result for status."
+                ),
+            }
+        self._active_executions.add(exec_key)
         thread = threading.Thread(
             target=self._run_agentic,
-            args=(plan_id, phase_number, mvp_id, max_turns),
+            args=(plan_id, phase_number, mvp_id, max_turns, engine, exec_key),
             daemon=True,
         )
         thread.start()
@@ -556,16 +574,21 @@ class CodeLoomMCPServer:
             "message": (
                 f"Agentic execution started for plan {plan_id} phase {phase_number}"
                 + (f" mvp {mvp_id}" if mvp_id else "")
-                + f". Poll codeloom_get_phase_result to check status."
+                + ". Poll codeloom_get_phase_result to check status."
             ),
         }
 
     def _run_agentic(
-        self, plan_id: str, phase_number: int, mvp_id: Optional[int], max_turns: int
+        self,
+        plan_id: str,
+        phase_number: int,
+        mvp_id: Optional[int],
+        max_turns: int,
+        engine: Any,
+        exec_key: tuple,
     ) -> None:
         """Background thread for agentic phase execution. Errors persisted to DB."""
         try:
-            engine = self._get_engine()
             for _event in engine.execute_phase_agentic(
                 plan_id=plan_id,
                 phase_number=phase_number,
@@ -596,6 +619,8 @@ class CodeLoomMCPServer:
                         session.commit()
             except Exception as _persist_err:
                 logger.debug("Could not persist agentic error: %s", _persist_err)
+        finally:
+            self._active_executions.discard(exec_key)
 
     async def _get_phase_result(self, args: Dict) -> Dict:
         from codeloom.core.db.models import MigrationPhase
@@ -715,20 +740,31 @@ class CodeLoomMCPServer:
         top_k = min(20, max(1, int(args.get("top_k", 5))))
 
         try:
-            nodes = await self._pipeline.stateless_query(
-                query_str=query,
+            # stateless_query is synchronous; requires message/project_id/user_id
+            response = self._pipeline.stateless_query(
+                message=query,
                 project_id=project_id,
-                top_k=top_k,
+                user_id="mcp-server",  # sentinel — no per-user auth in MCP context
+                max_sources=top_k,
+                include_history=False,
             )
+            sources = response.get("sources", [])
             results = []
-            for node in (nodes or []):
-                results.append(
-                    {
-                        "text": (node.get_content() if hasattr(node, "get_content") else str(node))[:500],
-                        "score": getattr(node, "score", None),
-                        "metadata": getattr(node, "metadata", {}),
-                    }
-                )
+            for src in sources:
+                if isinstance(src, dict):
+                    results.append({
+                        "text": str(src.get("text", src.get("content", "")))[:500],
+                        "score": src.get("score"),
+                        "metadata": src.get("metadata", {}),
+                    })
+                else:
+                    # NodeWithScore or similar object
+                    text = src.get_content() if hasattr(src, "get_content") else str(src)
+                    results.append({
+                        "text": text[:500],
+                        "score": getattr(src, "score", None),
+                        "metadata": getattr(src, "metadata", {}),
+                    })
             return {"project_id": project_id, "query": query, "results": results}
         except Exception as exc:
             return {"error": f"Search failed: {exc}"}
