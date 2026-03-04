@@ -277,10 +277,54 @@ def detect_calls(ctx: EdgeContext) -> List[dict]:
 
         # Language-specific call detection
         if u.language == "cobol":
-            called_names.update(COBOL_PERFORM_RE.findall(u.source))
-            called_names.update(COBOL_PERFORM_THRU_RE.findall(u.source))
-            called_names.update(COBOL_GOTO_RE.findall(u.source))
-            called_names.update(COBOL_CALL_RE.findall(u.source))
+            # COBOL scoping rule:
+            #   PERFORM / GO TO → intra-program (same file); use same-file lookup
+            #   CALL 'PROGNAME' → cross-program (external); use global lookup
+            # Mixing both into unit_by_name (first-wins) causes wrong edges when
+            # multiple programs share a paragraph name like 0000-MAIN-PARA.
+            perform_names: set = set(COBOL_PERFORM_RE.findall(u.source))
+            perform_names.update(COBOL_PERFORM_THRU_RE.findall(u.source))
+            perform_names.update(COBOL_GOTO_RE.findall(u.source))
+            call_names: set = set(COBOL_CALL_RE.findall(u.source))
+
+            # Build a same-file name → unit map (paragraphs/sections of THIS program)
+            file_units = ctx.units_by_file.get(str(u.file_id), [])
+            same_prog_by_name = {fu.name: fu for fu in file_units}
+
+            # Intra-program PERFORM/GOTO edges — prefer same-file target
+            for name in perform_names:
+                if not name or name == u.name or name in BUILTINS:
+                    continue
+                target = same_prog_by_name.get(name) or ctx.unit_by_name.get(name)
+                if target and target.unit_id != u.unit_id:
+                    edges.append({
+                        "project_id": ctx.project_id,
+                        "source_unit_id": u.unit_id,
+                        "target_unit_id": target.unit_id,
+                        "edge_type": "calls",
+                        "edge_metadata": {"confidence": "high"},
+                    })
+
+            # Cross-program CALL edges — global lookup (program units)
+            for name in call_names:
+                if not name or name in BUILTINS:
+                    continue
+                target = ctx.unit_by_name.get(name)
+                if not target:
+                    for qn, qu in ctx.unit_by_qualified.items():
+                        if qn.endswith(f".{name}"):
+                            target = qu
+                            break
+                if target and target.unit_id != u.unit_id:
+                    edges.append({
+                        "project_id": ctx.project_id,
+                        "source_unit_id": u.unit_id,
+                        "target_unit_id": target.unit_id,
+                        "edge_type": "calls",
+                        "edge_metadata": {"confidence": "high"},
+                    })
+            continue  # COBOL handled above; skip generic resolution
+
         elif u.language == "pl1":
             called_names.update(PL1_CALL_RE.findall(u.source))
             called_names.update(PL1_GOTO_RE.findall(u.source))
