@@ -51,14 +51,33 @@ EXEC_IN_STRING_RE = re.compile(
 # COBOL names can contain hyphens: 1000-INIT, PROCESS-DATA
 COBOL_PERFORM_RE = re.compile(r"\bPERFORM\s+([\w-]+)", re.IGNORECASE)
 
+# PERFORM X THRU Y — captures the THRU end-target (second call edge)
+COBOL_PERFORM_THRU_RE = re.compile(
+    r"\bPERFORM\s+[\w-]+\s+THRU\s+([\w-]+)", re.IGNORECASE
+)
+
+# GO TO paragraph-name (unconditional jump — resolves to a call edge)
+# GO TO DEPENDING ON uses multiple targets: GO TO p1 p2 p3 DEPENDING ON var
+COBOL_GOTO_RE = re.compile(r"\bGO\s+TO\s+([\w-]+)", re.IGNORECASE)
+
 # CALL 'program-name' USING ... (external program invocation)
 COBOL_CALL_RE = re.compile(r'\bCALL\s+["\']?([\w-]+)["\']?', re.IGNORECASE)
+
+# ── COBOL embedded block detection ───────────────────────────────
+
+# EXEC SQL ... END-EXEC and EXEC CICS ... END-EXEC
+# Used to tag paragraphs that contain DB or CICS calls (metadata enrichment)
+COBOL_EXEC_SQL_RE = re.compile(r"\bEXEC\s+SQL\b", re.IGNORECASE)
+COBOL_EXEC_CICS_RE = re.compile(r"\bEXEC\s+CICS\b", re.IGNORECASE)
 
 # ── PL/1 call detection patterns ─────────────────────────────────
 
 # CALL procedure_name[(args)];
 # PL/1 names are alphanumeric + underscore (no hyphens)
 PL1_CALL_RE = re.compile(r"\bCALL\s+(\w+)\s*(?:[(;]|\s)", re.IGNORECASE)
+
+# GO TO label; (unconditional jump)
+PL1_GOTO_RE = re.compile(r"\bGO\s+TO\s+(\w+)\s*;", re.IGNORECASE)
 
 # ── Exclusion sets ───────────────────────────────────────────────
 

@@ -9,27 +9,39 @@ Extracts:
   Section labels        → unit_type="section"    (groups paragraphs; optional nesting)
 
 COPY statements → imports list (drives ASG imports edges).
-PERFORM and CALL names are preserved in unit source for ASG call edge detection.
+PERFORM, CALL, and GO TO names are preserved in unit source for ASG call edge detection.
 
 Node types confirmed against grammar.js:
   program_definition, identification_division, program_name
   procedure_division, section_header, paragraph_header
-  copy_statement, perform_statement_call_proc, call_statement
+  copy_statement, perform_statement_call_proc, call_statement, goto_statement
+
+EXEC SQL/CICS handling:
+  The COBOL85 tree-sitter grammar does not parse EXEC SQL/CICS preprocessor blocks.
+  These blocks are stripped (lines blanked, line count preserved) before parsing so
+  tree-sitter can extract the structural skeleton without errors. Original source text
+  is restored in units during post-processing. Paragraphs/sections are tagged with
+  has_exec_sql and has_exec_cics metadata flags using the original source.
 """
 
 import logging
+import re
 from typing import List, Optional
 
 import tree_sitter
 from tree_sitter_language_pack import get_language as _ts_get_language
 
 from .base import BaseLanguageParser
-from .models import CodeUnit
+from .models import CodeUnit, ParseResult
+from ..asg_builder.constants import COBOL_EXEC_SQL_RE, COBOL_EXEC_CICS_RE
 
 logger = logging.getLogger(__name__)
 
 # Loaded once at import time — thread-safe (Language objects are immutable)
 _COBOL_LANGUAGE = _ts_get_language("cobol")
+
+# Matches the start of an EXEC SQL or EXEC CICS block (line-level check)
+_EXEC_START_RE = re.compile(r"\bEXEC\s+(SQL|CICS)\b", re.IGNORECASE)
 
 
 class CobolParser(BaseLanguageParser):
@@ -50,6 +62,57 @@ class CobolParser(BaseLanguageParser):
 
     def get_tree_sitter_language(self) -> tree_sitter.Language:
         return _COBOL_LANGUAGE
+
+    # =========================================================================
+    # parse_source override — EXEC SQL/CICS pre-stripping
+    # =========================================================================
+
+    def parse_source(self, source_text: str, file_path: str) -> ParseResult:
+        """Parse COBOL source, stripping EXEC SQL/CICS blocks before tree-sitter.
+
+        The COBOL85 grammar treats EXEC SQL/CICS as syntax errors, causing
+        ERROR nodes that hide all paragraphs below the first EXEC block.
+        We blank those lines (preserving line numbers), parse the skeleton,
+        then restore original source text and tag metadata in post-processing.
+        """
+        original_lines = source_text.splitlines()
+        stripped_text = self._strip_exec_blocks(source_text)
+
+        # Parse with tree-sitter using stripped source
+        result = super().parse_source(stripped_text, file_path)
+
+        # Post-process: restore original source and tag EXEC SQL/CICS metadata
+        for unit in result.units:
+            if unit.unit_type in ("paragraph", "section", "program") and unit.start_line:
+                end = unit.end_line if unit.end_line else unit.start_line
+                orig_src = "\n".join(original_lines[unit.start_line - 1 : end])
+                unit.source = orig_src
+                if unit.unit_type in ("paragraph", "section"):
+                    unit.metadata = unit.metadata or {}
+                    unit.metadata["has_exec_sql"] = bool(COBOL_EXEC_SQL_RE.search(orig_src))
+                    unit.metadata["has_exec_cics"] = bool(COBOL_EXEC_CICS_RE.search(orig_src))
+
+        return result
+
+    def _strip_exec_blocks(self, source_text: str) -> str:
+        """Replace EXEC SQL/CICS ... END-EXEC blocks with blank lines.
+
+        Each content line in the block is replaced with spaces of the same
+        length so that byte offsets for all lines *after* the block remain
+        identical, keeping tree-sitter's start_point / end_point accurate.
+        """
+        lines = source_text.splitlines(keepends=True)
+        in_exec = False
+        for i, line in enumerate(lines):
+            upper = line.upper()
+            if not in_exec and _EXEC_START_RE.search(upper):
+                in_exec = True
+            if in_exec:
+                nl = "\n" if line.endswith("\n") else ""
+                lines[i] = " " * (len(line) - len(nl)) + nl
+            if in_exec and "END-EXEC" in upper:
+                in_exec = False
+        return "".join(lines)
 
     # =========================================================================
     # Required abstract implementations
@@ -100,6 +163,7 @@ class CobolParser(BaseLanguageParser):
             program_id = "UNKNOWN"
 
         # Build program-level CodeUnit (the whole file)
+        # Source will be restored to original in parse_source post-processing
         program_source = source[program_node.start_byte:program_node.end_byte].decode(
             "utf-8", errors="replace"
         )
@@ -178,7 +242,7 @@ class CobolParser(BaseLanguageParser):
                 section_name = self._header_name(child, source)
                 current_section = section_name
 
-                # Emit section unit (uses rest of section as source approximation)
+                # Emit section unit (source restored in post-processing)
                 section_end_byte, section_end_line = self._next_section_start(
                     children, i, source
                 )
@@ -237,7 +301,11 @@ class CobolParser(BaseLanguageParser):
         file_path: str,
         program_id: str,
     ) -> CodeUnit:
-        """Build a CodeUnit for the just-closed paragraph."""
+        """Build a CodeUnit for the just-closed paragraph.
+
+        Source text and EXEC SQL/CICS metadata are set from the stripped source
+        here; parse_source post-processing replaces them with original content.
+        """
         para_name, start_byte, start_row, section_name = open_para
         para_source = source[start_byte:end_byte].decode("utf-8", errors="replace")
 
@@ -262,6 +330,10 @@ class CobolParser(BaseLanguageParser):
             metadata={
                 "program_id": program_id,
                 "section": section_name or "",
+                # Flags set to False here; parse_source restores original source
+                # and re-evaluates these using the un-stripped text.
+                "has_exec_sql": False,
+                "has_exec_cics": False,
             },
         )
 

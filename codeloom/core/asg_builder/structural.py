@@ -12,7 +12,8 @@ from ..db.models import CodeUnit
 
 from .constants import (
     BUILTINS, CALL_RE, QUALIFIED_CALL_RE,
-    COBOL_PERFORM_RE, COBOL_CALL_RE, PL1_CALL_RE,
+    COBOL_PERFORM_RE, COBOL_PERFORM_THRU_RE, COBOL_GOTO_RE, COBOL_CALL_RE,
+    PL1_CALL_RE, PL1_GOTO_RE,
 )
 from .context import EdgeContext
 
@@ -277,9 +278,12 @@ def detect_calls(ctx: EdgeContext) -> List[dict]:
         # Language-specific call detection
         if u.language == "cobol":
             called_names.update(COBOL_PERFORM_RE.findall(u.source))
+            called_names.update(COBOL_PERFORM_THRU_RE.findall(u.source))
+            called_names.update(COBOL_GOTO_RE.findall(u.source))
             called_names.update(COBOL_CALL_RE.findall(u.source))
         elif u.language == "pl1":
             called_names.update(PL1_CALL_RE.findall(u.source))
+            called_names.update(PL1_GOTO_RE.findall(u.source))
 
         # Intersect with known unit names in the project
         matched = called_names & ctx.all_names
