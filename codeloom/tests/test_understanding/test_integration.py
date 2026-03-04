@@ -495,7 +495,7 @@ class TestDataModels:
         expected = {
             "http_endpoint", "message_handler", "scheduled_task",
             "cli_command", "event_listener", "startup_hook",
-            "public_api", "unknown",
+            "public_api", "batch_job", "unknown",
         }
         actual = {e.value for e in EntryPointType}
         assert actual == expected

@@ -24,7 +24,7 @@ from ..db import DatabaseManager
 from ..db.models import CodeEdge, CodeUnit
 
 from .context import EdgeContext
-from . import structural, oop, stored_proc, struts as struts_edges
+from . import structural, oop, stored_proc, struts as struts_edges, dataflow
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class ASGBuilder:
     - overrides:  method -> parent method (from @Override / override modifier)
     - calls_sp:   app code unit -> stored procedure (SP invocation patterns)
     - type_dep:   consumer -> referenced type (field types, param types, return types)
+    - data_flow:  JCL step (writer) -> JCL step (reader) sharing a dataset
     """
 
     def __init__(self, db_manager: DatabaseManager):
@@ -94,6 +95,9 @@ class ASGBuilder:
             # Domain-gated detectors
             if any(u.unit_type in ("stored_procedure", "sql_function") for u in units):
                 edges.extend(stored_proc.detect_sp_calls(ctx))
+
+            if any(u.unit_type == "step" and u.language == "jcl" for u in units):
+                edges.extend(dataflow.detect_dataset_flow(ctx))
 
             if any(u.unit_type.startswith("struts") or u.unit_type == "jsp_page" for u in units):
                 edges.extend(struts_edges.detect_struts_edges(ctx))

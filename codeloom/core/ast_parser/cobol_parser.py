@@ -26,7 +26,7 @@ EXEC SQL/CICS handling:
 
 import logging
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import tree_sitter
 from tree_sitter_language_pack import get_language as _ts_get_language
@@ -42,6 +42,19 @@ _COBOL_LANGUAGE = _ts_get_language("cobol")
 
 # Matches the start of an EXEC SQL or EXEC CICS block (line-level check)
 _EXEC_START_RE = re.compile(r"\bEXEC\s+(SQL|CICS)\b", re.IGNORECASE)
+
+# SELECT...ASSIGN TO: maps internal COBOL file name to JCL DDNAME
+# Common forms:
+#   SELECT file-name ASSIGN TO INFILE
+#   SELECT file-name ASSIGN TO UT-S-INFILE  (device class prefix)
+#   SELECT file-name ASSIGN TO DISK-INFILE
+# The DDNAME is the last hyphen-delimited segment (or the whole word if no prefix).
+_SELECT_ASSIGN_RE = re.compile(
+    r"\bSELECT\s+([\w-]+)\s+ASSIGN\s+(?:TO\s+)?(?:[\w]+-[A-Z]-)?([A-Z0-9@#$][\w-]*)",
+    re.IGNORECASE,
+)
+# Optional ORGANIZATION IS clause following SELECT
+_ORGANIZATION_RE = re.compile(r"\bORGANIZATION\s+IS\s+(\w+)", re.IGNORECASE)
 
 
 class CobolParser(BaseLanguageParser):
@@ -167,6 +180,7 @@ class CobolParser(BaseLanguageParser):
         program_source = source[program_node.start_byte:program_node.end_byte].decode(
             "utf-8", errors="replace"
         )
+        file_assignments = self._extract_file_assignments(program_source)
         program_unit = CodeUnit(
             unit_type="program",
             name=program_id,
@@ -177,7 +191,10 @@ class CobolParser(BaseLanguageParser):
             source=program_source,
             file_path=file_path,
             signature=f"PROGRAM-ID. {program_id}.",
-            metadata={"cobol_dialect": "cobol85"},
+            metadata={
+                "cobol_dialect": "cobol85",
+                "file_assignments": file_assignments,
+            },
         )
         units.append(program_unit)
 
@@ -336,6 +353,44 @@ class CobolParser(BaseLanguageParser):
                 "has_exec_cics": False,
             },
         )
+
+    # =========================================================================
+    # ENVIRONMENT DIVISION: SELECT...ASSIGN extraction
+    # =========================================================================
+
+    def _extract_file_assignments(self, program_source: str) -> List[Dict]:
+        """Extract SELECT...ASSIGN TO clauses from COBOL ENVIRONMENT DIVISION.
+
+        Returns a list of file assignment records:
+          [{"cobol_name": "EMPLOYEE-FILE", "ddname": "INFILE", "org": "SEQUENTIAL"}, ...]
+
+        Used to correlate COBOL internal file names with JCL DDNAME allocations.
+        The DDNAME is the right-most hyphen-segment that matches a JCL name pattern;
+        device-class prefixes like UT-S-, DISK-, or TAPE- are stripped automatically.
+        """
+        assignments: List[Dict] = []
+        seen: set = set()
+
+        for m in _SELECT_ASSIGN_RE.finditer(program_source):
+            cobol_name = m.group(1).strip().upper()
+            ddname = m.group(2).strip().upper()
+            if cobol_name in seen:
+                continue
+            seen.add(cobol_name)
+
+            # Try to find ORGANIZATION IS clause near this SELECT (within 200 chars)
+            org = "SEQUENTIAL"
+            org_m = _ORGANIZATION_RE.search(program_source, m.start(), m.start() + 300)
+            if org_m:
+                org = org_m.group(1).upper()
+
+            assignments.append({
+                "cobol_name": cobol_name,
+                "ddname": ddname,
+                "org": org,
+            })
+
+        return assignments
 
     # =========================================================================
     # COPY statement collection

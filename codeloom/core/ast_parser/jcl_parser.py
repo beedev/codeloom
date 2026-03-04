@@ -64,11 +64,19 @@ _PGM_RE = re.compile(r"\bPGM=([A-Z0-9@#$]{1,8})", re.IGNORECASE)
 _PROC_KW_RE = re.compile(r"\bPROC=([A-Z0-9@#$]{1,8})", re.IGNORECASE)
 
 # DD operand: DSNAME= or DSN= (dataset name, up to 44 chars, dot-separated qualifiers)
-# Leading && indicates a temporary dataset — strip && prefix.
+# Leading && indicates a temporary dataset — strip && prefix but keep for data_flow.
 _DSN_RE = re.compile(
-    r"\b(?:DSNAME|DSN)=(?:&&)?([A-Z0-9@#$][A-Z0-9@#$.]{0,43})",
+    r"\b(?:DSNAME|DSN)=(&&?[A-Z0-9@#$][A-Z0-9@#$.]{0,42}|[A-Z0-9@#$][A-Z0-9@#$.]{0,43})",
     re.IGNORECASE,
 )
+
+# DD operand: DISP= (dataset disposition — determines producer/consumer role)
+# Forms: DISP=SHR, DISP=OLD, DISP=(NEW,CATLG,DELETE), DISP=(OLD,PASS)
+_DISP_RE = re.compile(r"\bDISP=(\([^)]+\)|\w+)", re.IGNORECASE)
+
+# EXEC operand: PARM= (runtime parameter string passed to COBOL LINKAGE SECTION)
+# Forms: PARM='value', PARM=value, PARM=(val1,val2)
+_PARM_RE = re.compile(r"\bPARM=(?:'([^']*)'|(\([^)]*\))|([^,\s/]+))", re.IGNORECASE)
 
 # Valid JCL name: starts with letter/@/#/$, up to 8 chars (for shorthand EXEC)
 _JCL_NAME_RE = re.compile(r"^[A-Z@#$][A-Z0-9@#$]{0,7}$", re.IGNORECASE)
@@ -96,9 +104,13 @@ class JclParser:
       "proc"  — Inline PROC...PEND definition (cataloged procedure template)
 
     Key metadata on step units:
-      "pgm": str       — program name when EXEC PGM= is used
-      "proc_name": str — proc name when EXEC PROC= or EXEC name is used
-    These drive calls edges in the ASG builder (JCL step → COBOL program).
+      "pgm": str              — program name when EXEC PGM= is used
+      "proc_name": str        — proc name when EXEC PROC= or EXEC name is used
+      "parm": str | None      — PARM= value (runtime parameters to program)
+      "dd_statements": list   — DD allocations for this step:
+          [{"ddname": "INFILE", "dsn": "PROD.CUST.MASTER", "disp": "SHR"}, ...]
+    These drive calls edges (pgm/proc_name) and data_flow edges (dd_statements)
+    in the ASG builder.
     """
 
     def parse_file(self, file_path: str, project_root: str = "") -> ParseResult:
@@ -166,6 +178,10 @@ class JclParser:
                 sig = f"{s['name']} EXEC"
             if parent:
                 meta["parent_name"] = parent
+            if s.get("parm"):
+                meta["parm"] = s["parm"]
+            if s.get("dd_statements"):
+                meta["dd_statements"] = s["dd_statements"]
 
             units.append(CodeUnit(
                 unit_type="step",
@@ -250,12 +266,22 @@ class JclParser:
                         ):
                             proc_name = first_tok.upper()
 
+                # Extract PARM= from EXEC operands
+                parm_val: Optional[str] = None
+                parm_m = _PARM_RE.search(operands)
+                if parm_m:
+                    parm_val = (
+                        parm_m.group(1) or parm_m.group(2) or parm_m.group(3) or ""
+                    ).strip()
+
                 open_step = {
                     "name": step_name,
                     "start_line": lineno,
                     "pgm": pgm,
                     "proc_name": proc_name,
                     "parent_name": _parent_name(),
+                    "parm": parm_val,
+                    "dd_statements": [],
                 }
 
             elif op == "PROC":
@@ -292,13 +318,32 @@ class JclParser:
                     current_proc = None
 
             elif op == "DD":
-                # Collect dataset references as imports
+                # Per-step DD allocation capture (ddname, dsn, disp)
+                ddname = name  # Name field of DD statement IS the DDNAME
+                dsn_val: Optional[str] = None
+                disp_val: Optional[str] = None
+
                 dsn_m = _DSN_RE.search(operands)
                 if dsn_m:
-                    dsn = dsn_m.group(1).rstrip(".")
-                    if dsn not in seen_dsns:
-                        seen_dsns.add(dsn)
-                        imports.append(f"DSNAME={dsn}")
+                    raw_dsn = dsn_m.group(1).rstrip(".")
+                    dsn_val = raw_dsn  # Keep && prefix for temp dataset detection
+                    # Strip && for imports deduplication
+                    clean_dsn = raw_dsn.lstrip("&")
+                    if clean_dsn not in seen_dsns:
+                        seen_dsns.add(clean_dsn)
+                        imports.append(f"DSNAME={clean_dsn}")
+
+                disp_m = _DISP_RE.search(operands)
+                if disp_m:
+                    disp_val = disp_m.group(1).strip("()").strip()
+
+                # Append to open step's dd_statements list
+                if open_step is not None and ddname:
+                    open_step["dd_statements"].append({
+                        "ddname": ddname,
+                        "dsn": dsn_val,
+                        "disp": disp_val,
+                    })
 
         # Close any open step and job at EOF
         _close_step(line_count)

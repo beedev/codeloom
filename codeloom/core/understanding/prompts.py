@@ -8,7 +8,19 @@ Three main templates:
 
 from typing import Any, Dict, List, Optional
 
-from .models import AnalysisTier, EntryPoint
+from .models import AnalysisTier, EntryPoint, EntryPointType
+
+
+MAINFRAME_ANALYSIS_HINTS = """## Mainframe Batch Analysis Notes
+
+When analyzing JCL + COBOL code:
+1. **Dataset resolution**: The **JCL Context** table above each COBOL program maps COBOL internal file names (`SELECT file-name ASSIGN TO ddname`) to actual dataset names (DSN). Use the DSN names — not the DDNAMEs or COBOL internal file names — when classifying file integrations.
+2. **Data flow**: If multiple JCL steps appear, earlier steps producing datasets (DISP=NEW or PASS) feed later steps reading them (DISP=SHR or OLD). These represent inter-step data dependencies.
+3. **PARM values**: The JCL PARM string passes runtime configuration to the COBOL LINKAGE SECTION. Note PARM content shown in the JCL Context annotation.
+4. **Integrations**: Use `type: "file_system"` with the actual dataset name (e.g., `PROD.CUST.MASTER`), not the DDNAME or COBOL internal file variable.
+5. **Business rules**: COBOL paragraphs are the primary unit of business logic. Paragraph names often hint at purpose (e.g., `1000-VALIDATE-INPUT`, `2000-COMPUTE-PAY`, `9000-ABORT`).
+6. **EXEC SQL / EXEC CICS**: Paragraphs tagged with these should be classified as `database` or `transaction_manager` integration type respectively.
+"""
 
 
 def build_chain_analysis_prompt(
@@ -38,6 +50,13 @@ def build_chain_analysis_prompt(
                 hints.append(f"  Security config: {list(ctx['security_config'].keys())}")
         framework_section = "\n## FRAMEWORK CONTEXT\n" + "\n".join(hints)
 
+    mainframe_section = ""
+    if (
+        entry_point.language in ("jcl", "cobol")
+        or entry_point.entry_type == EntryPointType.BATCH_JOB
+    ):
+        mainframe_section = "\n" + MAINFRAME_ANALYSIS_HINTS
+
     tier_notice = ""
     if tier == AnalysisTier.TIER_2:
         tier_notice = (
@@ -62,7 +81,7 @@ def build_chain_analysis_prompt(
 - Detection: {entry_point.detected_by}
 {framework_section}
 {tier_notice}
-
+{mainframe_section}
 ## CALL CHAIN SOURCE CODE
 The following source code shows the complete (or partial) call chain starting from the entry point above.
 Each unit is annotated with its file path, line numbers, and call depth.

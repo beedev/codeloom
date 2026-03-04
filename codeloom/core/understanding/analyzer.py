@@ -10,6 +10,7 @@ Reuses TokenCounter from core/code_chunker/token_counter.py.
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from llama_index.core import Settings
@@ -22,6 +23,27 @@ from .models import (
 from . import prompts
 
 logger = logging.getLogger(__name__)
+
+# ── JCL/COBOL cross-reference parsing (for context annotations) ──────
+# Operate on CallTreeNode.source (JCL step text includes EXEC + DD lines)
+
+_JCL_DD_LINE_RE = re.compile(
+    r"^//([A-Z0-9@#$]{1,8})\s+DD\s+(.*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_JCL_DSN_RE = re.compile(
+    r"\b(?:DSNAME|DSN)=(&&?[A-Z0-9@#$][A-Z0-9@#$.]{0,42}|[A-Z0-9@#$][A-Z0-9@#$.]{0,43})",
+    re.IGNORECASE,
+)
+_JCL_DISP_RE = re.compile(r"\bDISP=(\([^)]+\)|\w+)", re.IGNORECASE)
+_JCL_PARM_RE = re.compile(
+    r"\bPARM=(?:'([^']*)'|(\([^)]*\))|([^,\s/]+))",
+    re.IGNORECASE,
+)
+_COBOL_SELECT_RE = re.compile(
+    r"\bSELECT\s+([\w-]+)\s+ASSIGN\s+(?:TO\s+)?(?:[\w]+-[A-Z]-)?([A-Z0-9@#$][\w-]*)",
+    re.IGNORECASE,
+)
 
 # Tier thresholds (tokens) — defaults; overridden by config if present
 TIER_1_MAX = 100_000
@@ -152,7 +174,12 @@ class ChainAnalyzer:
         else:
             return self._format_with_summaries(tree, budget=TIER_2_MAX)
 
-    def _format_full_source(self, node: CallTreeNode, indent: int = 0) -> str:
+    def _format_full_source(
+        self,
+        node: CallTreeNode,
+        indent: int = 0,
+        parent_node: Optional[CallTreeNode] = None,
+    ) -> str:
         """Format full source tree with file path headers."""
         parts = []
         prefix = "  " * indent
@@ -163,12 +190,15 @@ class ChainAnalyzer:
         parts.append(header)
 
         if node.source:
+            annotation = self._build_jcl_context_annotation(node, parent_node)
+            if annotation:
+                parts.append(annotation)
             parts.append(f"{prefix}```{node.language}")
             parts.append(node.source)
             parts.append(f"{prefix}```")
 
         for child in node.children:
-            parts.append(self._format_full_source(child, indent + 1))
+            parts.append(self._format_full_source(child, indent + 1, parent_node=node))
 
         return "\n".join(parts)
 
@@ -188,13 +218,16 @@ class ChainAnalyzer:
         remaining_budget = budget
         deep_candidates = []
 
-        def _walk(node: CallTreeNode):
+        def _walk(
+            node: CallTreeNode,
+            parent_node: Optional[CallTreeNode] = None,
+        ):
             nonlocal remaining_budget
 
             if node.depth <= 2 and node.source:
                 source_tokens = node.token_count or self._tc.count(node.source)
                 if source_tokens <= remaining_budget:
-                    parts.append(self._format_unit_full(node))
+                    parts.append(self._format_unit_full(node, parent_node))
                     remaining_budget -= source_tokens
                 else:
                     parts.append(self._format_unit_signature(node))
@@ -208,7 +241,7 @@ class ChainAnalyzer:
                 remaining_budget -= 50
 
             for child in node.children:
-                _walk(child)
+                _walk(child, parent_node=node)
 
         _walk(tree)
 
@@ -397,10 +430,107 @@ class ChainAnalyzer:
 
     # ── Formatting Helpers ──────────────────────────────────────────────
 
-    def _format_unit_full(self, node: CallTreeNode) -> str:
+    def _format_unit_full(
+        self,
+        node: CallTreeNode,
+        parent_node: Optional[CallTreeNode] = None,
+    ) -> str:
         header = f"## {node.qualified_name} [{node.file_path}:{node.start_line}-{node.end_line}]"
+        annotation = self._build_jcl_context_annotation(node, parent_node)
+        if annotation:
+            return f"{header}\n{annotation}```{node.language}\n{node.source}\n```"
         return f"{header}\n```{node.language}\n{node.source}\n```"
 
     def _format_unit_signature(self, node: CallTreeNode) -> str:
         sig_line = node.source.split("\n")[0] if node.source else node.name
         return f"- `{node.qualified_name}` ({node.unit_type}, depth={node.depth}): `{sig_line}`"
+
+    # ── JCL/COBOL Context Annotation ────────────────────────────────────
+
+    def _build_jcl_context_annotation(
+        self,
+        node: CallTreeNode,
+        parent_node: Optional[CallTreeNode],
+    ) -> str:
+        """Build a JCL context annotation table for a COBOL program node.
+
+        Inserted between the unit header and its code fence when a COBOL
+        program is invoked by a JCL step. The table cross-references:
+          - COBOL internal file names (from SELECT...ASSIGN clauses)
+          - JCL DDNAMEs
+          - Actual dataset names (DSN= values) and disposition (read/write)
+
+        Returns empty string if context is unavailable or not applicable.
+        """
+        if node.unit_type != "program" or node.language != "cobol":
+            return ""
+        if (
+            parent_node is None
+            or parent_node.unit_type != "step"
+            or parent_node.language != "jcl"
+        ):
+            return ""
+
+        dd_allocs = self._extract_jcl_dd_allocs(parent_node.source or "")
+        if not dd_allocs:
+            return ""
+
+        # Reverse map: ddname_upper → cobol_name from SELECT...ASSIGN
+        file_assigns = self._extract_cobol_file_assigns(node.source or "")
+        ddname_to_cobol = {v: k for k, v in file_assigns.items()}
+
+        lines = [
+            f"> **JCL Context** (allocated by `{parent_node.name}`):",
+            "> | COBOL File Name | DDNAME | Dataset (DSN) | Access |",
+            "> |----------------|--------|---------------|--------|",
+        ]
+        for ddname in sorted(dd_allocs):
+            alloc = dd_allocs[ddname]
+            cobol_name = ddname_to_cobol.get(ddname, "—")
+            dsn = alloc.get("dsn") or "—"
+            disp = alloc.get("disp") or "—"
+            lines.append(f"> | {cobol_name} | {ddname} | {dsn} | {disp} |")
+
+        parm = self._extract_jcl_parm(parent_node.source or "")
+        if parm:
+            lines.append(">")
+            lines.append(f"> **PARM**: `{parm}`")
+
+        return "\n".join(lines) + "\n\n"
+
+    def _extract_jcl_dd_allocs(
+        self, source: str
+    ) -> Dict[str, Dict[str, Optional[str]]]:
+        """Extract {DDNAME: {dsn, disp}} from a JCL step source text."""
+        allocs: Dict[str, Dict[str, Optional[str]]] = {}
+        for m in _JCL_DD_LINE_RE.finditer(source):
+            ddname = m.group(1).strip().upper()
+            operands = m.group(2) or ""
+            dsn_m = _JCL_DSN_RE.search(operands)
+            disp_m = _JCL_DISP_RE.search(operands)
+            dsn_val: Optional[str] = (
+                dsn_m.group(1).rstrip(".").lstrip("&") if dsn_m else None
+            )
+            disp_val: Optional[str] = (
+                disp_m.group(1).strip("()").strip() if disp_m else None
+            )
+            if ddname:
+                allocs[ddname] = {"dsn": dsn_val, "disp": disp_val}
+        return allocs
+
+    def _extract_cobol_file_assigns(self, source: str) -> Dict[str, str]:
+        """Extract {cobol_name_upper: ddname_upper} from COBOL SELECT...ASSIGN."""
+        assigns: Dict[str, str] = {}
+        for m in _COBOL_SELECT_RE.finditer(source):
+            cobol_name = m.group(1).strip().upper()
+            ddname = m.group(2).strip().upper()
+            if cobol_name not in assigns:
+                assigns[cobol_name] = ddname
+        return assigns
+
+    def _extract_jcl_parm(self, source: str) -> Optional[str]:
+        """Extract PARM= value from JCL source text."""
+        m = _JCL_PARM_RE.search(source)
+        if not m:
+            return None
+        return (m.group(1) or m.group(2) or m.group(3) or "").strip() or None

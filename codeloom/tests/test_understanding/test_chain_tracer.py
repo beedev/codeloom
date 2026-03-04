@@ -181,6 +181,7 @@ class TestClassifyEntryType:
 
         row = MagicMock()
         row.name = "test_handle_order"
+        row.unit_type = "function"
         row.metadata = {}
 
         assert tracer._classify_entry_type(row) == EntryPointType.UNKNOWN
