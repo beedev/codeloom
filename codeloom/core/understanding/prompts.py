@@ -19,6 +19,13 @@ _COBOL_ANALYSIS_HINTS = """\
 Paragraph names often hint at purpose (e.g., `1000-VALIDATE-INPUT`, `2000-COMPUTE-PAY`, `9000-ABORT`).
 2. **EXEC SQL / EXEC CICS**: Paragraphs tagged with these should be classified as \
 `database` or `transaction_manager` integration type respectively.
+3. **IMS DL/I**: Paragraphs calling `CBLTDLI`/`ASMTDLI`/`AIBTDLI` or containing \
+`EXEC DLI` access an IBM IMS hierarchical database. Classify as `database` integration type. \
+DL/I function codes indicate operation direction: \
+GU/GN/GNP/GHU/GHN/GHNP = read, ISRT = insert, DLET = delete, REPL = update. \
+PCB (Program Communication Block) identifies the IMS database segment hierarchy. \
+SSA (Segment Search Arguments) act as filter criteria (analogous to WHERE clauses). \
+PL/1 programs use `CALL PLITDLI` with the same function code conventions.
 """
 
 # Additional hints injected only when the call chain is rooted at a JCL job

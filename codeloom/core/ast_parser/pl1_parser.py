@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
 from .models import CodeUnit, ParseResult
+from ..asg_builder.constants import EXEC_DLI_RE, IMS_FUNC_CODE_RE, PL1_IMS_CALL_RE
 
 logger = logging.getLogger(__name__)
 
@@ -296,6 +297,8 @@ class Pl1Parser:
                     metadata={
                         "params": params,
                         "aliases": labels[1:],
+                        "has_ims_dli": False,
+                        "ims_functions": [],
                     },
                 )
                 units.append(unit)
@@ -353,8 +356,9 @@ class Pl1Parser:
                 else:
                     sig = f"{closed.name}: PACKAGE;"
 
-                # Scan for ON condition handlers in procedure source
+                # Scan for ON condition handlers and IMS DL/I calls in procedure source
                 on_conditions = _extract_on_conditions(block_source)
+                ims_info = _extract_ims_calls(block_source)
 
                 unit = CodeUnit(
                     unit_type=closed.keyword,
@@ -371,6 +375,8 @@ class Pl1Parser:
                         "params": closed.params,
                         "aliases": closed.aliases,
                         "on_conditions": on_conditions,
+                        "has_ims_dli": ims_info["has_ims_dli"],
+                        "ims_functions": ims_info["ims_functions"],
                     },
                 )
                 units.append(unit)
@@ -391,6 +397,7 @@ class Pl1Parser:
                 [b.name for b in block_stack[: block_stack.index(block) + 1]]
             )
             on_conditions = _extract_on_conditions(block_source)
+            ims_info = _extract_ims_calls(block_source)
             unit = CodeUnit(
                 unit_type=block.keyword,
                 name=block.name,
@@ -405,6 +412,8 @@ class Pl1Parser:
                     "params": block.params,
                     "aliases": block.aliases,
                     "on_conditions": on_conditions,
+                    "has_ims_dli": ims_info["has_ims_dli"],
+                    "ims_functions": ims_info["ims_functions"],
                     "unclosed": True,
                 },
             )
@@ -433,3 +442,21 @@ def _extract_on_conditions(source: str) -> List[str]:
     for m in _ON_CONDITION_RE.finditer(source):
         found.add(m.group(1).upper())
     return sorted(found)
+
+
+def _extract_ims_calls(source: str) -> Dict[str, object]:
+    """Detect IMS DL/I calls and extract function codes from a PL/1 block.
+
+    Looks for CALL PLITDLI(...) and EXEC DLI ... END-EXEC blocks.
+    Function codes (GU, ISRT, etc.) are extracted from quoted literals.
+
+    Returns:
+        dict with keys:
+          - has_ims_dli (bool): True if any DL/I call found
+          - ims_functions (List[str]): sorted list of unique function codes
+    """
+    has_ims = bool(PL1_IMS_CALL_RE.search(source) or EXEC_DLI_RE.search(source))
+    funcs: List[str] = []
+    if has_ims:
+        funcs = sorted({m.group(1).upper() for m in IMS_FUNC_CODE_RE.finditer(source)})
+    return {"has_ims_dli": has_ims, "ims_functions": funcs}

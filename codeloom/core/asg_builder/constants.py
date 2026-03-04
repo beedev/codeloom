@@ -70,6 +70,26 @@ COBOL_CALL_RE = re.compile(r'\bCALL\s+["\']?([\w-]+)["\']?', re.IGNORECASE)
 COBOL_EXEC_SQL_RE = re.compile(r"\bEXEC\s+SQL\b", re.IGNORECASE)
 COBOL_EXEC_CICS_RE = re.compile(r"\bEXEC\s+CICS\b", re.IGNORECASE)
 
+# ── IMS DL/I detection patterns ──────────────────────────────────
+
+# COBOL: CALL 'CBLTDLI' / 'ASMTDLI' / 'AIBTDLI' (all three IMS call interfaces)
+COBOL_IMS_CALL_RE = re.compile(
+    r"\bCALL\s+['\"]?(CBLTDLI|ASMTDLI|AIBTDLI)['\"]?", re.IGNORECASE
+)
+
+# PL/1: CALL PLITDLI(count, funccode, pcb, ioarea, ssa...)
+PL1_IMS_CALL_RE = re.compile(r"\bCALL\s+PLITDLI\s*\(", re.IGNORECASE)
+
+# EXEC DLI ... END-EXEC (alternate CICS-hosted DL/I syntax, COBOL and PL/1)
+EXEC_DLI_RE = re.compile(r"\bEXEC\s+DLI\b", re.IGNORECASE)
+
+# DL/I function codes appear as quoted literals in DL/I call arguments.
+# Covers all standard IBM IMS function codes.
+IMS_FUNC_CODE_RE = re.compile(
+    r"""['"](GU|GN|GNP|GHU|GHN|GHNP|ISRT|DLET|REPL|CHKP|XRST|TERM|CLSD)['"]""",
+    re.IGNORECASE,
+)
+
 # ── PL/1 call detection patterns ─────────────────────────────────
 
 # CALL procedure_name[(args)];
@@ -112,6 +132,9 @@ BUILTINS = frozenset({
     # COBOL reserved words that commonly follow PERFORM (not paragraph names)
     "VARYING", "UNTIL", "TIMES", "THROUGH", "THRU", "TEST", "AFTER",
     "BEFORE", "INLINE", "WITH", "NO",
+    # IMS DL/I interface entry points (COBOL and PL/1 — never user-defined units)
+    "CBLTDLI", "ASMTDLI", "AIBTDLI",  # COBOL DL/I call interfaces
+    "PLITDLI",                          # PL/1 DL/I call interface
     # PL/1 built-in functions (not user-defined procedures)
     "SUBSTR", "LENGTH", "INDEX", "TRIM", "VERIFY", "TRANSLATE",
     "FIXED", "FLOAT", "CHAR", "BIT", "COMPLEX", "REAL", "IMAG",

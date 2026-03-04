@@ -33,15 +33,21 @@ from tree_sitter_language_pack import get_language as _ts_get_language
 
 from .base import BaseLanguageParser
 from .models import CodeUnit, ParseResult
-from ..asg_builder.constants import COBOL_EXEC_SQL_RE, COBOL_EXEC_CICS_RE
+from ..asg_builder.constants import (
+    COBOL_EXEC_SQL_RE,
+    COBOL_EXEC_CICS_RE,
+    COBOL_IMS_CALL_RE,
+    EXEC_DLI_RE,
+    IMS_FUNC_CODE_RE,
+)
 
 logger = logging.getLogger(__name__)
 
 # Loaded once at import time — thread-safe (Language objects are immutable)
 _COBOL_LANGUAGE = _ts_get_language("cobol")
 
-# Matches the start of an EXEC SQL or EXEC CICS block (line-level check)
-_EXEC_START_RE = re.compile(r"\bEXEC\s+(SQL|CICS)\b", re.IGNORECASE)
+# Matches the start of EXEC SQL, EXEC CICS, or EXEC DLI blocks (line-level check)
+_EXEC_START_RE = re.compile(r"\bEXEC\s+(SQL|CICS|DLI)\b", re.IGNORECASE)
 
 # SELECT...ASSIGN TO: maps internal COBOL file name to JCL DDNAME
 # Common forms:
@@ -104,6 +110,15 @@ class CobolParser(BaseLanguageParser):
                     unit.metadata = unit.metadata or {}
                     unit.metadata["has_exec_sql"] = bool(COBOL_EXEC_SQL_RE.search(orig_src))
                     unit.metadata["has_exec_cics"] = bool(COBOL_EXEC_CICS_RE.search(orig_src))
+                    has_ims = bool(
+                        COBOL_IMS_CALL_RE.search(orig_src) or EXEC_DLI_RE.search(orig_src)
+                    )
+                    unit.metadata["has_ims_dli"] = has_ims
+                    if has_ims:
+                        funcs = sorted(
+                            {m.group(1).upper() for m in IMS_FUNC_CODE_RE.finditer(orig_src)}
+                        )
+                        unit.metadata["ims_functions"] = funcs
 
         return result
 
@@ -351,6 +366,8 @@ class CobolParser(BaseLanguageParser):
                 # and re-evaluates these using the un-stripped text.
                 "has_exec_sql": False,
                 "has_exec_cics": False,
+                "has_ims_dli": False,
+                "ims_functions": [],
             },
         )
 
