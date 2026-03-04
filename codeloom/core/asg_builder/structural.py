@@ -267,7 +267,7 @@ def detect_calls(ctx: EdgeContext) -> List[dict]:
     """
     edges = []
     for u in ctx.units:
-        if u.unit_type not in ("function", "method", "paragraph", "procedure", "entry") or not u.source:
+        if u.unit_type not in ("function", "method", "paragraph", "procedure", "entry", "step") or not u.source:
             continue
 
         # Find all function-call-like patterns in the source
@@ -284,6 +284,13 @@ def detect_calls(ctx: EdgeContext) -> List[dict]:
         elif u.language == "pl1":
             called_names.update(PL1_CALL_RE.findall(u.source))
             called_names.update(PL1_GOTO_RE.findall(u.source))
+        elif u.language == "jcl" and u.unit_type == "step":
+            # JCL steps invoke programs/procs via metadata — not inline source calls.
+            meta = u.unit_metadata or {}
+            if meta.get("pgm"):
+                called_names.add(meta["pgm"])      # e.g. "CUSTUPD" → COBOL program
+            if meta.get("proc_name"):
+                called_names.add(meta["proc_name"])  # e.g. "PAYRPT" → JCL proc
 
         # Intersect with known unit names in the project
         matched = called_names & ctx.all_names

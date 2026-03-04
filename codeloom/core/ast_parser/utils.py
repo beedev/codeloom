@@ -35,6 +35,10 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".pl1": "pl1",
     ".pli": "pl1",
     ".plx": "pl1",
+    # JCL (regex-based parser)
+    ".jcl": "jcl",
+    ".jcllib": "jcl",
+    ".proc": "jcl",
 }
 
 # Directories to skip during file walking
@@ -133,6 +137,9 @@ def get_parser(language: str) -> "BaseLanguageParser":
         elif language == "pl1":
             from .pl1_parser import Pl1Parser
             _parser_registry["pl1"] = Pl1Parser()
+        elif language == "jcl":
+            from .jcl_parser import JclParser
+            _parser_registry["jcl"] = JclParser()
         else:
             raise ValueError(
                 f"Unsupported language: {language}. "
