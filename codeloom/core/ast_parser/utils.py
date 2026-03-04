@@ -4,6 +4,7 @@ Language detection, parser registry, and helper functions.
 """
 
 import os
+import re
 from typing import Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -70,16 +71,77 @@ _parser_registry: Dict[str, "BaseLanguageParser"] = {}
 
 
 def detect_language(file_path: str) -> Optional[str]:
-    """Detect programming language from file extension.
+    """Detect programming language from file extension, with content fallback.
+
+    For files with a known extension (e.g. .py, .java, .cbl) the extension
+    table is used — no file I/O needed.  When the file has no extension (common
+    with mainframe datasets exported to disk: MAINPGM, COBRUN, SORT1, …) the
+    first 20 lines are read to apply COBOL / JCL / PL/1 heuristics.
 
     Args:
-        file_path: Path to the source file
+        file_path: Absolute or relative path to the source file.
 
     Returns:
-        Language identifier string or None if unsupported
+        Language identifier string or None if unsupported / unrecognised.
     """
     _, ext = os.path.splitext(file_path)
-    return SUPPORTED_EXTENSIONS.get(ext.lower())
+    if ext:
+        return SUPPORTED_EXTENSIONS.get(ext.lower())
+
+    # No extension — try content-based detection (mainframe files, etc.)
+    return _detect_language_from_content(file_path)
+
+
+# ---------------------------------------------------------------------------
+# Content-based language heuristics for extensionless files
+# ---------------------------------------------------------------------------
+
+# COBOL: fixed-format divisions / PROGRAM-ID paragraph
+_COBOL_KEYWORDS_RE = re.compile(
+    r"\b(IDENTIFICATION\s+DIVISION|PROGRAM-ID|PROCEDURE\s+DIVISION|DATA\s+DIVISION"
+    r"|ENVIRONMENT\s+DIVISION|WORKING-STORAGE\s+SECTION)\b",
+    re.IGNORECASE,
+)
+
+# PL/1: labelled PROCEDURE or standalone PROCEDURE/PACKAGE keyword
+_PL1_KEYWORDS_RE = re.compile(
+    r"\bPROCEDURE\b|\bPROC\b|\bPACKAGE\b|\bDECLARE\b|\bDCL\b|\bPUT\s+SKIP\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_language_from_content(file_path: str) -> Optional[str]:
+    """Read the first 20 lines of a file and apply COBOL/JCL/PL/1 heuristics.
+
+    Returns a language identifier or None if the content is unrecognised.
+    Only called for extensionless files to avoid unnecessary file I/O.
+    Silently returns None on any I/O error.
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+            head = [fh.readline() for _ in range(20)]
+    except OSError:
+        return None
+
+    # Count lines that start with // (JCL statement indicator)
+    jcl_lines = sum(1 for ln in head if ln.startswith("//"))
+    if jcl_lines >= 2:
+        return "jcl"
+
+    text = "".join(head)
+
+    # COBOL: any canonical division or PROGRAM-ID keyword present
+    if _COBOL_KEYWORDS_RE.search(text):
+        return "cobol"
+
+    # PL/1: PROCEDURE/PROC/DECLARE keywords without COBOL divisions
+    # Only trigger when multiple PL/1-specific tokens are present to avoid
+    # false positives from SQL or other languages.
+    pl1_hits = len(_PL1_KEYWORDS_RE.findall(text))
+    if pl1_hits >= 2:
+        return "pl1"
+
+    return None
 
 
 def get_parser(language: str) -> "BaseLanguageParser":

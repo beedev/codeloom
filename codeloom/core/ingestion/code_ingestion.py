@@ -343,7 +343,7 @@ class CodeIngestionService:
                 except OSError:
                     continue
 
-                language = detect_language(fname)
+                language = detect_language(full_path)
                 if language:
                     files.append(full_path)
 
