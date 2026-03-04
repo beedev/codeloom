@@ -116,6 +116,14 @@ BUILTINS = frozenset({
     "SUBSTR", "LENGTH", "INDEX", "TRIM", "VERIFY", "TRANSLATE",
     "FIXED", "FLOAT", "CHAR", "BIT", "COMPLEX", "REAL", "IMAG",
     "ABS", "SIGN", "MOD", "MAX", "MIN", "SUM", "PROD",
+    "SQRT", "SIN", "COS", "EXP", "LOG", "ADDR", "ALLOCATION",
+    "BINARY", "DECIMAL", "DATE", "TIME", "DATETIME",
+    # PL/1 ON condition names (24 predefined; appear after ON keyword — not procedure names)
+    "AREA", "ATTENTION", "CHECK", "CONDITION", "CONVERSION",
+    "ENDFILE", "ENDPAGE", "ERROR", "FINISH", "FIXEDOVERFLOW",
+    "KEY", "NAME", "OVERFLOW", "PENDING", "RECORD", "SIZE",
+    "STRINGRANGE", "STRINGSIZE", "SUBSCRIPTRANGE",
+    "TRANSMIT", "UNDEFINEDFILE", "UNDERFLOW", "ZERODIVIDE",
     # VB.NET builtins
     "MsgBox", "InputBox", "CStr", "CInt", "CLng", "CDbl", "CSng", "CBool",
     "CByte", "CChar", "CDate", "CDec", "CObj", "CShort", "CType",

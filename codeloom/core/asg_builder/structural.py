@@ -267,7 +267,7 @@ def detect_calls(ctx: EdgeContext) -> List[dict]:
     """
     edges = []
     for u in ctx.units:
-        if u.unit_type not in ("function", "method", "paragraph", "procedure") or not u.source:
+        if u.unit_type not in ("function", "method", "paragraph", "procedure", "entry") or not u.source:
             continue
 
         # Find all function-call-like patterns in the source
