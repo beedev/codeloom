@@ -20,6 +20,7 @@ class EntryPointType(Enum):
     EVENT_LISTENER = "event_listener"
     STARTUP_HOOK = "startup_hook"
     PUBLIC_API = "public_api"
+    BATCH_JOB = "batch_job"      # COBOL program, JCL job, PL/1 MAIN procedure
     UNKNOWN = "unknown"
 
 

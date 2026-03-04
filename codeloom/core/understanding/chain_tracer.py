@@ -102,6 +102,21 @@ _ANNOTATION_PATTERNS = {
             r"@MessagePattern",
         ],
     },
+    # PL/1: OPTIONS(MAIN) marks the procedure as the program entry point
+    "pl1": {
+        EntryPointType.BATCH_JOB: [
+            r"\bOPTIONS\s*\(\s*MAIN\b",
+        ],
+    },
+    # JCL: JOB card is always a batch entry point (invoked by a scheduler)
+    "jcl": {
+        EntryPointType.BATCH_JOB: [
+            r"//\w+\s+JOB\b",
+        ],
+    },
+    # COBOL: PROGRAM-ID is the top-level entry — the heuristic (Pass 1) handles
+    # COBOL correctly via zero-incoming-calls on 'program' unit_type.
+    # Pass 2 catches explicit OPTIONS(MAIN) analog if needed in future.
 }
 
 
@@ -248,7 +263,12 @@ class ChainTracer:
             FROM code_units u
             JOIN code_files f ON u.file_id = f.file_id
             WHERE u.project_id = :pid
-              AND u.unit_type IN ('function', 'method')
+              AND u.unit_type IN (
+                  'function', 'method',
+                  'program', 'paragraph',
+                  'procedure', 'entry',
+                  'job'
+              )
               AND NOT EXISTS (
                   SELECT 1 FROM code_edges e
                   WHERE e.target_unit_id = u.unit_id
@@ -372,12 +392,24 @@ class ChainTracer:
     def _classify_entry_type(self, row) -> EntryPointType:
         """Classify entry type from heuristic detection (Pass 1)."""
         name = (row.name or "").lower()
+        unit_type = getattr(row, "unit_type", None) or ""
         meta = row.metadata or {}
         modifiers = meta.get("modifiers", [])
 
+        # Mainframe / batch entry points
+        if unit_type in ("program", "job"):
+            return EntryPointType.BATCH_JOB
+        if unit_type == "procedure" and getattr(row, "language", "") == "pl1":
+            # PL/1 MAIN procedures are batch entry points; others are library calls
+            return EntryPointType.BATCH_JOB
+
         if name == "main" and "static" in modifiers:
             return EntryPointType.CLI_COMMAND
-        if name.startswith("test_") or name.startswith("test"):
+        # Skip test functions (not meaningful as public entry points)
+        # Exempted for mainframe types since COBOL names like "TEST-VALID" are common
+        if unit_type in ("function", "method") and (
+            name.startswith("test_") or name.startswith("test")
+        ):
             return EntryPointType.UNKNOWN
         if meta.get("is_endpoint"):
             return EntryPointType.HTTP_ENDPOINT
