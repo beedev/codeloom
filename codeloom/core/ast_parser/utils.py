@@ -27,6 +27,14 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".aspx": "aspx",
     ".ascx": "aspx",
     ".master": "aspx",
+    # COBOL (tree-sitter via tree-sitter-language-pack)
+    ".cbl": "cobol",
+    ".cob": "cobol",
+    ".cobol": "cobol",
+    # PL/1 (regex-based parser)
+    ".pl1": "pl1",
+    ".pli": "pl1",
+    ".plx": "pl1",
 }
 
 # Directories to skip during file walking
@@ -119,6 +127,12 @@ def get_parser(language: str) -> "BaseLanguageParser":
         elif language == "aspx":
             from .asp_parser import AspParser
             _parser_registry["aspx"] = AspParser()
+        elif language == "cobol":
+            from .cobol_parser import CobolParser
+            _parser_registry["cobol"] = CobolParser()
+        elif language == "pl1":
+            from .pl1_parser import Pl1Parser
+            _parser_registry["pl1"] = Pl1Parser()
         else:
             raise ValueError(
                 f"Unsupported language: {language}. "

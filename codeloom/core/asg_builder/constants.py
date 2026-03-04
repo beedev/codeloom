@@ -45,6 +45,21 @@ EXEC_IN_STRING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── COBOL call detection patterns ────────────────────────────────
+
+# PERFORM paragraph-name / PERFORM section-name [THRU ...]
+# COBOL names can contain hyphens: 1000-INIT, PROCESS-DATA
+COBOL_PERFORM_RE = re.compile(r"\bPERFORM\s+([\w-]+)", re.IGNORECASE)
+
+# CALL 'program-name' USING ... (external program invocation)
+COBOL_CALL_RE = re.compile(r'\bCALL\s+["\']?([\w-]+)["\']?', re.IGNORECASE)
+
+# ── PL/1 call detection patterns ─────────────────────────────────
+
+# CALL procedure_name[(args)];
+# PL/1 names are alphanumeric + underscore (no hyphens)
+PL1_CALL_RE = re.compile(r"\bCALL\s+(\w+)\s*(?:[(;]|\s)", re.IGNORECASE)
+
 # ── Exclusion sets ───────────────────────────────────────────────
 
 # Common builtins/keywords to exclude from call detection
@@ -75,6 +90,13 @@ BUILTINS = frozenset({
     # Common patterns that look like calls but aren't meaningful edges
     "self", "this", "cls", "return", "raise", "throw", "new", "delete",
     "if", "for", "while", "switch", "catch", "try", "finally",
+    # COBOL reserved words that commonly follow PERFORM (not paragraph names)
+    "VARYING", "UNTIL", "TIMES", "THROUGH", "THRU", "TEST", "AFTER",
+    "BEFORE", "INLINE", "WITH", "NO",
+    # PL/1 built-in functions (not user-defined procedures)
+    "SUBSTR", "LENGTH", "INDEX", "TRIM", "VERIFY", "TRANSLATE",
+    "FIXED", "FLOAT", "CHAR", "BIT", "COMPLEX", "REAL", "IMAG",
+    "ABS", "SIGN", "MOD", "MAX", "MIN", "SUM", "PROD",
     # VB.NET builtins
     "MsgBox", "InputBox", "CStr", "CInt", "CLng", "CDbl", "CSng", "CBool",
     "CByte", "CChar", "CDate", "CDec", "CObj", "CShort", "CType",

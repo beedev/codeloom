@@ -10,7 +10,10 @@ from typing import Dict, List, Set
 
 from ..db.models import CodeUnit
 
-from .constants import BUILTINS, CALL_RE, QUALIFIED_CALL_RE
+from .constants import (
+    BUILTINS, CALL_RE, QUALIFIED_CALL_RE,
+    COBOL_PERFORM_RE, COBOL_CALL_RE, PL1_CALL_RE,
+)
 from .context import EdgeContext
 
 logger = logging.getLogger(__name__)
@@ -181,6 +184,18 @@ def _names_from_import_statements(statements: List[str]) -> Set[str]:
                 if clean:
                     names.add(clean)
 
+        # COBOL: "COPY CUSTMSTR" or "COPY 'ACCTFILE' IN COPYLIB"
+        if re.match(r"COPY\s+", stmt, re.IGNORECASE):
+            m = re.match(r"COPY\s+['\"]?([\w-]+)['\"]?", stmt, re.IGNORECASE)
+            if m:
+                names.add(m.group(1))
+
+        # PL/1: "%INCLUDE filename" or "%INCLUDE 'filename.inc'"
+        if re.match(r"%INCLUDE\s+", stmt, re.IGNORECASE):
+            m = re.match(r"%INCLUDE\s+['\"]?([\w.]+)['\"]?", stmt, re.IGNORECASE)
+            if m:
+                names.add(m.group(1).rsplit(".", 1)[0])  # strip extension
+
     return names
 
 
@@ -251,13 +266,20 @@ def detect_calls(ctx: EdgeContext) -> List[dict]:
     """
     edges = []
     for u in ctx.units:
-        if u.unit_type not in ("function", "method") or not u.source:
+        if u.unit_type not in ("function", "method", "paragraph", "procedure") or not u.source:
             continue
 
         # Find all function-call-like patterns in the source
         called_names = set(CALL_RE.findall(u.source))
         # Also capture qualified calls: obj.method() -> "method"
         called_names.update(QUALIFIED_CALL_RE.findall(u.source))
+
+        # Language-specific call detection
+        if u.language == "cobol":
+            called_names.update(COBOL_PERFORM_RE.findall(u.source))
+            called_names.update(COBOL_CALL_RE.findall(u.source))
+        elif u.language == "pl1":
+            called_names.update(PL1_CALL_RE.findall(u.source))
 
         # Intersect with known unit names in the project
         matched = called_names & ctx.all_names
