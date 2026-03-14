@@ -58,3 +58,4 @@ context/
 frontend/context/
 screen_*.png
 activity-diagram-fixed.png
+migration-output/
