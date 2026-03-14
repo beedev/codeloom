@@ -15,11 +15,13 @@ interface MvpTimelineProps {
   mvps: FunctionalMvpSummary[];
   selectedMvpId: number | null;
   onSelectMvp: (mvpId: number) => void;
+  /** Phase types to display for the current pipeline version (e.g. ['transform'] for V2) */
+  phaseTypes?: string[];
 }
 
-const MVP_PHASE_TYPES = ['analyze', 'design', 'transform', 'test'] as const;
+const DEFAULT_PHASE_TYPES = ['analyze', 'design', 'transform', 'test'];
 
-export function MvpTimeline({ mvps, selectedMvpId, onSelectMvp }: MvpTimelineProps) {
+export function MvpTimeline({ mvps, selectedMvpId, onSelectMvp, phaseTypes = DEFAULT_PHASE_TYPES }: MvpTimelineProps) {
   const sortedMvps = [...mvps].sort((a, b) => a.priority - b.priority);
 
   return (
@@ -30,11 +32,13 @@ export function MvpTimeline({ mvps, selectedMvpId, onSelectMvp }: MvpTimelinePro
 
       {sortedMvps.map((mvp) => {
         const isSelected = mvp.mvp_id === selectedMvpId;
-        const mvpPhases = mvp.phases.filter(p => p.mvp_id === mvp.mvp_id);
+        const allMvpPhases = mvp.phases.filter(p => p.mvp_id === mvp.mvp_id);
+        // Only count phases relevant to this pipeline version
+        const mvpPhases = allMvpPhases.filter(p => phaseTypes.includes(p.phase_type));
         const completedPhases = mvpPhases.filter(p => p.approved).length;
         const runningPhase = mvpPhases.find(p => p.status === 'running');
         const errorPhase = mvpPhases.find(p => p.status === 'error');
-        const allDone = completedPhases === 4;
+        const allDone = phaseTypes.length > 0 && completedPhases === phaseTypes.length;
 
         return (
           <button
@@ -73,7 +77,7 @@ export function MvpTimeline({ mvps, selectedMvpId, onSelectMvp }: MvpTimelinePro
 
               {/* Mini phase progress bar */}
               <div className="mt-1.5 flex gap-1">
-                {MVP_PHASE_TYPES.map((type) => {
+                {phaseTypes.map((type) => {
                   const phase = mvpPhases.find(p => p.phase_type === type);
                   return (
                     <PhaseChip

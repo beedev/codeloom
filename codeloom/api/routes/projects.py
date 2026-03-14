@@ -223,7 +223,7 @@ async def upload_codebase(
         )
 
         # Auto-trigger deep understanding analysis after successful ingestion
-        if result.files_processed > 0 and not result.errors:
+        if result.files_processed > 0:
             background_tasks.add_task(
                 _auto_trigger_analysis, understanding_engine, project_id, user["user_id"]
             )

@@ -32,7 +32,7 @@ interface UseCodeChatReturn {
   impact: ImpactEntry[];
   isStreaming: boolean;
   error: string | null;
-  sendMessage: (projectId: string, query: string, mode?: 'chat' | 'impact') => Promise<void>;
+  sendMessage: (projectId: string, query: string, mode?: 'chat' | 'impact', includeHistory?: boolean) => Promise<void>;
   clearMessages: () => void;
 }
 
@@ -45,7 +45,7 @@ export function useCodeChat(): UseCodeChatReturn {
   const abortRef = useRef<AbortController | null>(null);
 
   const sendMessage = useCallback(
-    async (projectId: string, query: string, mode: 'chat' | 'impact' = 'chat') => {
+    async (projectId: string, query: string, mode: 'chat' | 'impact' = 'chat', includeHistory: boolean = true) => {
       // Abort any in-flight request
       if (abortRef.current) {
         abortRef.current.abort();
@@ -82,6 +82,7 @@ export function useCodeChat(): UseCodeChatReturn {
               query,
               response_type: localStorage.getItem('codeloom_response_type') || 'detailed',
               mode,
+              include_history: includeHistory,
             }),
             signal: controller.signal,
           },

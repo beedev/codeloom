@@ -142,7 +142,7 @@ function CodeViewer({ file }: { file: MigrationFile }) {
 
       {/* Highlighted code */}
       <div className="flex-1 overflow-auto">
-        <Highlight theme={themes.nightOwl} code={file.content} language={language}>
+        <Highlight theme={themes.nightOwl} code={file.content ?? ''} language={language}>
           {({ className, style, tokens, getLineProps, getTokenProps }) => (
             <pre
               className={`${className} text-xs leading-relaxed p-4 m-0`}

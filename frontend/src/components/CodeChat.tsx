@@ -27,6 +27,7 @@ import {
   Copy,
   Check,
   Crosshair,
+  History,
 } from 'lucide-react';
 import type { ChatMessage, ChatSource } from '../types/index.ts';
 
@@ -36,7 +37,7 @@ interface CodeChatProps {
   error: string | null;
   projectId?: string;
   hideInlineSources?: boolean;
-  onSendMessage: (query: string, mode?: 'chat' | 'impact') => void;
+  onSendMessage: (query: string, mode?: 'chat' | 'impact', includeHistory?: boolean) => void;
   onClear: () => void;
 }
 
@@ -51,6 +52,7 @@ export function CodeChat({
 }: CodeChatProps) {
   const [input, setInput] = useState('');
   const [impactMode, setImpactMode] = useState(false);
+  const [useHistory, setUseHistory] = useState(true);
   const [viewingFile, setViewingFile] = useState<FileViewerData | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -69,9 +71,9 @@ export function CodeChat({
       const query = input.trim();
       if (!query || isStreaming) return;
       setInput('');
-      onSendMessage(query, impactMode ? 'impact' : 'chat');
+      onSendMessage(query, impactMode ? 'impact' : 'chat', useHistory);
     },
-    [input, isStreaming, onSendMessage, impactMode],
+    [input, isStreaming, onSendMessage, impactMode, useHistory],
   );
 
   const handleKeyDown = useCallback(
@@ -167,6 +169,19 @@ export function CodeChat({
             className="flex-1 resize-none rounded-lg border border-void-surface bg-void-light px-4 py-2.5 text-sm text-text placeholder-text-dim focus:border-glow/50 focus:outline-none focus:ring-1 focus:ring-glow/30"
             disabled={isStreaming}
           />
+          <button
+            type="button"
+            onClick={() => setUseHistory(!useHistory)}
+            className={`rounded-lg p-2.5 transition-colors ${
+              useHistory
+                ? 'bg-blue-500/20 text-blue-400 hover:bg-blue-500/30'
+                : 'bg-void-surface/50 text-text-dim hover:bg-void-surface hover:text-text-muted'
+            }`}
+            aria-label="Toggle conversation history"
+            title={useHistory ? "History ON — using prior messages for context" : "History OFF — each query is independent"}
+          >
+            <History className="h-4 w-4" />
+          </button>
           <button
             type="button"
             onClick={() => setImpactMode(!impactMode)}

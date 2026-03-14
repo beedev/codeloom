@@ -74,11 +74,15 @@ export function MigrationPlans() {
     }
   }, []);
 
-  const handleCopyMigrateCmd = useCallback((planId: string) => {
-    const cmd = `claude /migrate --project ${planId}`;
+  const handleCopyMigrateCmd = useCallback((plan: { plan_id: string; source_project_id?: string | null }) => {
+    const projectId = plan.source_project_id ?? plan.plan_id;
+    const cmd = `claude /migrate --project ${projectId}`;
     navigator.clipboard.writeText(cmd).then(() => {
-      setCopiedPlanId(planId);
+      setCopiedPlanId(plan.plan_id);
       setTimeout(() => setCopiedPlanId(null), 2000);
+    }).catch(() => {
+      // Fallback: prompt-based copy for non-secure contexts
+      window.prompt('Copy this command:', cmd);
     });
   }, []);
 
@@ -143,7 +147,7 @@ export function MigrationPlans() {
                     project={plan.source_project_id ? projectMap.get(plan.source_project_id) : undefined}
                     onOpen={() => navigate(`/migration/${plan.plan_id}`)}
                     onDelete={() => handleDelete(plan.plan_id)}
-                    onCopyMigrateCmd={() => handleCopyMigrateCmd(plan.plan_id)}
+                    onCopyMigrateCmd={() => handleCopyMigrateCmd(plan)}
                     isCopied={copiedPlanId === plan.plan_id}
                   />
                 ))}
@@ -209,6 +213,7 @@ function PlanCard({
 }) {
   const approvedPhases = plan.plan_phases.filter((p) => p.approved).length;
   const totalPhases = plan.plan_phases.length;
+  const hasOutput = plan.plan_phases.some((p) => p.status === 'complete');
   const sourceLangs = plan.source_stack?.languages?.join(', ')
     || plan.source_stack?.primary_language
     || '';
@@ -293,18 +298,11 @@ function PlanCard({
       {/* Action buttons */}
       <div className="mt-4 flex items-center gap-2">
         <button
-          onClick={onOpen}
-          className="flex items-center gap-1 rounded-lg bg-glow px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-glow-dim"
-        >
-          Open
-          <ChevronRight className="h-3 w-3" />
-        </button>
-        <button
           onClick={(e) => {
             e.stopPropagation();
             onCopyMigrateCmd();
           }}
-          className="flex items-center gap-1.5 rounded-md border border-void-surface px-3 py-1.5 text-xs text-text-dim transition-colors hover:bg-void-surface hover:text-text"
+          className="flex items-center gap-1.5 rounded-lg bg-glow px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-glow-dim"
           title="Copy claude /migrate command"
         >
           {isCopied ? (
@@ -318,6 +316,19 @@ function PlanCard({
               <span>Migrate with Claude</span>
             </>
           )}
+        </button>
+        <button
+          onClick={onOpen}
+          disabled={!hasOutput}
+          className={`flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs transition-colors ${
+            hasOutput
+              ? 'border-void-surface text-text-dim hover:bg-void-surface hover:text-text'
+              : 'border-void-surface/30 text-text-dim/40 cursor-not-allowed'
+          }`}
+          title={hasOutput ? 'View migration output' : 'Run migration first to view output'}
+        >
+          Open
+          <ChevronRight className="h-3 w-3" />
         </button>
       </div>
     </div>

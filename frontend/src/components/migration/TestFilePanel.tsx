@@ -316,7 +316,7 @@ function TestCodeView({ file }: { file: MigrationFile }) {
   const lang = langMap[file.language] ?? file.language;
 
   return (
-    <Highlight theme={themes.nightOwl} code={file.content} language={lang}>
+    <Highlight theme={themes.nightOwl} code={file.content ?? ''} language={lang}>
       {({ style, tokens, getLineProps, getTokenProps }) => (
         <pre
           className="overflow-x-auto p-4 text-xs leading-relaxed"

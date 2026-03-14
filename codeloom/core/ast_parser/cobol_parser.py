@@ -62,6 +62,18 @@ _SELECT_ASSIGN_RE = re.compile(
 # Optional ORGANIZATION IS clause following SELECT
 _ORGANIZATION_RE = re.compile(r"\bORGANIZATION\s+IS\s+(\w+)", re.IGNORECASE)
 
+# Regex fallback for recovering paragraph/section headers from tree-sitter ERROR
+# nodes.  Used only when tree-sitter truncates a program_definition due to
+# formatting issues (e.g. comment indicator * at column 8 instead of column 7).
+# Pattern: cols 1-6 (any), col 7 (space = code line), Area A identifier + period.
+# No end-of-line anchor — COBOL lines have sequence numbers in cols 73-80.
+_PARAGRAPH_HEADER_RE = re.compile(
+    r"^.{6} ([A-Z0-9][\w-]*)\.\s", re.MULTILINE | re.IGNORECASE
+)
+_SECTION_HEADER_RE = re.compile(
+    r"^.{6} ([A-Z0-9][\w-]*)\s+SECTION\.\s", re.MULTILINE | re.IGNORECASE
+)
+
 
 class CobolParser(BaseLanguageParser):
     """tree-sitter based COBOL parser (COBOL85 dialect).
@@ -160,14 +172,75 @@ class CobolParser(BaseLanguageParser):
     def extract_units(
         self, tree: tree_sitter.Tree, source: bytes, file_path: str
     ) -> List[CodeUnit]:
-        """Extract program, section, and paragraph units from the COBOL AST."""
+        """Extract program, section, and paragraph units from the COBOL AST.
+
+        Includes ERROR-node recovery: when tree-sitter truncates a
+        program_definition (e.g. due to a misplaced comment indicator),
+        orphaned paragraphs in root-level ERROR nodes are recovered via
+        regex fallback.  Zero-cost for clean parses (guarded by has_error).
+        """
         units: List[CodeUnit] = []
         root = tree.root_node
 
+        last_program_unit: Optional[CodeUnit] = None
+        last_program_id: Optional[str] = None
+
         for child in root.children:
             if child.type == "program_definition":
-                units.extend(
-                    self._extract_program(child, source, file_path)
+                program_units = self._extract_program(child, source, file_path)
+                units.extend(program_units)
+                for u in program_units:
+                    if u.unit_type == "program":
+                        last_program_unit = u
+                        last_program_id = u.name
+                        break
+
+        # -----------------------------------------------------------------
+        # Recovery: scan root-level ERROR nodes for orphaned paragraphs.
+        # Only activates when tree-sitter reported errors AND we have a
+        # preceding program to attach them to.
+        # -----------------------------------------------------------------
+        if root.has_error and last_program_unit is not None:
+            # Find the last paragraph from the normal parse (for bridging)
+            last_paragraph_unit: Optional[CodeUnit] = None
+            for u in reversed(units):
+                if u.unit_type == "paragraph":
+                    last_paragraph_unit = u
+                    break
+
+            for child in root.children:
+                if child.type != "ERROR":
+                    continue
+
+                recovered = self._recover_orphaned_paragraphs(
+                    child, source, file_path, last_program_id
+                )
+                if not recovered:
+                    continue
+
+                # Bridge loose lines between program_definition end and
+                # first recovered paragraph (e.g. EXIT PROGRAM.).  Extend
+                # the last parsed paragraph's end_line to cover them.
+                first_recovered_line = recovered[0].start_line
+                if last_paragraph_unit is not None:
+                    gap_end = first_recovered_line - 1
+                    if gap_end > last_paragraph_unit.end_line:
+                        last_paragraph_unit.end_line = gap_end
+
+                units.extend(recovered)
+
+                # Extend program unit's end_line to cover recovered content
+                max_end = max(u.end_line for u in recovered)
+                if max_end > last_program_unit.end_line:
+                    last_program_unit.end_line = max_end
+
+                logger.info(
+                    "Recovered %d orphaned paragraphs from ERROR node "
+                    "in %s (lines %d-%d)",
+                    len(recovered),
+                    file_path,
+                    child.start_point[0] + 1,
+                    child.end_point[0] + 1,
                 )
 
         return units
@@ -196,6 +269,7 @@ class CobolParser(BaseLanguageParser):
             "utf-8", errors="replace"
         )
         file_assignments = self._extract_file_assignments(program_source)
+        program_category = self._classify_program(program_source)
         program_unit = CodeUnit(
             unit_type="program",
             name=program_id,
@@ -209,6 +283,7 @@ class CobolParser(BaseLanguageParser):
             metadata={
                 "cobol_dialect": "cobol85",
                 "file_assignments": file_assignments,
+                "program_category": program_category,
             },
         )
         units.append(program_unit)
@@ -372,6 +447,91 @@ class CobolParser(BaseLanguageParser):
         )
 
     # =========================================================================
+    # ERROR-node recovery: regex-based paragraph extraction
+    # =========================================================================
+
+    def _recover_orphaned_paragraphs(
+        self,
+        error_node: tree_sitter.Node,
+        source: bytes,
+        file_path: str,
+        program_id: str,
+    ) -> List[CodeUnit]:
+        """Recover paragraph units from a root-level ERROR node using regex.
+
+        When tree-sitter produces a truncated program_definition followed by
+        an ERROR node (e.g. due to a misplaced comment indicator ``*`` at
+        column 8 instead of column 7), the ERROR node may contain valid
+        COBOL paragraphs that belong to the program's PROCEDURE DIVISION.
+
+        This method scans the raw text for paragraph headers using regex
+        and builds CodeUnit objects with the same conventions as
+        ``_close_paragraph()``.  The ``parse_source()`` post-processing
+        loop will restore original source text and tag EXEC metadata
+        automatically — no extra handling needed.
+
+        Only invoked when ``root.has_error`` is True.
+        """
+        error_text = source[error_node.start_byte:error_node.end_byte].decode(
+            "utf-8", errors="replace"
+        )
+        error_start_line = error_node.start_point[0]  # 0-indexed
+
+        # Find all paragraph headers (exclude section headers)
+        para_matches: list = []
+        for m in _PARAGRAPH_HEADER_RE.finditer(error_text):
+            if _SECTION_HEADER_RE.match(m.group(0)):
+                continue
+            name = m.group(1).strip().rstrip(".")
+            line_offset = error_text[:m.start()].count("\n")
+            para_matches.append((name, m.start(), line_offset))
+
+        if not para_matches:
+            return []
+
+        units: List[CodeUnit] = []
+
+        for i, (para_name, start_offset, line_offset) in enumerate(para_matches):
+            # End boundary: start of next header, or end of error text
+            if i + 1 < len(para_matches):
+                end_line_offset = para_matches[i + 1][2]
+            else:
+                end_line_offset = error_text.count("\n")
+
+            start_line = error_start_line + line_offset + 1  # 1-indexed
+            end_line = error_start_line + end_line_offset     # matches _close_paragraph
+
+            # For the last paragraph, use the error node's end row
+            if i + 1 >= len(para_matches):
+                end_line = error_node.end_point[0]
+
+            qualified_name = f"{program_id}.{para_name}"
+
+            units.append(CodeUnit(
+                unit_type="paragraph",
+                name=para_name,
+                qualified_name=qualified_name,
+                language="cobol",
+                start_line=start_line,
+                end_line=end_line,
+                source="",  # replaced by parse_source post-processing
+                file_path=file_path,
+                signature=f"{para_name}.",
+                parent_name=program_id,
+                metadata={
+                    "program_id": program_id,
+                    "section": "",
+                    "has_exec_sql": False,
+                    "has_exec_cics": False,
+                    "has_ims_dli": False,
+                    "ims_functions": [],
+                    "recovered_from_error_node": True,
+                },
+            ))
+
+        return units
+
+    # =========================================================================
     # ENVIRONMENT DIVISION: SELECT...ASSIGN extraction
     # =========================================================================
 
@@ -435,6 +595,32 @@ class CobolParser(BaseLanguageParser):
 
         for child in node.children:
             self._collect_copy_statements(child, source, result)
+
+    # =========================================================================
+    # Program classification for migration strategy
+    # =========================================================================
+
+    def _classify_program(self, source: str) -> str:
+        """Classify COBOL program by runtime category for migration targeting.
+
+        Categories drive different migration strategies:
+          - cics_online: EXEC CICS / DFHCOMMAREA → REST API endpoints
+          - ims_dli: EXEC DLI / CBLTDLI calls → ORM with DB schema
+          - batch_db2: EXEC SQL embedded → batch + ORM/SQL integration
+          - batch_program: pure batch (default) → scripts / shell wrappers
+        """
+        source_upper = source.upper()
+
+        if COBOL_EXEC_CICS_RE.search(source_upper) or "DFHCOMMAREA" in source_upper:
+            return "cics_online"
+
+        if EXEC_DLI_RE.search(source_upper) or COBOL_IMS_CALL_RE.search(source_upper):
+            return "ims_dli"
+
+        if COBOL_EXEC_SQL_RE.search(source_upper):
+            return "batch_db2"
+
+        return "batch_program"
 
     # =========================================================================
     # Helpers

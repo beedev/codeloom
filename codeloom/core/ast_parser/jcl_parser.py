@@ -87,6 +87,23 @@ _JCL_OPERATIONS = frozenset({
     "JCLLIB", "NOTIFY", "OUTPUT", "SCHEDULE", "SET", "XMIT",
 })
 
+# PGM name → step category for migration strategy classification.
+# Two-pass: this deterministic dict covers known IBM utilities; the LLM
+# validation pass (engine.refine_asset_strategies) handles unknowns.
+_PGM_CATEGORIES: Dict[str, str] = {
+    # Compile/Link — no equivalent in modern targets (SKIP)
+    "COBOLCL": "compile_link", "IGYWCL": "compile_link", "IGYWC": "compile_link",
+    "IEWL": "compile_link", "LKED": "compile_link", "HEWL": "compile_link",
+    "IKFCBL00": "compile_link", "IGYCRCTL": "compile_link",
+    # SORT/MERGE utilities
+    "SORT": "sort_merge", "DFSORT": "sort_merge", "SYNCSORT": "sort_merge",
+    "ICETOOL": "sort_merge", "ICEMAN": "sort_merge",
+    # Data management utilities
+    "IDCAMS": "data_mgmt", "IEBGENER": "data_mgmt", "IEBCOPY": "data_mgmt",
+    "IEFBR14": "data_mgmt", "IEBUPDTE": "data_mgmt", "IEHPROGM": "data_mgmt",
+    "IKJEFT01": "data_mgmt",
+}
+
 
 # ---------------------------------------------------------------------------
 # Parser
@@ -182,6 +199,16 @@ class JclParser:
                 meta["parm"] = s["parm"]
             if s.get("dd_statements"):
                 meta["dd_statements"] = s["dd_statements"]
+
+            # Step category for migration strategy (deterministic pass)
+            if s["pgm"]:
+                meta["step_category"] = _PGM_CATEGORIES.get(
+                    s["pgm"].upper(), "application_run"
+                )
+            elif s["proc_name"]:
+                meta["step_category"] = "proc_invoke"
+            else:
+                meta["step_category"] = "unknown"
 
             units.append(CodeUnit(
                 unit_type="step",

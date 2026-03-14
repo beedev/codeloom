@@ -24,10 +24,12 @@ from .registry import LaneRegistry
 from .struts_to_springboot import StrutsToSpringBootLane
 from .storedproc_to_orm import StoredProcToOrmLane
 from .vbnet_to_dotnetcore import VbNetToDotNetCoreLane
+from .mainframe_to_modern import MainframeToModernLane
 
 LaneRegistry.register(StrutsToSpringBootLane())
 LaneRegistry.register(StoredProcToOrmLane())
 LaneRegistry.register(VbNetToDotNetCoreLane())
+LaneRegistry.register(MainframeToModernLane())
 
 __all__ = [
     "CONFIDENCE_HIGH",
@@ -41,6 +43,7 @@ __all__ = [
     "StrutsToSpringBootLane",
     "TransformResult",
     "TransformRule",
+    "MainframeToModernLane",
     "VbNetToDotNetCoreLane",
     "aggregate_confidence",
     "confidence_tier",

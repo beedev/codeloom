@@ -37,7 +37,7 @@ from .ground_truth import CodebaseGroundTruth
 from .lanes.base import aggregate_confidence, confidence_tier
 from .mvp_clusterer import MvpClusterer, _MAX_CLUSTER_SIZE, dynamic_cluster_size_cap
 from .phases import (
-    execute_phase, execute_phase_agentic,
+    execute_phase,
     execute_mvp_analysis, execute_integration_analysis,
     get_phase_type, _describe_mvp, _evaluate_mvp_coherence,
 )
@@ -249,7 +249,12 @@ class MigrationEngine:
         inventory.sort(key=lambda x: x["unit_count"], reverse=True)
 
         # -- Sub-type breakdown for expandable languages --------
-        EXPANDABLE_LANGUAGES = {"sql", "xml", "yaml"}
+        EXPANDABLE_LANGUAGES = {
+            "sql", "xml", "yaml",                                      # existing
+            "jcl", "cobol",                                            # custom metadata classification
+            "python", "javascript", "typescript", "java", "csharp",    # unit_type-based
+            "vbnet", "asp", "jsp", "pli",                              # unit_type-based
+        }
         with self._db.get_session() as session:
             from sqlalchemy import func as sa_func
             for item in inventory:
@@ -295,6 +300,90 @@ class MigrationEngine:
                     sub_types.sort(key=lambda x: x["unit_count"], reverse=True)
                     item["sub_types"] = sub_types
 
+            # -- JCL: override sub-types with step_category from metadata --
+            for item in inventory:
+                if item["language"].lower() != "jcl":
+                    continue
+                cat_rows = (
+                    session.query(
+                        CodeUnit.unit_metadata["step_category"].astext.label("step_category"),
+                        sa_func.count(CodeUnit.unit_id).label("unit_count"),
+                        sa_func.count(sa_func.distinct(CodeUnit.file_id)).label("file_count"),
+                    )
+                    .filter(
+                        CodeUnit.project_id == project_id,
+                        CodeUnit.language == "jcl",
+                        CodeUnit.unit_type == "step",
+                        CodeUnit.unit_metadata["step_category"].astext.isnot(None),
+                    )
+                    .group_by(CodeUnit.unit_metadata["step_category"].astext)
+                    .all()
+                )
+                if cat_rows:
+                    jcl_sub = []
+                    for cr in cat_rows:
+                        samples = (
+                            session.query(CodeUnit.name)
+                            .filter(
+                                CodeUnit.project_id == project_id,
+                                CodeUnit.language == "jcl",
+                                CodeUnit.unit_metadata["step_category"].astext == cr.step_category,
+                            )
+                            .limit(3)
+                            .all()
+                        )
+                        jcl_sub.append({
+                            "unit_type": cr.step_category,
+                            "unit_count": cr.unit_count,
+                            "file_count": cr.file_count,
+                            "sample_names": [s[0] for s in samples if s[0]],
+                        })
+                    if jcl_sub:
+                        jcl_sub.sort(key=lambda x: x["unit_count"], reverse=True)
+                        item["sub_types"] = jcl_sub
+
+            # -- COBOL: override sub-types with program_category from metadata --
+            for item in inventory:
+                if item["language"].lower() != "cobol":
+                    continue
+                cat_rows = (
+                    session.query(
+                        CodeUnit.unit_metadata["program_category"].astext.label("program_category"),
+                        sa_func.count(CodeUnit.unit_id).label("unit_count"),
+                        sa_func.count(sa_func.distinct(CodeUnit.file_id)).label("file_count"),
+                    )
+                    .filter(
+                        CodeUnit.project_id == project_id,
+                        CodeUnit.language == "cobol",
+                        CodeUnit.unit_type == "program",
+                        CodeUnit.unit_metadata["program_category"].astext.isnot(None),
+                    )
+                    .group_by(CodeUnit.unit_metadata["program_category"].astext)
+                    .all()
+                )
+                if cat_rows:
+                    cobol_sub = []
+                    for cr in cat_rows:
+                        samples = (
+                            session.query(CodeUnit.name)
+                            .filter(
+                                CodeUnit.project_id == project_id,
+                                CodeUnit.language == "cobol",
+                                CodeUnit.unit_type == "program",
+                                CodeUnit.unit_metadata["program_category"].astext == cr.program_category,
+                            )
+                            .limit(3)
+                            .all()
+                        )
+                        cobol_sub.append({
+                            "unit_type": cr.program_category,
+                            "unit_count": cr.unit_count,
+                            "file_count": cr.file_count,
+                            "sample_names": [s[0] for s in samples if s[0]],
+                        })
+                    if cobol_sub:
+                        cobol_sub.sort(key=lambda x: x["unit_count"], reverse=True)
+                        item["sub_types"] = cobol_sub
 
         suggested = self._rule_based_strategies(
             migration_type, source_languages, target_stack
@@ -396,6 +485,78 @@ class MigrationEngine:
                 else:
                     strategies[lang] = {"strategy": "keep_as_is", "target": None, "reason": None}
 
+            elif ll == "jcl":
+                target_lang = target_languages[0].title() if target_languages else "Python"
+                sort_target = "Shell script (sort/awk)"
+                sort_reason = (
+                    f"SORT/MERGE → Unix sort/awk/sed (preferred) or {target_lang} streaming. "
+                    "Shell sort handles fixed-width records natively with -k flags"
+                )
+                datamgmt_target = "Shell script (cp/cat)"
+                datamgmt_reason = (
+                    f"IDCAMS REPRO → cp, IEBGENER → cat/cp, IEFBR14 → touch/mkdir. "
+                    f"Fallback: {target_lang} streaming for complex transforms"
+                )
+                run_target = "Shell script"
+                run_reason = f"Run steps → shell wrappers calling migrated {target_lang} programs"
+                strategies[lang] = {
+                    "strategy": "rewrite",
+                    "target": None,
+                    "reason": f"JCL orchestration — targets derived from {target_lang} stack",
+                    "sub_types": {
+                        "compile_link": {
+                            "strategy": "no_change", "target": None,
+                            "reason": "Compile/link has no equivalent in modern targets",
+                        },
+                        "sort_merge": {
+                            "strategy": "convert", "target": sort_target,
+                            "reason": sort_reason,
+                        },
+                        "data_mgmt": {
+                            "strategy": "convert", "target": datamgmt_target,
+                            "reason": datamgmt_reason,
+                        },
+                        "application_run": {
+                            "strategy": "convert", "target": run_target,
+                            "reason": run_reason,
+                        },
+                        "proc_invoke": {
+                            "strategy": "convert", "target": run_target,
+                            "reason": "Cataloged proc invocations → shell scripts",
+                        },
+                    },
+                }
+
+            elif ll == "cobol":
+                target_lang = target_languages[0].title() if target_languages else "Python"
+                strategies[lang] = {
+                    "strategy": "rewrite",
+                    "target": target_lang,
+                    "reason": f"COBOL programs → {target_lang} with streaming I/O and Decimal arithmetic",
+                    "sub_types": {
+                        "batch_program": {
+                            "strategy": "rewrite", "target": target_lang,
+                            "reason": f"Batch COBOL → {target_lang} batch scripts",
+                        },
+                        "cics_online": {
+                            "strategy": "rewrite", "target": f"{target_lang} REST API",
+                            "reason": f"CICS online → {target_lang} REST endpoints (COMMAREA → request/response)",
+                        },
+                        "ims_dli": {
+                            "strategy": "rewrite", "target": f"{target_lang} + ORM",
+                            "reason": f"IMS DL/I → {target_lang} with ORM (segment hierarchy → relational)",
+                        },
+                        "batch_db2": {
+                            "strategy": "rewrite", "target": f"{target_lang} + ORM",
+                            "reason": f"DB2 batch → {target_lang} with ORM/SQL integration",
+                        },
+                        "copybook": {
+                            "strategy": "rewrite", "target": f"{target_lang} types",
+                            "reason": "Copybooks → shared type definitions (Foundation MVP)",
+                        },
+                    },
+                }
+
             elif lang == primary_lang:
                 # Primary language gets the plan's migration type
                 target_label = None
@@ -448,7 +609,7 @@ class MigrationEngine:
             target_brief = plan.target_brief or ""
             target_stack = plan.target_stack or {}
 
-        # Build inventory text for the prompt
+        # Build inventory text for the prompt (include sub-type breakdowns)
         inv_lines = []
         for item in base["inventory"]:
             paths_str = ", ".join(item["sample_paths"][:3])
@@ -457,6 +618,49 @@ class MigrationEngine:
                 f"{item['unit_count']} units, {item['total_lines']} lines "
                 f"(samples: {paths_str})"
             )
+            for st in item.get("sub_types", []):
+                samples_str = ", ".join(st.get("sample_names", [])[:3])
+                inv_lines.append(
+                    f"  └─ {st['unit_type']}: {st['unit_count']} units, "
+                    f"{st['file_count']} files (samples: {samples_str})"
+                )
+
+        # For JCL: include full step source so LLM can validate classifications
+        jcl_items = [i for i in base["inventory"] if i["language"].lower() == "jcl"]
+        if jcl_items:
+            with self._db.get_session() as session:
+                jcl_steps = (
+                    session.query(
+                        CodeUnit.name,
+                        CodeUnit.source,
+                        CodeUnit.unit_metadata["step_category"].astext.label("step_category"),
+                        CodeUnit.unit_metadata["pgm"].astext.label("pgm"),
+                    )
+                    .filter(
+                        CodeUnit.project_id == pid,
+                        CodeUnit.language == "jcl",
+                        CodeUnit.unit_type == "step",
+                    )
+                    .limit(30)
+                    .all()
+                )
+                if jcl_steps:
+                    from collections import defaultdict
+                    inv_lines.append("\n### JCL Step Details (full source for classification)")
+                    by_cat: Dict[str, list] = defaultdict(list)
+                    for step in jcl_steps:
+                        cat = step.step_category or "unknown"
+                        by_cat[cat].append(step)
+                    for cat, steps in sorted(by_cat.items()):
+                        inv_lines.append(f"\n#### {cat} ({len(steps)} steps)")
+                        for step in steps[:3]:
+                            inv_lines.append(f"  Step: {step.name} (PGM={step.pgm or 'N/A'})")
+                            if step.source:
+                                src_lines = step.source.strip().split("\n")[:20]
+                                for sl in src_lines:
+                                    inv_lines.append(f"    {sl}")
+                                if len(step.source.strip().split("\n")) > 20:
+                                    inv_lines.append("    ... (truncated)")
 
         import json
         prompt = ASSET_REFINEMENT_PROMPT.format(
@@ -496,6 +700,15 @@ class MigrationEngine:
                         strategies[lang]["target"] = override["target"]
                     if "reason" in override:
                         strategies[lang]["reason"] = override["reason"]
+                    # Merge sub-type overrides from LLM
+                    if "sub_types" in override and isinstance(override["sub_types"], dict):
+                        base_sub = strategies[lang].get("sub_types", {})
+                        for st_key, st_override in override["sub_types"].items():
+                            if st_key in base_sub and isinstance(st_override, dict):
+                                for field in ("strategy", "target", "reason"):
+                                    if field in st_override:
+                                        base_sub[st_key][field] = st_override[field]
+                        strategies[lang]["sub_types"] = base_sub
 
             base["suggested_strategies"] = strategies
             base["llm_refined"] = True
@@ -2402,289 +2615,6 @@ class MigrationEngine:
 
         return self.get_phase_output(str(pid), phase_number, mvp_id)
 
-    def execute_phase_agentic(
-        self,
-        plan_id: str,
-        phase_number: int,
-        mvp_id: Optional[int] = None,
-        max_turns: int = 10,
-    ):
-        """Execute a migration phase using the agentic tool-use loop.
-
-        Performs the same validation, enrichment, and persistence as execute_phase()
-        but yields AgentEvent objects for SSE streaming instead of blocking.
-
-        Args:
-            plan_id: Migration plan UUID string.
-            phase_number: Phase number.
-            mvp_id: MVP ID for per-MVP phases.
-            max_turns: Maximum agent iterations.
-
-        Yields:
-            AgentEvent instances for SSE streaming.
-        """
-        from .agent.events import ErrorEvent, AgentDoneEvent
-        import json as _json
-
-        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
-
-        with self._db.get_session() as session:
-            plan = session.query(MigrationPlan).filter(
-                MigrationPlan.plan_id == pid
-            ).first()
-            if not plan:
-                yield ErrorEvent(error=f"Migration plan {plan_id} not found", recoverable=False)
-                return
-
-            version = plan.pipeline_version or 1
-            plan_ph = _plan_phases(version)
-            mvp_ph = _mvp_phases(version)
-
-            if phase_number in mvp_ph and mvp_id is None:
-                yield ErrorEvent(error=f"Phase {phase_number} requires an mvp_id", recoverable=False)
-                return
-            if phase_number in plan_ph and mvp_id is not None:
-                yield ErrorEvent(error=f"Plan-level phase {phase_number} does not accept mvp_id", recoverable=False)
-                return
-
-            try:
-                self._validate_prerequisites(session, pid, phase_number, mvp_id, version)
-            except ValueError as e:
-                yield ErrorEvent(error=str(e), recoverable=False)
-                return
-
-            phase = self._get_phase(session, pid, phase_number, mvp_id)
-            if not phase:
-                yield ErrorEvent(error=f"Phase {phase_number} not found", recoverable=False)
-                return
-
-            # Mark as running
-            run_id = uuid4()
-            phase.run_id = run_id
-            phase.status = "running"
-            plan.status = "in_progress"
-            plan.current_phase = phase_number
-
-            previous_outputs = self._collect_previous_outputs(session, pid, phase_number, mvp_id)
-
-            # Fetch project name for disk output directory
-            project_name = None
-            proj = session.query(Project).filter(
-                Project.project_id == plan.source_project_id
-            ).first()
-            if proj:
-                project_name = proj.name
-
-            plan_data = {
-                "target_brief": plan.target_brief,
-                "target_stack": plan.target_stack or {},
-                "constraints": plan.constraints or {},
-                "migration_type": plan.migration_type or "framework_migration",
-                "discovery_metadata": plan.discovery_metadata or {},
-                "framework_docs": plan.framework_docs or {},
-                "_project_name": project_name,
-            }
-            project_id = str(plan.source_project_id)
-
-            mvp_data = None
-            if mvp_id:
-                mvp = session.query(FunctionalMVP).filter(
-                    FunctionalMVP.mvp_id == mvp_id
-                ).first()
-                if mvp:
-                    mvp_data = self._mvp_to_dict(mvp)
-                    if mvp.analysis_output:
-                        plan_data["_analysis_output"] = mvp.analysis_output.get("output", "")
-
-            # Peek at the phase type for context-aware injections
-            context_type_peek = get_phase_type(phase_number, version) if version in (2, 3) else None
-
-            # For agentic test phases: inject transform output files so the agent
-            # knows exactly what files were generated and needs tests.
-            # Without this the agent only sees "Generated N files. See output_files."
-            # and has no way to discover what was created.
-            if context_type_peek == "test" and mvp_id:
-                transform_phase_num = 3 if version == 2 else 4  # V2: phase 3, V3: phase 4
-                transform_phase = self._get_phase(session, pid, transform_phase_num, mvp_id)
-                if transform_phase and transform_phase.output_files:
-                    plan_data["_transform_output_files"] = transform_phase.output_files
-                    logger.info(
-                        "Agentic test phase: injected %d transform files into plan_data for MVP %s",
-                        len(transform_phase.output_files), mvp_id,
-                    )
-
-            # V3: For design phase, inject discovery output as planning background
-            if version == 3 and context_type_peek == "design" and mvp_id:
-                discovery_phase = self._get_phase(session, pid, 2, None)  # phase 2=discovery, plan-level
-                if discovery_phase and discovery_phase.output:
-                    plan_data["_discovery_strategy"] = discovery_phase.output
-                    logger.info(
-                        "V3 design phase: injected %d chars of discovery strategy for MVP %s",
-                        len(discovery_phase.output), mvp_id,
-                    )
-
-            # V3: For transform phase, inject design spec as the primary implementation spec
-            if version == 3 and context_type_peek == "transform" and mvp_id:
-                design_phase = self._get_phase(session, pid, 3, mvp_id)  # phase 3=design, per-MVP
-                if design_phase and design_phase.output:
-                    plan_data["_design_specification"] = design_phase.output
-                    logger.info(
-                        "V3 transform phase: injected %d chars of design spec for MVP %s",
-                        len(design_phase.output), mvp_id,
-                    )
-
-        context_type = get_phase_type(phase_number, version) if version in (2, 3) else None
-        started_at = datetime.utcnow()
-        execution_start = time.monotonic()
-
-        # ── Agentic: lane prompt augmentation ──────────────────────────
-        # Mirror the synchronous path's lane injection so the agent receives
-        # the same framework-specific guidance that the sync executor does.
-        try:
-            active_lanes = self._get_active_lanes(plan_data)
-            if active_lanes:
-                lane_augmentations = []
-                lane_ctx = {"target_stack": plan_data.get("target_stack", {})}
-                phase_type_str = context_type or get_phase_type(phase_number, version)
-                for lane in active_lanes:
-                    try:
-                        aug = lane.augment_prompt(phase_type_str, "", lane_ctx)
-                        if aug:
-                            lane_augmentations.append(aug)
-                    except Exception as lane_err:
-                        logger.debug("Agentic lane augmentation failed: %s", lane_err)
-                if lane_augmentations:
-                    plan_data["_lane_prompt_augmentation"] = "\n\n".join(lane_augmentations)
-                    logger.info(
-                        "Agentic phase %d: injected lane augmentations from %d lane(s)",
-                        phase_number, len(active_lanes),
-                    )
-        except Exception as _lane_err:
-            logger.debug("Agentic lane detection skipped: %s", _lane_err)
-
-        try:
-            from .agent.events import OutputEvent
-            ctx_builder = MigrationContextBuilder(self._db, project_id)
-
-            # Stream events, capturing output content for persistence
-            captured_output = ""
-            for event in execute_phase_agentic(
-                phase_number=phase_number,
-                plan=plan_data,
-                previous_outputs=previous_outputs,
-                context_builder=ctx_builder,
-                context_type=context_type,
-                mvp_context=mvp_data,
-                pipeline=self._pipeline,
-                project_id=project_id,
-                max_turns=max_turns,
-            ):
-                # Capture the final output content for DB persistence
-                if isinstance(event, OutputEvent):
-                    captured_output = event.content
-
-                yield event
-
-            duration_ms = int((time.monotonic() - execution_start) * 1000)
-            logger.info(
-                "Agentic phase %d finished for mvp=%s — captured_output=%d chars",
-                phase_number, mvp_id, len(captured_output),
-            )
-
-            # Persist result (always, even if no captured_output)
-            output_files = []
-            effective_type = context_type or get_phase_type(phase_number, version)
-            if captured_output and effective_type in ("transform", "test", "architecture"):
-                from .phases import _parse_json_files
-                output_files = _parse_json_files(captured_output)
-
-            with self._db.get_session() as session:
-                phase = self._get_phase(session, pid, phase_number, mvp_id)
-                if phase:
-                    # For transform/test phases, "complete" requires at least 1 output file.
-                    # An agent returning "[]" (2 chars, valid JSON, 0 files) is an error,
-                    # not a successful completion.
-                    eff_type_check = context_type or get_phase_type(phase_number, version)
-                    if eff_type_check in ("transform", "test"):
-                        phase.status = "complete" if output_files else "error"
-                    else:
-                        phase.status = "complete" if captured_output else "error"
-                    phase.output = captured_output if not output_files else (
-                        f"Generated {len(output_files)} file(s). See output_files."
-                    )
-                    phase.output_files = output_files
-                    meta = dict(phase.phase_metadata or {})
-                    meta["execution_metrics"] = {
-                        "run_id": str(run_id),
-                        "started_at": started_at.isoformat(),
-                        "completed_at": datetime.utcnow().isoformat(),
-                        "duration_ms": duration_ms,
-                        "agentic": True,
-                        "max_turns": max_turns,
-                    }
-                    phase.phase_metadata = meta
-
-                    if mvp_id:
-                        mvp_obj = session.query(FunctionalMVP).filter(
-                            FunctionalMVP.mvp_id == mvp_id
-                        ).first()
-                        if mvp_obj:
-                            mvp_obj.current_phase = phase_number
-
-            # ── Ground truth advisory validation (agentic path) ──
-            try:
-                gt = self._get_ground_truth(project_id)
-                if gt is not None and captured_output:
-                    from codeloom.core.migration.ground_truth import OutputIssue
-                    gt_issues = gt.validate_phase_output(
-                        context_type or get_phase_type(phase_number, version),
-                        captured_output,
-                    )
-                    if gt_issues:
-                        with self._db.get_session() as _gt_session:
-                            _gt_phase = self._get_phase(_gt_session, pid, phase_number, mvp_id)
-                            if _gt_phase:
-                                _gt_meta = dict(_gt_phase.phase_metadata or {})
-                                _gt_meta["ground_truth_warnings"] = [
-                                    {"type": i.issue_type, "message": i.message}
-                                    for i in gt_issues
-                                ]
-                                _gt_phase.phase_metadata = _gt_meta
-                        logger.warning(
-                            "Agentic ground truth: %d advisory issues for phase %d",
-                            len(gt_issues), phase_number,
-                        )
-            except Exception as _gt_err:
-                logger.debug("Agentic ground truth validation skipped: %s", _gt_err)
-
-            # Write to disk (fire-and-forget — DB is source of truth)
-            if captured_output or output_files:
-                try:
-                    self._write_phase_to_disk(
-                        plan_id=str(pid),
-                        phase_number=phase_number,
-                        phase_type=effective_type,
-                        output=captured_output or "",
-                        output_files=output_files,
-                        mvp_id=mvp_id,
-                        project_name=plan_data.get("_project_name"),
-                    )
-                    logger.info(
-                        "Agentic disk write: plan=%s phase=%d mvp=%s files=%d",
-                        str(pid)[:8], phase_number, mvp_id, len(output_files),
-                    )
-                except Exception as disk_err:
-                    logger.warning("Agentic disk write failed (non-fatal): %s", disk_err)
-
-        except Exception as e:
-            logger.error(f"Agentic phase {phase_number} failed: {e}")
-            with self._db.get_session() as session:
-                phase = self._get_phase(session, pid, phase_number, mvp_id)
-                if phase:
-                    phase.status = "error"
-                    phase.output = f"Agentic execution error: {e}"
-            yield ErrorEvent(error=str(e), recoverable=False)
-
     def approve_phase(
         self,
         plan_id: str,
@@ -2875,7 +2805,74 @@ class MigrationEngine:
                 "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
                 "plan_phases": [self._phase_summary(p) for p in plan_phases],
                 "mvps": mvp_summaries,
+                # Accuracy report fields
+                "accuracy_score": plan.accuracy_score,
+                "accuracy_fixed_score": plan.accuracy_fixed_score,
+                "accuracy_fixes_applied": plan.accuracy_fixes_applied,
+                "accuracy_fixes_pending": plan.accuracy_fixes_pending,
+                "accuracy_per_mvp": plan.accuracy_per_mvp,
+                "accuracy_last_run": plan.accuracy_last_run.isoformat() if plan.accuracy_last_run else None,
+                "has_accuracy_report": plan.accuracy_report_md is not None,
             }
+
+    def get_accuracy(self, plan_id: str) -> Dict:
+        """Return accuracy report fields for a plan (lightweight — no phases/MVPs)."""
+        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+        with self._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not plan:
+                raise ValueError(f"Migration plan {plan_id} not found")
+
+            # Check disk for report existence too
+            has_report = plan.accuracy_report_md is not None
+            if not has_report:
+                output_dir = (plan.discovery_metadata or {}).get("output_dir", "")
+                if output_dir:
+                    cwd = os.getcwd()
+                    abs_dir = output_dir if os.path.isabs(output_dir) else os.path.join(cwd, output_dir)
+                    has_report = os.path.isfile(os.path.join(abs_dir, "MIGRATION_ACCURACY.md"))
+
+            return {
+                "plan_id": str(plan.plan_id),
+                "accuracy_score": plan.accuracy_score,
+                "accuracy_fixed_score": plan.accuracy_fixed_score,
+                "accuracy_fixes_applied": plan.accuracy_fixes_applied,
+                "accuracy_fixes_pending": plan.accuracy_fixes_pending,
+                "accuracy_per_mvp": plan.accuracy_per_mvp,
+                "accuracy_last_run": plan.accuracy_last_run.isoformat() if plan.accuracy_last_run else None,
+                "has_report": has_report,
+            }
+
+    def get_accuracy_report_md(self, plan_id: str) -> Optional[str]:
+        """Return the raw MIGRATION_ACCURACY.md markdown for a plan.
+
+        Reads from disk first (output_dir/MIGRATION_ACCURACY.md) for freshest
+        content, falls back to DB column.
+        """
+        pid = UUID(plan_id) if isinstance(plan_id, str) else plan_id
+        with self._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not plan:
+                raise ValueError(f"Migration plan {plan_id} not found")
+
+            # Try reading from disk first (CLI /migrate writes here)
+            output_dir = (plan.discovery_metadata or {}).get("output_dir", "")
+            if output_dir:
+                cwd = os.getcwd()
+                abs_dir = output_dir if os.path.isabs(output_dir) else os.path.join(cwd, output_dir)
+                md_path = os.path.join(abs_dir, "MIGRATION_ACCURACY.md")
+                if os.path.isfile(md_path):
+                    try:
+                        with open(md_path, "r", encoding="utf-8") as f:
+                            return f.read()
+                    except OSError:
+                        pass
+
+            return plan.accuracy_report_md
 
     def get_phase_output(
         self,
@@ -3566,7 +3563,61 @@ class MigrationEngine:
                     f"Phase {phase_number} not found"
                     + (f" for MVP {mvp_id}" if mvp_id else "")
                 )
-            migrated_files = phase.output_files or []
+            raw_migrated_files = phase.output_files or []
+
+            # Resolve base directory for reading file content from disk.
+            # Priority: phase_metadata["output_path"] > plan.discovery_metadata["output_dir"] > CWD.
+            # CLI migrations (/migrate) store output_dir on the plan and write
+            # files relative to it (e.g. "src/jobs/sort.py").
+            meta = phase.phase_metadata or {}
+            output_path = meta.get("output_path", "")
+            if not output_path:
+                plan = session.query(MigrationPlan).filter(MigrationPlan.plan_id == pid).first()
+                if plan:
+                    output_path = (plan.discovery_metadata or {}).get("output_dir", "")
+            cwd = os.getcwd()
+
+            # Build ordered list of candidate base dirs to try
+            base_dirs: list = []
+            if output_path:
+                # output_path may itself be relative (e.g. "migration-output/foo")
+                abs_output = output_path if os.path.isabs(output_path) else os.path.join(cwd, output_path)
+                base_dirs.append(abs_output)
+            base_dirs.append(cwd)
+
+            migrated_files = []
+            for f in raw_migrated_files:
+                fp = f.get("file_path", "")
+                content = f.get("content", "")
+                absolute_path = ""
+                if not content and fp:
+                    resolved = False
+                    if os.path.isabs(fp) and os.path.isfile(fp):
+                        # Absolute path stored — use directly
+                        try:
+                            with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                                content = fh.read()
+                            absolute_path = fp
+                            resolved = True
+                        except OSError:
+                            pass
+                    if not resolved:
+                        # Try each base dir for relative paths
+                        for base in base_dirs:
+                            candidate = os.path.join(base, fp)
+                            if os.path.isfile(candidate):
+                                try:
+                                    with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+                                        content = fh.read()
+                                    absolute_path = os.path.abspath(candidate)
+                                    resolved = True
+                                    break
+                                except OSError:
+                                    continue
+                    if not resolved and fp:
+                        # Best-effort absolute path for VSCode button
+                        absolute_path = os.path.join(base_dirs[0], fp) if base_dirs else os.path.join(cwd, fp)
+                migrated_files.append({**f, "content": content, "absolute_path": absolute_path})
 
             # Get source files from MVP's file_ids (or derive from unit_ids)
             source_files: List[Dict] = []
@@ -3655,8 +3706,41 @@ class MigrationEngine:
                 )
             output_files = phase.output_files or []
 
+            # Resolve base dir for reading files from disk (same logic as get_diff_context)
+            meta = phase.phase_metadata or {}
+            output_path = meta.get("output_path", "")
+            if not output_path:
+                plan = session.query(MigrationPlan).filter(MigrationPlan.plan_id == pid).first()
+                if plan:
+                    output_path = (plan.discovery_metadata or {}).get("output_dir", "")
+
         if not output_files:
             raise ValueError("No output files available for download")
+
+        cwd = os.getcwd()
+        base_dirs: list = []
+        if output_path:
+            abs_output = output_path if os.path.isabs(output_path) else os.path.join(cwd, output_path)
+            base_dirs.append(abs_output)
+        base_dirs.append(cwd)
+
+        def _read_file_content(fp: str) -> str:
+            """Read file content from disk, trying each base dir."""
+            if os.path.isabs(fp) and os.path.isfile(fp):
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                        return fh.read()
+                except OSError:
+                    pass
+            for base in base_dirs:
+                candidate = os.path.join(base, fp)
+                if os.path.isfile(candidate):
+                    try:
+                        with open(candidate, "r", encoding="utf-8", errors="replace") as fh:
+                            return fh.read()
+                    except OSError:
+                        continue
+            return ""
 
         if fmt == "single":
             if not file_path:
@@ -3666,16 +3750,17 @@ class MigrationEngine:
             )
             if not matched:
                 raise ValueError(f"File not found: {file_path}")
-            content = matched.get("content", "").encode("utf-8")
+            content = matched.get("content", "") or _read_file_content(file_path)
             filename = os.path.basename(file_path)
-            return content, "text/plain; charset=utf-8", filename
+            return content.encode("utf-8"), "text/plain; charset=utf-8", filename
 
         # ZIP format
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in output_files:
                 fp = f.get("file_path", "unknown")
-                zf.writestr(fp, f.get("content", ""))
+                file_content = f.get("content", "") or _read_file_content(fp)
+                zf.writestr(fp, file_content)
         buf.seek(0)
         zip_name = f"phase-{phase_number}"
         if mvp_id:
@@ -3687,20 +3772,25 @@ class MigrationEngine:
     def _build_file_mapping(
         source_files: List[Dict], migrated_files: List[Dict]
     ) -> List[Dict]:
-        """Match source files to migrated files by basename similarity."""
+        """Match source files to migrated files.
+
+        Priority:
+        1. Explicit ``source_path`` hint on migrated file entries (CLI /migrate sets this)
+        2. Exact basename stem match
+        3. Partial substring / word-token overlap (heuristic)
+        4. Single-source fallback
+        """
         import re as _re
 
         mapping = []
+        source_path_set = {f["file_path"] for f in source_files}
 
         def _stem(path: str) -> str:
-            """Strip extension and return lowered basename."""
             base = os.path.basename(path)
             root, _ = os.path.splitext(base)
             return root.lower()
 
         def _tokenize(stem: str) -> set:
-            """Split stem into word tokens (handles camelCase, kebab, snake)."""
-            # Split camelCase first, then split on - and _
             parts = _re.sub(r'([a-z])([A-Z])', r'\1_\2', stem)
             return {t for t in _re.split(r'[-_.]', parts.lower()) if len(t) > 1}
 
@@ -3709,9 +3799,33 @@ class MigrationEngine:
 
         for mf in migrated_files:
             target_path = mf.get("file_path", "")
+
+            # ── Priority 1: explicit source_path hint from output_files metadata ──
+            explicit_src = mf.get("source_path", "")
+            if explicit_src:
+                # Accept if it matches a known source file (exact or basename)
+                if explicit_src in source_path_set:
+                    mapping.append({
+                        "source_path": explicit_src,
+                        "target_path": target_path,
+                        "confidence": 1.0,
+                    })
+                    mapped_targets.add(target_path)
+                    continue
+                # Try matching by basename stem
+                explicit_stem = _stem(explicit_src)
+                if explicit_stem in source_stems:
+                    mapping.append({
+                        "source_path": source_stems[explicit_stem],
+                        "target_path": target_path,
+                        "confidence": 0.95,
+                    })
+                    mapped_targets.add(target_path)
+                    continue
+
             target_stem = _stem(target_path)
 
-            # Exact stem match
+            # ── Priority 2: exact stem match ──
             if target_stem in source_stems:
                 mapping.append({
                     "source_path": source_stems[target_stem],
@@ -3721,7 +3835,7 @@ class MigrationEngine:
                 mapped_targets.add(target_path)
                 continue
 
-            # Partial substring match + word-token overlap
+            # ── Priority 3: heuristic — substring + word-token overlap + prefix ──
             best_match = None
             best_score = 0.0
             target_tokens = _tokenize(target_stem)
@@ -3733,13 +3847,29 @@ class MigrationEngine:
                 if s_stem in target_stem or target_stem in s_stem:
                     score = min(len(s_stem), len(target_stem)) / max(len(s_stem), len(target_stem))
 
-                # Word-token overlap (catches renamed files like checkPaths → validate-paths)
+                # Word-token overlap
                 if target_tokens:
                     source_tokens = _tokenize(s_stem)
                     if source_tokens:
                         overlap = len(target_tokens & source_tokens)
                         token_score = overlap / max(len(target_tokens), len(source_tokens))
                         score = max(score, token_score)
+
+                # Prefix matching — handles short COBOL names like EMPF→emp_processor,
+                # ORDERMG→order_mgmt, COMPORDM→order_compare, etc.
+                # Check if source stem (or significant prefix) starts any target token
+                if len(s_stem) >= 3:
+                    for tt in target_tokens:
+                        # Source stem is prefix of a target token (emp→emp in emp_processor)
+                        common = os.path.commonprefix([s_stem, tt])
+                        if len(common) >= 3:
+                            prefix_score = len(common) / max(len(s_stem), len(tt))
+                            score = max(score, prefix_score * 0.7)
+                    # Also check if target stem starts with source stem (product→product.py)
+                    common_full = os.path.commonprefix([s_stem, target_stem])
+                    if len(common_full) >= 3:
+                        prefix_score = len(common_full) / max(len(s_stem), len(target_stem))
+                        score = max(score, prefix_score * 0.75)
 
                 if score > best_score:
                     best_score = score
@@ -3753,7 +3883,7 @@ class MigrationEngine:
                 })
                 mapped_targets.add(target_path)
 
-        # Fallback: if only 1 source file and unmapped targets exist, assign it
+        # ── Priority 4: single-source fallback ──
         if len(source_files) == 1:
             source_path = source_files[0]["file_path"]
             for mf in migrated_files:
@@ -4258,8 +4388,6 @@ class MigrationEngine:
         mvp_ids: List[int] | None = None,
         approval_policy: str = "manual",
         run_all: bool = False,
-        use_agent: bool = False,
-        max_agent_turns: int = 10,
     ) -> Dict:
         """Validate plan and create a batch run descriptor.
 
@@ -4312,8 +4440,6 @@ class MigrationEngine:
                 "status": "running",
                 "approval_policy": approval_policy,
                 "run_all": run_all,
-                "use_agent": use_agent,
-                "max_agent_turns": max_agent_turns,
                 "starting_phase": starting_phase,
                 "pipeline_version": version,
                 "total_mvps": len(eligible),
@@ -4332,8 +4458,6 @@ class MigrationEngine:
                         "error": None,
                         "completed_at": None,
                         "gate_results": [],
-                        "agent_stats": None,
-                        "agent_trace": [],
                     }
                     for m in eligible
                 ],
@@ -4368,9 +4492,6 @@ class MigrationEngine:
         starting_phase = batch["starting_phase"]
         approval_policy = batch["approval_policy"]
         run_all = batch["run_all"]
-        use_agent = batch.get("use_agent", False)
-        max_agent_turns = batch.get("max_agent_turns", 10)
-
         # Determine phase range for each MVP
         start_idx = mvp_ph.index(starting_phase)
         phases_to_run = mvp_ph[start_idx:] if run_all else (starting_phase,)
@@ -4395,41 +4516,8 @@ class MigrationEngine:
 
                     mvp_result["current_phase"] = phase_num
 
-                    # Execute the phase (agentic or standard)
-                    if use_agent:
-                        from dataclasses import asdict as _asdict
-                        from codeloom.core.migration.agent.events import AgentDoneEvent
-                        # Initialize trace on the shared dict so polling picks up events live
-                        mvp_result["agent_trace"] = []
-                        for event in self.execute_phase_agentic(
-                            plan_id, phase_num, mvp_id=mvp_id,
-                            max_turns=max_agent_turns,
-                        ):
-                            # Check cancellation between agent events
-                            if batch.get("cancel_requested"):
-                                mvp_result["status"] = "cancelled"
-                                batch["skipped"] += 1
-                                break
-
-                            evt = _asdict(event)
-                            if evt.get("type") == "tool_result":
-                                r = evt.get("result", "")
-                                if len(r) > 2000:
-                                    evt["result"] = r[:2000] + "\n...(truncated for trace)"
-                                    evt["truncated"] = True
-                            # Append to shared dict in real-time (visible to status polls)
-                            mvp_result["agent_trace"].append(evt)
-                            if isinstance(event, AgentDoneEvent):
-                                mvp_result["agent_stats"] = {
-                                    "turns_used": event.turns_used,
-                                    "tools_called": event.tools_called,
-                                    "total_ms": event.total_ms,
-                                }
-                        # Break out of phase loop if cancelled
-                        if batch.get("cancel_requested"):
-                            break
-                    else:
-                        self.execute_phase(plan_id, phase_num, mvp_id=mvp_id)
+                    # Execute the phase
+                    self.execute_phase(plan_id, phase_num, mvp_id=mvp_id)
 
                     # Decide whether to auto-approve
                     phase_output = self.get_phase_output(plan_id, phase_num, mvp_id)

@@ -30,6 +30,19 @@ providers:
     requires_api_key: true
     env_key: "OPENAI_API_KEY"
     models:
+      # GPT-5 series
+      - name: "gpt-5.2"
+        display_name: "GPT-5.2"
+        context_window: 128000
+      - name: "gpt-5"
+        display_name: "GPT-5"
+        context_window: 128000
+      - name: "gpt-5-mini"
+        display_name: "GPT-5 Mini"
+        context_window: 128000
+      - name: "gpt-5-nano"
+        display_name: "GPT-5 Nano"
+        context_window: 128000
       # GPT-4 series
       - name: "gpt-4.1-nano"
         display_name: "GPT-4.1 Nano"

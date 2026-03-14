@@ -118,6 +118,7 @@ class Project(Base):
     repo_branch = Column(String(255), nullable=True)                     # git branch
     last_synced_at = Column(TIMESTAMP, nullable=True)                    # last ingestion time
     deep_analysis_status = Column(String(20), default='none', nullable=False)  # none|pending|running|completed|failed
+    age_graph_status = Column(String(20), default='pending', nullable=False)    # pending|syncing|synced|error
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -257,6 +258,15 @@ class MigrationPlan(Base):
     batch_executions = Column(JSONB, default=list)                # [{batch_id, status, mvp_results, ...}]
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Accuracy report — populated by /migrate compare after transforms complete
+    accuracy_score         = Column(Float, nullable=True)       # pre-fix score (0–100)
+    accuracy_fixed_score   = Column(Float, nullable=True)       # post-fix score (0–100)
+    accuracy_fixes_applied = Column(Integer, nullable=True)     # surgical fixes applied
+    accuracy_fixes_pending = Column(Integer, nullable=True)     # issues needing manual fix
+    accuracy_report_md     = Column(Text, nullable=True)        # full MIGRATION_ACCURACY.md content
+    accuracy_per_mvp       = Column(JSONB, nullable=True)       # per-MVP breakdown array
+    accuracy_last_run      = Column(TIMESTAMP, nullable=True)   # when compare last ran
 
     # Relationships
     user = relationship("User")

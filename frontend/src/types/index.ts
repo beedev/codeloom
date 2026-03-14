@@ -281,7 +281,8 @@ export interface MigrationPhaseOutput {
 export interface MigrationFile {
   file_path: string;
   language: string;
-  content: string;
+  content?: string;  // Optional — CLI migrations store metadata only; content lives on disk
+  absolute_path?: string; // Populated by diff-context endpoint for VSCode integration
   is_sp_stub?: boolean;
   test_type?: 'unit' | 'integration' | 'equivalence' | 'sp_stub';
 }

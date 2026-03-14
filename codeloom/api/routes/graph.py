@@ -100,7 +100,7 @@ async def get_dependents(
 @router.get("/full")
 async def full_graph(
     project_id: str,
-    edge_types: str = Query(default="calls,contains,inherits,imports,implements,overrides,type_dep"),
+    edge_types: str = Query(default="calls,contains,inherits,imports,implements,overrides,type_dep,calls_sp,data_flow"),
     user: dict = Depends(get_current_user),
     db_manager=Depends(get_db_manager),
     pm=Depends(get_project_manager),
@@ -127,12 +127,6 @@ async def full_graph(
             CodeEdge.edge_type.in_(types),
         ).all()
 
-        # Only include nodes that have at least one edge
-        node_ids_in_edges = set()
-        for e in edges:
-            node_ids_in_edges.add(str(e.source_unit_id))
-            node_ids_in_edges.add(str(e.target_unit_id))
-
         nodes = [
             {
                 "id": str(u.unit_id),
@@ -143,7 +137,6 @@ async def full_graph(
                 "file_id": str(u.file_id),
             }
             for u in units
-            if str(u.unit_id) in node_ids_in_edges
         ]
 
         links = [

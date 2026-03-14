@@ -14,10 +14,9 @@ import { useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Highlight, themes } from 'prism-react-renderer';
-import { Play, Check, Loader2, FileCode, AlertCircle, Download, Bot } from 'lucide-react';
+import { Check, Loader2, FileCode, AlertCircle, Download } from 'lucide-react';
 import { DiffViewer } from './DiffViewer.tsx';
 import { TestFilePanel } from './TestFilePanel.tsx';
-import { AgentExecutionPanel } from './AgentExecutionPanel.tsx';
 import * as api from '../../services/api.ts';
 import type { MigrationPhaseOutput, MigrationFile, DiffContext } from '../../types/index.ts';
 
@@ -34,10 +33,6 @@ interface PhaseViewerProps {
   phase: MigrationPhaseOutput | null;
   phaseNumber: number;
   phaseType: string;
-  canExecute: boolean;
-  isExecuting: boolean;
-  onExecute: () => void;
-  onApprove: () => void;
   planId?: string;
   mvpId?: number | null;
   sourceProjectId?: string;
@@ -47,29 +42,19 @@ export function PhaseViewer({
   phase,
   phaseNumber,
   phaseType,
-  canExecute,
-  isExecuting,
-  onExecute,
-  onApprove,
   planId,
   mvpId,
   sourceProjectId: _sourceProjectId,
 }: PhaseViewerProps) {
   void _sourceProjectId; // reserved for future use (VSCode integration)
   const [activeFileIdx, setActiveFileIdx] = useState(0);
-  const [feedback, setFeedback] = useState('');
   const [diffContext, setDiffContext] = useState<DiffContext | null>(null);
   const [isDiffLoading, setIsDiffLoading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  const [agenticMode, setAgenticMode] = useState(false);
-
-  // Phase types that support agentic execution
-  const supportsAgentic = ['transform', 'analyze', 'test'].includes(phaseType);
 
   const title = PHASE_LABELS[phaseType] ?? phaseType;
   const hasOutput = phase && phase.output;
   const hasFiles = phase && phase.output_files && phase.output_files.length > 0;
-  const isComplete = phase?.status === 'complete';
   const isApproved = phase?.approved;
   const isError = phase?.status === 'error';
 
@@ -131,21 +116,23 @@ export function PhaseViewer({
     }
   }, [planId, phaseNumber, mvpId]);
 
-  // Keyboard shortcut: Cmd+Enter to approve
-  useEffect(() => {
-    if (!isComplete || isApproved) return;
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        onApprove();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [isComplete, isApproved, onApprove]);
-
   // Find matching source file for the active migrated file
   const activeMigratedFile = hasFiles ? phase!.output_files![activeFileIdx] : null;
+
+  // Merge content + absolute_path from diffContext (populated by backend reading from disk)
+  const activeMigratedFileWithContent = (() => {
+    if (!activeMigratedFile) return null;
+    const fromCtx = diffContext?.migrated_files?.find(
+      f => f.file_path === activeMigratedFile.file_path,
+    );
+    if (!fromCtx) return activeMigratedFile;
+    return {
+      ...activeMigratedFile,
+      content: fromCtx.content ?? activeMigratedFile.content,
+      absolute_path: fromCtx.absolute_path ?? activeMigratedFile.absolute_path,
+    };
+  })();
+
   const matchedSourceFile = (() => {
     if (!diffContext || !activeMigratedFile) return null;
     const mapping = diffContext.file_mapping.find(
@@ -191,46 +178,24 @@ export function PhaseViewer({
             </>
           )}
 
-          {/* VSCode placeholder */}
+          {/* VSCode — open selected file if absolute_path is known */}
           {hasFiles && (
             <button
-              className="flex items-center gap-1 rounded-md border border-void-surface px-3 py-1.5 text-xs text-text-dim cursor-not-allowed opacity-50"
-              title="Coming Soon"
-              disabled
+              className={`flex items-center gap-1 rounded-md border border-void-surface px-3 py-1.5 text-xs transition-colors ${
+                activeMigratedFileWithContent?.absolute_path
+                  ? 'text-text-muted hover:border-glow/30 hover:text-text cursor-pointer'
+                  : 'text-text-dim cursor-not-allowed opacity-50'
+              }`}
+              title={activeMigratedFileWithContent?.absolute_path ? 'Open in VSCode' : 'File path not available'}
+              disabled={!activeMigratedFileWithContent?.absolute_path}
+              onClick={() => {
+                const p = activeMigratedFileWithContent?.absolute_path;
+                if (p) window.open(`vscode://file/${p}`);
+              }}
             >
               <span className="material-symbols-outlined text-[14px]">code</span>
               Open in VSCode
             </button>
-          )}
-
-          {/* Execute buttons */}
-          {canExecute && !isExecuting && !agenticMode && (!phase || phase.status === 'pending' || isError) && (
-            <>
-              <button
-                onClick={onExecute}
-                className="flex items-center gap-1.5 rounded-md bg-glow px-4 py-2 text-xs font-medium text-white hover:bg-glow-dim"
-              >
-                <Play className="h-3.5 w-3.5" />
-                Execute Phase
-              </button>
-
-              {supportsAgentic && planId && (
-                <button
-                  onClick={() => setAgenticMode(true)}
-                  className="flex items-center gap-1.5 rounded-md border border-nebula/40 bg-nebula/10 px-4 py-2 text-xs font-medium text-nebula-bright transition-colors hover:bg-nebula/20"
-                >
-                  <Bot className="h-3.5 w-3.5" />
-                  Run with Agent
-                </button>
-              )}
-            </>
-          )}
-
-          {isExecuting && !agenticMode && (
-            <div className="flex items-center gap-2 rounded-md bg-glow/10 px-4 py-2 text-xs text-glow">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Running...
-            </div>
           )}
 
           {isApproved && (
@@ -251,25 +216,8 @@ export function PhaseViewer({
 
       {/* Phase content */}
       <div className="flex flex-1 overflow-hidden">
-        {/* ── Agentic execution panel ── */}
-        {agenticMode && planId && (
-          <div className="flex-1 p-4">
-            <AgentExecutionPanel
-              planId={planId}
-              phaseNumber={phaseNumber}
-              phaseType={phaseType}
-              mvpId={mvpId}
-              onComplete={() => {
-                setAgenticMode(false);
-                onExecute(); // trigger parent refresh to reload phase output
-              }}
-              onCancel={() => setAgenticMode(false)}
-            />
-          </div>
-        )}
-
-        {/* ── Pre-execution states ── */}
-        {!agenticMode && !hasOutput && !isExecuting && !hasFiles && (
+        {/* ── Empty state ── */}
+        {!hasOutput && !hasFiles && (
           <div className="flex flex-1 items-center justify-center text-text-dim">
             <div className="text-center">
               {isError && phase?.output ? (
@@ -279,30 +227,8 @@ export function PhaseViewer({
                   <p className="mt-2 text-xs text-text-dim">{phase.output}</p>
                 </div>
               ) : (
-                <>
-                  <p className="text-sm">Phase not yet executed.</p>
-                  {canExecute && (
-                    <p className="mt-1 text-xs">Click "Execute Phase" to begin.</p>
-                  )}
-                  {!canExecute && (
-                    <p className="mt-1 text-xs">Approve the previous phase first.</p>
-                  )}
-                </>
+                <p className="text-sm">Phase not yet executed.</p>
               )}
-            </div>
-          </div>
-        )}
-
-        {!agenticMode && isExecuting && !hasOutput && !hasFiles && (
-          <div className="flex flex-1 items-center justify-center">
-            <div className="text-center">
-              <Loader2 className="mx-auto h-8 w-8 animate-spin text-glow" />
-              <p className="mt-3 text-sm text-text-muted">
-                Analyzing codebase and generating output...
-              </p>
-              <p className="mt-1 text-xs text-text-dim">
-                This may take a minute for large codebases.
-              </p>
             </div>
           </div>
         )}
@@ -350,14 +276,36 @@ export function PhaseViewer({
                   <span className="ml-2 text-xs text-text-dim">Loading diff context...</span>
                 </div>
               )}
-              {!isDiffLoading && activeMigratedFile && (
+              {!isDiffLoading && activeMigratedFileWithContent && activeMigratedFileWithContent.content && (
                 <div className="flex-1 overflow-hidden">
                   <DiffViewer
                     sourceFile={matchedSourceFile}
-                    migratedFile={activeMigratedFile}
-                    sourceLanguage={matchedSourceFile?.language ?? activeMigratedFile.language}
-                    targetLanguage={activeMigratedFile.language}
+                    migratedFile={activeMigratedFileWithContent}
+                    sourceLanguage={matchedSourceFile?.language ?? activeMigratedFileWithContent.language}
+                    targetLanguage={activeMigratedFileWithContent.language}
                   />
+                </div>
+              )}
+              {!isDiffLoading && activeMigratedFileWithContent && !activeMigratedFileWithContent.content && (
+                <div className="flex flex-1 items-center justify-center">
+                  <div className="max-w-sm text-center">
+                    <FileCode className="mx-auto mb-3 h-8 w-8 text-text-dim/30" />
+                    <p className="text-sm font-medium text-text-muted">
+                      {activeMigratedFileWithContent.file_path.split('/').pop()}
+                    </p>
+                    <p className="mt-1 text-xs text-text-dim">
+                      File content not available. Use Download to access.
+                    </p>
+                    {planId && (
+                      <button
+                        onClick={() => handleDownloadFile(activeMigratedFileWithContent.file_path)}
+                        className="mt-3 flex items-center gap-1.5 rounded-md border border-void-surface px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-glow/30 hover:text-text mx-auto"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download File
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </div>
@@ -443,50 +391,6 @@ export function PhaseViewer({
         )}
       </div>
 
-      {/* Bottom action bar */}
-      {isComplete && !isApproved && (
-        <div className="flex items-center gap-3 border-t border-void-surface bg-void-light/50 px-6 py-3">
-          <input
-            type="text"
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            placeholder="Add a feedback comment for the migration team... (Markdown supported)"
-            className="flex-1 rounded-lg border border-void-surface bg-void px-3 py-2 text-xs text-text placeholder-text-dim focus:border-glow/50 focus:outline-none focus:ring-1 focus:ring-glow/50"
-          />
-
-          <button
-            className="rounded-lg border border-danger/50 px-4 py-2 text-xs font-medium text-danger transition-colors hover:bg-danger/10"
-          >
-            Reject
-          </button>
-
-          <button
-            onClick={onExecute}
-            className="rounded-lg border border-warning/50 px-4 py-2 text-xs font-medium text-warning transition-colors hover:bg-warning/10"
-          >
-            Request Changes
-          </button>
-
-          <button
-            onClick={onApprove}
-            className="flex items-center gap-1.5 rounded-lg bg-glow px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-glow-dim"
-          >
-            <Check className="h-3.5 w-3.5" />
-            Approve Phase
-          </button>
-
-          <span className="text-[10px] text-text-dim">
-            <kbd className="rounded border border-void-surface bg-void-lighter px-1 py-0.5 text-[9px]">
-              {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}
-            </kbd>
-            +
-            <kbd className="rounded border border-void-surface bg-void-lighter px-1 py-0.5 text-[9px]">
-              Enter
-            </kbd>
-            {' '}to approve
-          </span>
-        </div>
-      )}
     </div>
   );
 }
@@ -502,11 +406,14 @@ export function GeneratedFileView({ file }: { file: MigrationFile }) {
     csharp: 'csharp',
     go: 'go',
     rust: 'rust',
+    cobol: 'cobol',
+    cbl: 'cobol',
+    jcl: 'jcl',
   };
   const lang = langMap[file.language] ?? file.language;
 
   return (
-    <Highlight theme={themes.nightOwl} code={file.content} language={lang}>
+    <Highlight theme={themes.nightOwl} code={file.content ?? ''} language={lang}>
       {({ style, tokens, getLineProps, getTokenProps }) => (
         <pre
           className="overflow-x-auto p-4 text-xs leading-relaxed"

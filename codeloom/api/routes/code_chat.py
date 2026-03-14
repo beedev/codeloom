@@ -140,8 +140,32 @@ async def code_chat(
         except Exception as e:
             logger.warning(f"ASG expansion failed, using base results: {e}")
 
-    # Blast radius detection — explicit mode toggle OR auto-detected intent
-    run_impact = data.mode == "impact" or _detect_impact_intent(data.query)
+    # Relationship query detection — runs before impact detection
+    relationship_context = ""
+    relationship_intent = None
+    if project.get("asg_status") == "complete":
+        relationship_intent = _detect_relationship_intent(data.query)
+        if relationship_intent:
+            try:
+                resolved = _resolve_entity(db_manager, project_id, relationship_intent["entity_name"])
+                if resolved:
+                    relationship_context, _ = _build_relationship_context(
+                        db_manager, project_id, relationship_intent, resolved
+                    )
+                    logger.info(
+                        "Relationship query: type=%s entity=%s resolved=%d",
+                        relationship_intent["relation_type"],
+                        relationship_intent["entity_name"],
+                        len(resolved),
+                    )
+            except Exception as e:
+                logger.warning(f"Relationship context building failed: {e}")
+
+    # Blast radius detection — skip if relationship intent already handled
+    run_impact = (
+        not relationship_intent
+        and (data.mode == "impact" or _detect_impact_intent(data.query))
+    )
     blast_radius_context = ""
     if run_impact and retrieval_results and project.get("asg_status") == "complete":
         try:
@@ -175,6 +199,8 @@ async def code_chat(
         conversation_history=conversation_history,
         max_chunks=data.max_sources,
     )
+    if relationship_context:
+        context = relationship_context + "\n\n" + context
     if blast_radius_context:
         context = blast_radius_context + "\n\n" + context
     if deep_narrative:
@@ -307,8 +333,37 @@ async def code_chat_stream(
                 except Exception as e:
                     logger.warning(f"ASG expansion failed, using base results: {e}")
 
-            # Blast radius detection — explicit mode toggle OR auto-detected intent
-            run_impact = data.mode == "impact" or _detect_impact_intent(data.query)
+            # Relationship query detection — runs before impact detection
+            relationship_context = ""
+            relationship_data = None
+            relationship_intent = None
+            if project.get("asg_status") == "complete":
+                relationship_intent = _detect_relationship_intent(data.query)
+                if relationship_intent:
+                    try:
+                        resolved = _resolve_entity(db_manager, project_id, relationship_intent["entity_name"])
+                        if resolved:
+                            relationship_context, relationship_data = _build_relationship_context(
+                                db_manager, project_id, relationship_intent, resolved
+                            )
+                            logger.info(
+                                "Relationship query: type=%s entity=%s resolved=%d",
+                                relationship_intent["relation_type"],
+                                relationship_intent["entity_name"],
+                                len(resolved),
+                            )
+                    except Exception as e:
+                        logger.warning(f"Relationship context building failed: {e}")
+
+            # Emit relationship event if detected
+            if relationship_data:
+                yield f"data: {json.dumps({'type': 'relationships', 'relationships': relationship_data})}\n\n"
+
+            # Blast radius detection — skip if relationship intent already handled
+            run_impact = (
+                not relationship_intent
+                and (data.mode == "impact" or _detect_impact_intent(data.query))
+            )
             blast_radius_context = ""
             impact_data = None
             impact_status = None
@@ -355,6 +410,8 @@ async def code_chat_stream(
                 conversation_history=conversation_history,
                 max_chunks=data.max_sources,
             )
+            if relationship_context:
+                context = relationship_context + "\n\n" + context
             if blast_radius_context:
                 context = blast_radius_context + "\n\n" + context
             effective_prompt = _apply_request_settings(data, CODE_SYSTEM_PROMPT)
@@ -403,13 +460,11 @@ _IMPACT_PATTERNS = [
         r"impact",
         r"blast\s*radius",
         r"affected",
-        r"depends?\s+on",
         r"what\s+happens\s+if",
         r"change.*affect",
         r"ripple",
         r"downstream",
         r"upstream",
-        r"who\s+calls",
         r"who\s+uses",
         r"breaking\s+change",
     ]
@@ -419,6 +474,327 @@ _IMPACT_PATTERNS = [
 def _detect_impact_intent(query: str) -> bool:
     """Detect whether a chat query expresses impact-analysis intent."""
     return any(pattern.search(query) for pattern in _IMPACT_PATTERNS)
+
+
+# ── Relationship intent detection ──────────────────────────────────────
+
+# Entity name: backtick-wrapped, quoted, or a code-like identifier
+# (camelCase, PascalCase, snake_case, dot.separated — excludes common English words)
+_RELATIONSHIP_INTENT_PROMPT = """\
+You are a code relationship intent classifier. Given a user's chat query about a codebase, determine if they are asking about a specific code relationship.
+
+Relation types:
+- callers: who/what calls a function/method
+- callees: what does a function/method call
+- dependencies: what does a unit depend on (imports, calls, inherits)
+- dependents: what depends on / uses a unit (reverse dependencies)
+- inheritors: what classes inherit from / extend a class
+- implementors: what classes implement an interface
+- call_chain: path/chain from one function to another
+
+Respond with EXACTLY one line in this format:
+- If relationship query: RELATION|entity_name|relation_type|target_name_or_NONE
+- If NOT a relationship query: NONE
+
+Examples:
+Query: "What does processOrder call?"
+RELATION|processOrder|callees|NONE
+
+Query: "Who calls validateInput?"
+RELATION|validateInput|callers|NONE
+
+Query: "What depends on BaseModel?"
+RELATION|BaseModel|dependents|NONE
+
+Query: "Show call path from main to saveRecord"
+RELATION|main|call_chain|saveRecord
+
+Query: "What uses AuthMiddleware?"
+RELATION|AuthMiddleware|dependents|NONE
+
+Query: "What inherits from BaseModel?"
+RELATION|BaseModel|inheritors|NONE
+
+Query: "explain the auth flow"
+NONE
+
+Query: "how does the login work"
+NONE
+
+Query: "{query}"
+"""
+
+
+def _detect_relationship_intent(query: str) -> dict | None:
+    """Detect whether a chat query asks about code relationships using LLM classification.
+
+    Makes a lightweight LLM call to classify the query intent.
+    Returns dict with entity_name, relation_type, depth, target_name (for call_chain)
+    or None if no relationship intent detected.
+    """
+    from llama_index.core import Settings as LISettings
+
+    prompt = _RELATIONSHIP_INTENT_PROMPT.format(query=query)
+
+    try:
+        response = LISettings.llm.complete(prompt)
+        result = response.text.strip()
+    except Exception as e:
+        logger.warning("Relationship intent classification failed: %s", e)
+        return None
+
+    if not result or result == "NONE":
+        return None
+
+    if not result.startswith("RELATION|"):
+        return None
+
+    parts = result.split("|")
+    if len(parts) < 4:
+        return None
+
+    _, entity_name, relation_type, target_raw = parts[0], parts[1], parts[2], parts[3]
+
+    valid_types = {"callers", "callees", "dependencies", "dependents",
+                   "inheritors", "implementors", "call_chain"}
+    if relation_type not in valid_types:
+        return None
+
+    entity_name = entity_name.strip().strip("`'\"")
+    if not entity_name:
+        return None
+
+    target_name = None
+    if target_raw.strip() not in ("NONE", ""):
+        target_name = target_raw.strip().strip("`'\"")
+
+    depth_map = {
+        "callers": 2, "callees": 2,
+        "dependencies": 2, "dependents": 2,
+        "inheritors": 3, "implementors": 1,
+        "call_chain": 10,
+    }
+
+    return {
+        "entity_name": entity_name,
+        "relation_type": relation_type,
+        "depth": depth_map.get(relation_type, 2),
+        "target_name": target_name if relation_type == "call_chain" else None,
+    }
+
+    return None
+
+
+def _resolve_entity(
+    db_manager,
+    project_id: str,
+    name: str,
+    max_results: int = 10,
+) -> list[dict]:
+    """Resolve a function/class name to code_unit records.
+
+    Tries exact match first, then qualified_name suffix, then fuzzy ILIKE.
+    Returns list of {unit_id, name, qualified_name, unit_type, language, file_path}.
+    """
+    from uuid import UUID as _UUID
+    from codeloom.core.db.models import CodeUnit, CodeFile
+    from sqlalchemy import func
+
+    pid = _UUID(project_id)
+
+    with db_manager.get_session() as session:
+        # 1. Exact name match (case-insensitive)
+        units = (
+            session.query(CodeUnit, CodeFile.file_path)
+            .outerjoin(CodeFile, CodeUnit.file_id == CodeFile.file_id)
+            .filter(
+                CodeUnit.project_id == pid,
+                func.lower(CodeUnit.name) == name.lower(),
+            )
+            .limit(max_results)
+            .all()
+        )
+
+        # 2. Qualified name suffix match
+        if not units:
+            units = (
+                session.query(CodeUnit, CodeFile.file_path)
+                .outerjoin(CodeFile, CodeUnit.file_id == CodeFile.file_id)
+                .filter(
+                    CodeUnit.project_id == pid,
+                    CodeUnit.qualified_name.ilike(f"%.{name}"),
+                )
+                .limit(max_results)
+                .all()
+            )
+
+        # 3. Fuzzy ILIKE match
+        if not units:
+            units = (
+                session.query(CodeUnit, CodeFile.file_path)
+                .outerjoin(CodeFile, CodeUnit.file_id == CodeFile.file_id)
+                .filter(
+                    CodeUnit.project_id == pid,
+                    CodeUnit.name.ilike(f"%{name}%"),
+                )
+                .limit(max_results)
+                .all()
+            )
+
+        return [
+            {
+                "unit_id": str(u.unit_id),
+                "name": u.name,
+                "qualified_name": u.qualified_name,
+                "unit_type": u.unit_type,
+                "language": u.language,
+                "file_path": fp or "",
+            }
+            for u, fp in units
+        ]
+
+
+def _build_relationship_context(
+    db_manager,
+    project_id: str,
+    intent: dict,
+    resolved_units: list[dict],
+) -> tuple[str, list[dict]]:
+    """Build LLM context from ASG graph traversal for a relationship query.
+
+    Returns (markdown_context, structured_data).
+    """
+    from codeloom.core.asg_builder.queries import (
+        get_callers, get_callees, get_dependencies, get_dependents,
+        find_call_path,
+    )
+    from collections import defaultdict
+
+    rel_type = intent["relation_type"]
+    depth = intent["depth"]
+    sections: list[str] = []
+    structured: list[dict] = []
+
+    # Map relation_type to query function + direction label
+    query_map = {
+        "callers": (get_callers, "Callers of"),
+        "callees": (get_callees, "Callees of"),
+        "dependencies": (get_dependencies, "Dependencies of"),
+        "dependents": (get_dependents, "Dependents of"),
+        "inheritors": (get_dependents, "Classes that inherit from"),
+        "implementors": (get_dependents, "Classes that implement"),
+    }
+
+    if rel_type == "call_chain":
+        # Special: find path between two entities
+        target_name = intent.get("target_name")
+        if target_name:
+            target_units = _resolve_entity(db_manager, project_id, target_name, max_results=5)
+        else:
+            target_units = []
+
+        for src in resolved_units[:3]:
+            for tgt in target_units[:3]:
+                try:
+                    path = find_call_path(
+                        db_manager, project_id,
+                        src["unit_id"], tgt["unit_id"],
+                        max_depth=depth,
+                    )
+                except Exception as e:
+                    logger.debug(f"Call path lookup failed: {e}")
+                    path = None
+
+                if path:
+                    section = f"### Call Path: `{src['name']}` → `{tgt['name']}`\n\n"
+                    for i, step in enumerate(path, 1):
+                        prefix = "   ↓ calls\n" if i > 1 else ""
+                        loc = f", {step.get('language', '')}" if step.get('language') else ""
+                        section += f"{prefix}{i}. `{step['qualified_name'] or step['name']}()` ({step['unit_type']}{loc})\n"
+                    section += f"\nPath length: {len(path)} hops\n"
+                    sections.append(section)
+                    structured.append({
+                        "type": "call_chain",
+                        "source": src["name"],
+                        "target": tgt["name"],
+                        "path": path,
+                        "hops": len(path),
+                    })
+                else:
+                    sections.append(
+                        f"### No call path found from `{src['name']}` to `{tgt['name']}` "
+                        f"within {depth} hops.\n"
+                    )
+
+        if not target_units:
+            sections.append(
+                f"### Could not resolve target entity `{intent.get('target_name', '?')}`\n"
+            )
+
+    elif rel_type in query_map:
+        query_fn, label = query_map[rel_type]
+
+        # For inheritors/implementors, filter to specific edge types
+        edge_filter = None
+        if rel_type == "inheritors":
+            edge_filter = "inherits"
+        elif rel_type == "implementors":
+            edge_filter = "implements"
+
+        for unit in resolved_units[:5]:
+            try:
+                results = query_fn(db_manager, project_id, unit["unit_id"], depth=depth)
+            except Exception as e:
+                logger.debug(f"Relationship query failed for {unit['name']}: {e}")
+                continue
+
+            # Apply edge type filter if needed
+            if edge_filter:
+                results = [r for r in results if r.get("edge_type") == edge_filter]
+
+            if not results:
+                sections.append(
+                    f"### {label} `{unit['name']}` ({unit['unit_type']} in {unit['file_path']})\n\n"
+                    f"No results found.\n"
+                )
+                continue
+
+            section = (
+                f"### {label} `{unit['name']}` ({unit['unit_type']} in {unit['file_path']})\n\n"
+            )
+
+            # Group by depth
+            by_depth: dict[int, list] = defaultdict(list)
+            for r in results:
+                by_depth[r.get("depth", 1)].append(r)
+
+            for d in sorted(by_depth.keys()):
+                items = by_depth[d]
+                depth_label = "Direct" if d == 1 else f"Depth {d}"
+                section += f"**{depth_label}:**\n"
+                for r in items[:20]:
+                    qual = r.get("qualified_name", r["name"])
+                    edge = r.get("edge_type", "")
+                    section += f"- `{qual}` ({r['unit_type']}) via {edge}\n"
+                if len(items) > 20:
+                    section += f"- ... and {len(items) - 20} more\n"
+                section += "\n"
+
+            sections.append(section)
+            structured.append({
+                "type": rel_type,
+                "unit_name": unit["name"],
+                "unit_type": unit["unit_type"],
+                "file_path": unit["file_path"],
+                "results": results[:30],
+                "total": len(results),
+            })
+
+    if not sections:
+        return "", []
+
+    header = "## Code Relationship Analysis\n\n"
+    return header + "\n".join(sections), structured
 
 
 def _traverse_single(

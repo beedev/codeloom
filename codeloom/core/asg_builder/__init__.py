@@ -11,10 +11,13 @@ from .queries import (
     get_class_hierarchy,
     get_interface_implementations,
     get_edge_stats,
+    find_call_path,
 )
+from .expander import ASGExpander
 
 __all__ = [
     "ASGBuilder",
+    "ASGExpander",
     "get_callers",
     "get_callees",
     "get_dependencies",
@@ -23,4 +26,5 @@ __all__ = [
     "get_class_hierarchy",
     "get_interface_implementations",
     "get_edge_stats",
+    "find_call_path",
 ]

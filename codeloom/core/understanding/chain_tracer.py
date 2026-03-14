@@ -265,7 +265,7 @@ class ChainTracer:
             WHERE u.project_id = :pid
               AND u.unit_type IN (
                   'function', 'method',
-                  'program', 'paragraph',
+                  'program',
                   'procedure', 'entry',
                   'job'
               )
@@ -282,9 +282,11 @@ class ChainTracer:
             result = session.execute(text(sql), {"pid": pid})
             rows = result.fetchall()
 
-        return [
-            EntryPoint(
-                unit_id=str(row.unit_id),
+        entries_by_id = {}
+        for row in rows:
+            uid = str(row.unit_id)
+            entries_by_id[uid] = EntryPoint(
+                unit_id=uid,
                 name=row.name,
                 qualified_name=row.qualified_name or row.name,
                 file_path=row.file_path,
@@ -293,8 +295,37 @@ class ChainTracer:
                 metadata=row.metadata or {},
                 detected_by="heuristic",
             )
-            for row in rows
-        ]
+
+        # Always include mainframe program units as entry points regardless
+        # of incoming calls (JCL→program edges are triggers, not dependencies)
+        mainframe_sql = """
+            SELECT u.unit_id, u.name, u.qualified_name, u.unit_type,
+                   u.language, u.start_line, u.end_line,
+                   f.file_path, u.metadata
+            FROM code_units u
+            JOIN code_files f ON u.file_id = f.file_id
+            WHERE u.project_id = :pid
+              AND u.language IN ('cobol', 'pl1')
+              AND u.unit_type = 'program'
+            ORDER BY f.file_path, u.start_line
+        """
+        with self._db.get_session() as session:
+            mf_result = session.execute(text(mainframe_sql), {"pid": pid})
+            for row in mf_result.fetchall():
+                uid = str(row.unit_id)
+                if uid not in entries_by_id:
+                    entries_by_id[uid] = EntryPoint(
+                        unit_id=uid,
+                        name=row.name,
+                        qualified_name=row.qualified_name or row.name,
+                        file_path=row.file_path,
+                        entry_type=self._classify_entry_type(row),
+                        language=row.language or "unknown",
+                        metadata=row.metadata or {},
+                        detected_by="heuristic",
+                    )
+
+        return list(entries_by_id.values())
 
     # -- Private: Pass 2 (Annotations) --------------------------------------
 
@@ -397,7 +428,12 @@ class ChainTracer:
         modifiers = meta.get("modifiers", [])
 
         # Mainframe / batch entry points
-        if unit_type in ("program", "job"):
+        if unit_type == "program":
+            prog_cat = meta.get("program_category", "")
+            if prog_cat == "cics_online":
+                return EntryPointType.HTTP_ENDPOINT
+            return EntryPointType.BATCH_JOB
+        if unit_type == "job":
             return EntryPointType.BATCH_JOB
         if unit_type == "procedure" and getattr(row, "language", "") == "pl1":
             # PL/1 MAIN procedures are batch entry points; others are library calls
@@ -459,7 +495,7 @@ class ChainTracer:
                 JOIN code_units tu ON e.target_unit_id = tu.unit_id
                 JOIN code_files tf ON tu.file_id = tf.file_id
                 WHERE e.project_id = :pid
-                  AND e.edge_type IN ('calls', 'calls_sp')
+                  AND e.edge_type IN ('calls', 'calls_sp', 'contains')
                   AND ct.depth < :max_depth
                   AND NOT (tu.unit_id = ANY(ct.path))  -- cycle prevention
             )

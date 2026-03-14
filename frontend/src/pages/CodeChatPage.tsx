@@ -25,9 +25,9 @@ export function CodeChatPage() {
   const [showSettings, setShowSettings] = useState(false);
 
   const handleSendMessage = useCallback(
-    (query: string, mode?: 'chat' | 'impact') => {
+    (query: string, mode?: 'chat' | 'impact', includeHistory?: boolean) => {
       if (projectId) {
-        sendMessage(projectId, query, mode);
+        sendMessage(projectId, query, mode, includeHistory);
       }
     },
     [projectId, sendMessage],

@@ -2,7 +2,9 @@
 
 Provides functions to query the code_edges table for
 callers, callees, dependencies, dependents, and structural views.
-Uses recursive CTEs for transitive (depth > 1) queries.
+
+Traversal queries try Apache AGE Cypher first (if graph is synced),
+falling back to recursive CTEs on the relational code_edges table.
 """
 
 import logging
@@ -406,6 +408,93 @@ def get_sp_impact_graph(
     }
 
 
+def find_call_path(
+    db: DatabaseManager,
+    project_id: str,
+    source_unit_id: str,
+    target_unit_id: str,
+    max_depth: int = 10,
+    edge_types: tuple = ("calls", "calls_sp"),
+) -> Optional[List[Dict[str, Any]]]:
+    """Find the shortest call path between two units.
+
+    Uses a recursive CTE with ARRAY path accumulator for cycle prevention.
+    Returns the shortest path as a list of unit dicts ordered from source to
+    target, or None if no path exists within max_depth hops.
+    """
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+    src = UUID(source_unit_id) if isinstance(source_unit_id, str) else source_unit_id
+    tgt = UUID(target_unit_id) if isinstance(target_unit_id, str) else target_unit_id
+
+    type_placeholders = ", ".join(f":et{i}" for i in range(len(edge_types)))
+    params: Dict[str, Any] = {
+        "pid": pid, "src": src, "tgt": tgt, "max_depth": max_depth,
+    }
+    for i, et in enumerate(edge_types):
+        params[f"et{i}"] = et
+
+    sql = f"""
+        WITH RECURSIVE paths AS (
+            SELECT
+                unit_id,
+                ARRAY[unit_id] AS path,
+                0 AS depth
+            FROM code_units
+            WHERE unit_id = :src AND project_id = :pid
+
+            UNION ALL
+
+            SELECT
+                u.unit_id,
+                p.path || u.unit_id,
+                p.depth + 1
+            FROM paths p
+            JOIN code_edges e ON e.source_unit_id = p.unit_id
+            JOIN code_units u ON u.unit_id = e.target_unit_id
+            WHERE e.project_id = :pid
+              AND e.edge_type IN ({type_placeholders})
+              AND NOT (u.unit_id = ANY(p.path))
+              AND p.depth < :max_depth
+        )
+        SELECT path
+        FROM paths
+        WHERE unit_id = :tgt
+        ORDER BY array_length(path, 1) ASC
+        LIMIT 1
+    """
+
+    with db.get_session() as session:
+        result = session.execute(text(sql), params)
+        row = result.fetchone()
+        if not row:
+            return None
+
+        # Resolve full unit info for each step in the path
+        path_ids = [UUID(str(uid)) for uid in row.path]
+        units = session.execute(
+            text("""
+                SELECT unit_id, name, qualified_name, unit_type, language, file_id
+                FROM code_units
+                WHERE unit_id = ANY(:ids) AND project_id = :pid
+            """),
+            {"ids": path_ids, "pid": pid},
+        )
+        unit_map = {
+            row.unit_id: {
+                "unit_id": str(row.unit_id),
+                "name": row.name,
+                "qualified_name": row.qualified_name,
+                "unit_type": row.unit_type,
+                "language": row.language,
+                "file_id": str(row.file_id) if row.file_id else None,
+            }
+            for row in units.fetchall()
+        }
+
+        # Return path in order, preserving the traversal sequence
+        return [unit_map[uid] for uid in path_ids if uid in unit_map]
+
+
 def get_edge_stats(
     db: DatabaseManager,
     project_id: str,
@@ -433,6 +522,29 @@ def get_edge_stats(
 
 # ── Private helpers ──────────────────────────────────────────────────
 
+# AGE edge type label map (lowercase -> uppercase)
+_AGE_EDGE_MAP = {
+    "calls": "CALLS", "contains": "CONTAINS", "imports": "IMPORTS",
+    "inherits": "INHERITS", "implements": "IMPLEMENTS", "overrides": "OVERRIDES",
+    "type_dep": "TYPE_DEP", "calls_sp": "CALLS_SP", "data_flow": "DATA_FLOW",
+}
+
+
+def _age_available(db: DatabaseManager, project_id: str) -> bool:
+    """Check if AGE graph is synced for this project."""
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+    try:
+        with db.get_session() as session:
+            result = session.execute(
+                text("SELECT age_graph_status FROM projects WHERE project_id = :pid"),
+                {"pid": pid},
+            )
+            row = result.fetchone()
+            return row is not None and row.age_graph_status == "synced"
+    except Exception:
+        return False
+
+
 def _traverse(
     db: DatabaseManager,
     project_id: str,
@@ -441,19 +553,89 @@ def _traverse(
     direction: str,
     edge_types: tuple,
 ) -> List[Dict[str, Any]]:
-    """Generic graph traversal using recursive CTE.
+    """Generic graph traversal — tries Cypher for single-type queries, SQL for multi-type.
 
-    Args:
-        db: DatabaseManager
-        project_id: Project UUID string
-        unit_id: Starting unit UUID string
-        max_depth: Maximum recursion depth
-        direction: "outgoing" (source -> target) or "incoming" (target -> source)
-        edge_types: Tuple of edge type strings to follow
-
-    Returns:
-        List of neighbor dicts
+    AGE doesn't support multi-label variable-length paths, so multi-edge-type
+    traversals stay on the SQL recursive CTE for correctness.
     """
+    if len(edge_types) == 1 and _age_available(db, project_id):
+        try:
+            return _traverse_cypher(db, project_id, unit_id, max_depth, direction, edge_types)
+        except Exception as e:
+            logger.debug(f"AGE traversal failed, falling back to SQL: {e}")
+
+    return _traverse_sql(db, project_id, unit_id, max_depth, direction, edge_types)
+
+
+def _traverse_cypher(
+    db: DatabaseManager,
+    project_id: str,
+    unit_id: str,
+    max_depth: int,
+    direction: str,
+    edge_types: tuple,
+) -> List[Dict[str, Any]]:
+    """Graph traversal using Apache AGE Cypher (single edge type only).
+
+    Called only when len(edge_types) == 1. Multi-type traversals stay on SQL
+    because AGE doesn't support multi-label variable-length paths.
+    """
+    from .age_client import AGEClient
+
+    age = AGEClient(db)
+    uid = str(unit_id)
+    age_label = _AGE_EDGE_MAP.get(edge_types[0], edge_types[0].upper())
+
+    if direction == "outgoing":
+        cypher = (
+            f"MATCH path = (start {{unit_id: '{uid}'}})-[:{age_label}*1..{max_depth}]->(target) "
+            f"WHERE start <> target "
+            f"RETURN DISTINCT target.unit_id AS uid, target.name AS name, "
+            f"target.qualified_name AS qname, target.unit_type AS utype, "
+            f"target.language AS lang, target.file_id AS fid, "
+            f"length(path) AS depth "
+            f"ORDER BY depth, target.name"
+        )
+    else:
+        cypher = (
+            f"MATCH path = (source)-[:{age_label}*1..{max_depth}]->(end_node {{unit_id: '{uid}'}}) "
+            f"WHERE source <> end_node "
+            f"RETURN DISTINCT source.unit_id AS uid, source.name AS name, "
+            f"source.qualified_name AS qname, source.unit_type AS utype, "
+            f"source.language AS lang, source.file_id AS fid, "
+            f"length(path) AS depth "
+            f"ORDER BY depth, source.name"
+        )
+
+    rows = age.cypher(
+        project_id, cypher,
+        columns=["uid", "name", "qname", "utype", "lang", "fid", "depth"],
+    )
+
+    return [
+        {
+            "unit_id": str(r["uid"]),
+            "name": r["name"],
+            "qualified_name": r["qname"],
+            "unit_type": r["utype"],
+            "language": r["lang"],
+            "file_id": str(r["fid"]) if r["fid"] else None,
+            "edge_type": edge_types[0],
+            "depth": int(r["depth"]),
+        }
+        for r in rows
+    ]
+
+
+def _traverse_sql(
+    db: DatabaseManager,
+    project_id: str,
+    unit_id: str,
+    max_depth: int,
+    direction: str,
+    edge_types: tuple,
+) -> List[Dict[str, Any]]:
+    """Graph traversal using recursive CTE (SQL fallback)."""
     pid = UUID(project_id) if isinstance(project_id, str) else project_id
     uid = UUID(unit_id) if isinstance(unit_id, str) else unit_id
 

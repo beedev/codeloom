@@ -250,12 +250,6 @@ function PhaseRow({
                 {output.output}
               </ReactMarkdown>
             </div>
-          ) : output?.output_preview ? (
-            <div className="prose prose-invert prose-sm max-w-none text-text-muted [&_h1]:text-text [&_h2]:text-text [&_h3]:text-text [&_strong]:text-text [&_code]:text-glow [&_a]:text-glow">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {output.output_preview}
-              </ReactMarkdown>
-            </div>
           ) : (
             <p className="text-xs text-text-dim py-2">No output available for this phase.</p>
           )}

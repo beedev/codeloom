@@ -302,7 +302,7 @@ export async function getDependents(
 
 export async function getFullGraph(
   projectId: string,
-  edgeTypes: string = 'calls,contains,inherits,imports,implements,overrides',
+  edgeTypes: string = 'calls,contains,inherits,imports,implements,overrides,type_dep,calls_sp,data_flow',
 ): Promise<{
   nodes: Array<{ id: string; name: string; qualified_name: string; unit_type: string; language: string; file_id: string }>;
   links: Array<{ source: string; target: string; edge_type: string }>;
@@ -688,8 +688,6 @@ export interface BatchExecuteParams {
   mvp_ids?: number[] | null;
   approval_policy?: 'manual' | 'auto' | 'auto_non_blocking';
   run_all?: boolean;
-  use_agent?: boolean;
-  max_agent_turns?: number;
 }
 
 export interface BatchMvpResult {
@@ -700,8 +698,6 @@ export interface BatchMvpResult {
   error: string | null;
   completed_at: string | null;
   gate_results: Array<{ gate_name: string; passed: boolean; blocking: boolean; details?: string }>;
-  agent_stats?: { turns_used: number; tools_called: number; total_ms: number } | null;
-  agent_trace?: import('../types/index.ts').AgentEvent[];
 }
 
 export interface BatchStatus {
@@ -710,8 +706,6 @@ export interface BatchStatus {
   status: 'running' | 'complete' | 'partial_failure' | 'needs_review' | 'cancelled';
   approval_policy: string;
   run_all: boolean;
-  use_agent?: boolean;
-  max_agent_turns?: number;
   starting_phase: number;
   total_mvps: number;
   completed: number;
@@ -772,6 +766,40 @@ export async function cancelBatchExecution(
   return request(`/api/migration/${planId}/batch/${batchId}/cancel`, {
     method: 'POST',
   });
+}
+
+// ── Accuracy Report ──
+
+export interface PerMvpAccuracy {
+  mvp_name: string;
+  score: number;
+  fixed_score: number;
+  programs: number;
+  constructs: number;
+  correct: number;
+  gaps: number;
+  bugs: number;
+}
+
+export interface AccuracyReportData {
+  plan_id: string;
+  accuracy_score: number | null;
+  accuracy_fixed_score: number | null;
+  accuracy_fixes_applied: number | null;
+  accuracy_fixes_pending: number | null;
+  accuracy_per_mvp: PerMvpAccuracy[] | null;
+  accuracy_last_run: string | null;
+  has_report: boolean;
+}
+
+export async function getAccuracyReport(planId: string): Promise<AccuracyReportData> {
+  return request<AccuracyReportData>(`/api/migration/${planId}/accuracy`);
+}
+
+export async function getAccuracyReportMarkdown(planId: string): Promise<string> {
+  const resp = await fetch(`/api/migration/${planId}/accuracy/report`, { credentials: 'include' });
+  if (!resp.ok) throw new ApiError(resp.status, resp.statusText);
+  return resp.text();
 }
 
 // ---------------------------------------------------------------------------

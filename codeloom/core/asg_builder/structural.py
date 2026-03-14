@@ -68,6 +68,39 @@ def detect_contains(ctx: EdgeContext) -> List[dict]:
                 "edge_type": "contains",
                 "edge_metadata": {},
             })
+
+    # COBOL/PL1: program → paragraph/section containment
+    # Programs contain their paragraphs — needed for call tree traversal
+    # in the Understanding Engine (CTE follows 'contains' edges).
+    mainframe_parent_types = ("program",)
+    mainframe_child_types = ("paragraph", "section", "procedure")
+
+    for u in ctx.units:
+        if u.unit_type not in mainframe_child_types:
+            continue
+        if u.language not in ("cobol", "pl1"):
+            continue
+
+        file_units = ctx.units_by_file.get(str(u.file_id), [])
+        for fu in file_units:
+            if fu.unit_type not in mainframe_parent_types:
+                continue
+            if fu.unit_id == u.unit_id:
+                continue
+            # Paragraph must be within program's line range
+            if (fu.start_line is not None and u.start_line is not None
+                    and fu.start_line <= u.start_line
+                    and (fu.end_line is None or u.end_line is None
+                         or fu.end_line >= u.end_line)):
+                edges.append({
+                    "project_id": ctx.project_id,
+                    "source_unit_id": fu.unit_id,
+                    "target_unit_id": u.unit_id,
+                    "edge_type": "contains",
+                    "edge_metadata": {},
+                })
+                break  # A paragraph belongs to exactly one program
+
     return edges
 
 

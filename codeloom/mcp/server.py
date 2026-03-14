@@ -11,7 +11,7 @@ via JSON-encoded TextContent responses.
 
 import json
 import logging
-import threading
+
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -68,7 +68,8 @@ _TOOL_DEFINITIONS: List[Tool] = [
         name="codeloom_get_mvp_context",
         description=(
             "Get rich context for an MVP: source unit summaries, lane info, "
-            "deep analysis narratives, and ground truth summary."
+            "deep analysis narratives, ground truth summary, and cross-boundary "
+            "integration points (ASG edges crossing MVP boundary)."
         ),
         inputSchema={
             "type": "object",
@@ -80,49 +81,29 @@ _TOOL_DEFINITIONS: List[Tool] = [
         },
     ),
     Tool(
-        name="codeloom_execute_phase",
+        name="codeloom_get_compiled_context",
         description=(
-            "Trigger execution of a migration phase. Agentic runs execute in a background "
-            "thread and persist to DB; poll codeloom_get_phase_result to check status."
+            "Get fully compiled migration context for an MVP phase. "
+            "Returns dependency-ordered source code, ASG edges, deep analysis, "
+            "and ground truth in a single bundle. "
+            "Use instead of fetching units individually."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "plan_id": {"type": "string", "description": "Migration plan UUID"},
-                "phase_number": {"type": "integer", "description": "Phase number to execute"},
-                "mvp_id": {"type": "integer", "description": "MVP ID (required for per-MVP phases)"},
-                "use_agent": {"type": "boolean", "default": True, "description": "Use agentic loop"},
-                "max_turns": {"type": "integer", "default": 10, "description": "Max agent turns"},
-            },
-            "required": ["plan_id", "phase_number"],
-        },
-    ),
-    Tool(
-        name="codeloom_get_phase_result",
-        description="Poll the current status and output of a migration phase from the database.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "plan_id": {"type": "string", "description": "Migration plan UUID"},
-                "phase_number": {"type": "integer", "description": "Phase number"},
-                "mvp_id": {"type": "integer", "description": "MVP ID (for per-MVP phases)"},
-            },
-            "required": ["plan_id", "phase_number"],
-        },
-    ),
-    Tool(
-        name="codeloom_approve_mvp",
-        description="Approve or reject a completed MVP phase. Optionally attach feedback.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "plan_id": {"type": "string", "description": "Migration plan UUID"},
-                "phase_number": {"type": "integer", "description": "Phase number"},
                 "mvp_id": {"type": "integer", "description": "MVP ID"},
-                "approved": {"type": "boolean", "description": "True to approve, False to reject"},
-                "feedback": {"type": "string", "description": "Optional feedback text"},
+                "phase_type": {
+                    "type": "string",
+                    "enum": ["transform", "analyze", "design", "test", "architecture"],
+                    "description": "Phase type determines token budget and context selection",
+                },
+                "token_budget": {
+                    "type": "integer",
+                    "description": "Override token budget (default: auto-scaled per phase type)",
+                },
             },
-            "required": ["plan_id", "phase_number", "mvp_id", "approved"],
+            "required": ["plan_id", "mvp_id"],
         },
     ),
     Tool(
@@ -320,6 +301,10 @@ _TOOL_DEFINITIONS: List[Tool] = [
                         "properties": {
                             "file_path": {"type": "string"},
                             "language": {"type": "string"},
+                            "source_path": {
+                                "type": "string",
+                                "description": "Original source file path (e.g. ORDCOMP.cbl) — enables diff viewer to pair source ↔ migrated",
+                            },
                         },
                     },
                 },
@@ -371,6 +356,31 @@ _TOOL_DEFINITIONS: List[Tool] = [
             "required": ["project_id"],
         },
     ),
+    Tool(
+        name="codeloom_save_accuracy_report",
+        description=(
+            "Persist migration accuracy report to CodeLoom DB after compare+fix completes. "
+            "Stores pre/post-fix scores, fix counts, full markdown report, and per-MVP breakdown. "
+            "Called automatically by /migrate compare at the end of every full run."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string", "description": "Migration plan UUID"},
+                "overall_score": {"type": "number", "description": "Accuracy score before auto-fixes (0–100)"},
+                "fixed_score": {"type": "number", "description": "Accuracy score after auto-fixes (0–100)"},
+                "fixes_applied": {"type": "integer", "description": "Number of surgical fixes successfully applied"},
+                "fixes_pending": {"type": "integer", "description": "Number of issues requiring manual attention"},
+                "report_markdown": {"type": "string", "description": "Full MIGRATION_ACCURACY.md content"},
+                "per_mvp": {
+                    "type": "array",
+                    "description": "Per-MVP breakdown: [{mvp_name, score, fixed_score, programs, constructs, correct, gaps, bugs}]",
+                    "items": {"type": "object"},
+                },
+            },
+            "required": ["plan_id", "overall_score", "fixed_score", "fixes_applied", "fixes_pending", "report_markdown"],
+        },
+    ),
 ]
 
 
@@ -391,11 +401,22 @@ class CodeLoomMCPServer:
         self._db = db_manager
         self._pipeline = pipeline
         self.server = Server("codeloom")
-        # Tracks in-flight agentic executions to prevent double-execution
-        self._active_executions: set = set()
 
         # Register handlers
         self._register_handlers()
+
+    @staticmethod
+    def _unescape_markdown(text: str) -> str:
+        """Convert literal \\n sequences to real newlines.
+
+        MCP tool arguments can arrive with escaped newlines (two chars: backslash + n)
+        instead of actual newline characters depending on how the JSON-RPC message was
+        constructed.  This normalises them before storing markdown in the DB so the
+        frontend renders correctly.
+        """
+        if not text:
+            return text
+        return text.replace("\\n", "\n")
 
     # ── Handler Registration ────────────────────────────────────────────
 
@@ -424,9 +445,7 @@ class CodeLoomMCPServer:
             "codeloom_get_project_intel": self._get_project_intel,
             "codeloom_list_mvps": self._list_mvps,
             "codeloom_get_mvp_context": self._get_mvp_context,
-            "codeloom_execute_phase": self._execute_phase,
-            "codeloom_get_phase_result": self._get_phase_result,
-            "codeloom_approve_mvp": self._approve_mvp,
+            "codeloom_get_compiled_context": self._get_compiled_context,
             "codeloom_get_source_unit": self._get_source_unit,
             "codeloom_search_codebase": self._search_codebase,
             "codeloom_validate_output": self._validate_output,
@@ -438,6 +457,7 @@ class CodeLoomMCPServer:
             "codeloom_complete_transform": self._complete_transform,
             "codeloom_start_transform": self._start_transform,
             "codeloom_get_import_graph": self._get_import_graph,
+            "codeloom_save_accuracy_report": self._save_accuracy_report,
         }
         handler = dispatch_table.get(name)
         if handler is None:
@@ -560,8 +580,39 @@ class CodeLoomMCPServer:
                         "mvp_count": mvp_count,
                         "created_at": plan.created_at.isoformat() if plan.created_at else None,
                         "output_dir": (plan.discovery_metadata or {}).get("output_dir", ""),
+                        "asset_strategies": plan.asset_strategies,
                     }
                 )
+
+        # Lane detection per source language
+        from codeloom.core.migration.lanes.registry import LaneRegistry
+
+        detected_lanes = []
+        target_stack = {}
+        if plan_summaries:
+            # Use latest plan's target stack if available
+            latest_plan_id = plan_summaries[-1].get("plan_id")
+            if latest_plan_id:
+                with self._db.get_session() as session:
+                    latest_plan = session.get(MigrationPlan, UUID(latest_plan_id))
+                    if latest_plan:
+                        target_stack = latest_plan.target_stack or {}
+
+        all_lanes = LaneRegistry.list_lanes()
+        for lang in file_stats:
+            for lane_info in all_lanes:
+                lane = LaneRegistry.get_lane(lane_info["lane_id"])
+                if lane and not lane.deprecated:
+                    score = lane.detect_applicability(lang, target_stack)
+                    if score > 0.0:
+                        detected_lanes.append({
+                            "source_language": lang,
+                            "lane_id": lane_info["lane_id"],
+                            "display_name": lane_info["display_name"],
+                            "confidence": score,
+                            "source_frameworks": lane_info["source_frameworks"],
+                            "target_frameworks": lane_info["target_frameworks"],
+                        })
 
         return {
             "project_id": project_id,
@@ -572,6 +623,7 @@ class CodeLoomMCPServer:
             "asg_edges": edge_stats,
             "understanding_analyses": understanding_status,
             "migration_plans": plan_summaries,
+            "detected_lanes": detected_lanes,
         }
 
     async def _list_mvps(self, args: Dict) -> Dict:
@@ -713,6 +765,22 @@ class CodeLoomMCPServer:
             except Exception as _ge:
                 logger.debug("Ground truth summary skipped: %s", _ge)
 
+            # Integration points: cross-boundary ASG edges + high fan-in/out units
+            integration_points: Dict = {}
+            try:
+                from codeloom.core.migration.context_builder import MigrationContextBuilder as _MCB
+                project_id = str(plan.source_project_id)
+                _ctx = _MCB(self._db, project_id)
+                uid_strings = [str(u) for u in (mvp.unit_ids or [])]
+                cross_edges = _ctx._get_mvp_cross_edges(uid_strings, limit=30)
+                boundary_units = _ctx._get_mvp_integration_points(uid_strings)
+                integration_points = {
+                    "cross_edges": cross_edges,
+                    "boundary_units": boundary_units,
+                }
+            except Exception as _ip_err:
+                logger.debug("Integration points skipped: %s", _ip_err)
+
             # Build return dict inside session scope to avoid DetachedInstanceError
             return {
                 "plan_id": plan_id,
@@ -726,181 +794,85 @@ class CodeLoomMCPServer:
                 "lane_info": lane_info,
                 "deep_narratives": deep_narratives,
                 "ground_truth_summary": gt_summary,
+                "integration_points": integration_points,
                 "analysis_output": mvp.analysis_output,
             }
 
-    async def _execute_phase(self, args: Dict) -> Dict:
+    async def _get_compiled_context(self, args: Dict) -> Dict:
+        """Return fully assembled, dependency-ordered context for an MVP phase.
+
+        Uses MigrationContextBuilder.build_phase_context() so the caller gets
+        a single text block instead of N sequential codeloom_get_source_unit calls.
+        """
+        from codeloom.core.db.models import MigrationPlan, FunctionalMVP, MigrationPhase
+        from codeloom.core.migration.context_builder import MigrationContextBuilder
+
         plan_id = args["plan_id"]
-        phase_number = int(args["phase_number"])
-        mvp_id = args.get("mvp_id")
-        if mvp_id is not None:
-            mvp_id = int(mvp_id)
-        use_agent = bool(args.get("use_agent", True))
-        max_turns = int(args.get("max_turns", 10))
+        mvp_id = args["mvp_id"]
+        phase_type = args.get("phase_type", "transform")
 
-        engine = self._get_engine()
+        pid = UUID(plan_id)
 
-        if not use_agent:
-            # Synchronous execution — blocks until done
-            try:
-                result = engine.execute_phase(
-                    plan_id=plan_id,
-                    phase_number=phase_number,
-                    mvp_id=mvp_id,
-                )
-                return {"status": "complete", "result": result}
-            except Exception as exc:
-                return {"status": "error", "error": str(exc)}
+        with self._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not plan:
+                return {"error": f"Plan {plan_id} not found"}
 
-        # Agentic — run in background thread so we return immediately
-        exec_key = (plan_id, phase_number, mvp_id)
-        if exec_key in self._active_executions:
-            return {
-                "status": "already_running",
-                "message": (
-                    f"Agentic execution already in progress for plan {plan_id} "
-                    f"phase {phase_number}" + (f" mvp {mvp_id}" if mvp_id else "")
-                    + ". Poll codeloom_get_phase_result for status."
-                ),
+            mvp = session.query(FunctionalMVP).filter(
+                FunctionalMVP.plan_id == pid,
+                FunctionalMVP.mvp_id == mvp_id,
+            ).first()
+            if not mvp:
+                return {"error": f"MVP {mvp_id} not found in plan {plan_id}"}
+
+            mvp_context = {
+                "mvp_id": mvp.mvp_id,
+                "name": mvp.name,
+                "description": mvp.description or "",
+                "unit_ids": list(mvp.unit_ids or []),
+                "file_ids": list(mvp.file_ids or []),
             }
-        self._active_executions.add(exec_key)
-        thread = threading.Thread(
-            target=self._run_agentic,
-            args=(plan_id, phase_number, mvp_id, max_turns, engine, exec_key),
-            daemon=True,
-        )
-        thread.start()
-        return {
-            "status": "started",
-            "message": (
-                f"Agentic execution started for plan {plan_id} phase {phase_number}"
-                + (f" mvp {mvp_id}" if mvp_id else "")
-                + ". Poll codeloom_get_phase_result to check status."
-            ),
+
+            # Gather previous phase outputs for context continuity
+            previous_outputs: Dict[int, str] = {}
+            completed_phases = session.query(MigrationPhase).filter(
+                MigrationPhase.plan_id == pid,
+                MigrationPhase.status == "complete",
+            ).all()
+            for p in completed_phases:
+                if p.output:
+                    previous_outputs[p.phase_number] = p.output
+
+            project_id = str(plan.source_project_id)
+
+        # Build context outside session — context_builder opens its own sessions
+        ctx_builder = MigrationContextBuilder(self._db, project_id)
+
+        kwargs: Dict[str, Any] = {
+            "mvp_context": mvp_context,
+            "context_type": phase_type,
         }
+        if args.get("token_budget"):
+            kwargs["token_budget"] = int(args["token_budget"])
 
-    def _run_agentic(
-        self,
-        plan_id: str,
-        phase_number: int,
-        mvp_id: Optional[int],
-        max_turns: int,
-        engine: Any,
-        exec_key: tuple,
-    ) -> None:
-        """Background thread for agentic phase execution. Errors persisted to DB."""
         try:
-            for _event in engine.execute_phase_agentic(
-                plan_id=plan_id,
-                phase_number=phase_number,
-                mvp_id=mvp_id,
-                max_turns=max_turns,
-            ):
-                pass  # Engine persists results to DB on each event cycle
+            context_str = ctx_builder.build_phase_context(
+                phase_number=3,
+                previous_outputs=previous_outputs,
+                **kwargs,
+            )
         except Exception as exc:
-            logger.error("Agentic background execution failed: %s", exc)
-            try:
-                from codeloom.core.db.models import MigrationPhase
-                from uuid import UUID
-
-                pid = UUID(plan_id)
-                with self._db.get_session() as session:
-                    phase = (
-                        session.query(MigrationPhase)
-                        .filter(
-                            MigrationPhase.plan_id == pid,
-                            MigrationPhase.phase_number == phase_number,
-                            MigrationPhase.mvp_id == mvp_id,
-                        )
-                        .first()
-                    )
-                    if phase:
-                        phase.status = "error"
-                        phase.output = f"Background agentic error: {exc}"
-                        session.commit()
-            except Exception as _persist_err:
-                logger.debug("Could not persist agentic error: %s", _persist_err)
-        finally:
-            self._active_executions.discard(exec_key)
-
-    async def _get_phase_result(self, args: Dict) -> Dict:
-        from codeloom.core.db.models import MigrationPhase
-
-        plan_id = args["plan_id"]
-        phase_number = int(args["phase_number"])
-        mvp_id = args.get("mvp_id")
-        if mvp_id is not None:
-            mvp_id = int(mvp_id)
-        pid = UUID(plan_id)
-
-        with self._db.get_session() as session:
-            phase = (
-                session.query(MigrationPhase)
-                .filter(
-                    MigrationPhase.plan_id == pid,
-                    MigrationPhase.phase_number == phase_number,
-                    MigrationPhase.mvp_id == mvp_id,
-                )
-                .first()
-            )
-            if not phase:
-                return {
-                    "error": f"Phase {phase_number} not found for plan {plan_id}"
-                    + (f" mvp {mvp_id}" if mvp_id else "")
-                }
-
-            meta = phase.phase_metadata or {}
-            return {
-                "plan_id": plan_id,
-                "phase_number": phase_number,
-                "phase_type": phase.phase_type,
-                "mvp_id": mvp_id,
-                "status": phase.status,
-                "output": (phase.output or "")[:2000],
-                "output_files_count": len(phase.output_files or []),
-                "approved": phase.approved,
-                "ground_truth_warnings": meta.get("ground_truth_warnings", []),
-                "gate_results": meta.get("gate_results", []),
-                "confidence_tier": meta.get("confidence_tier"),
-                "execution_metrics": meta.get("execution_metrics", {}),
-            }
-
-    async def _approve_mvp(self, args: Dict) -> Dict:
-        from codeloom.core.db.models import MigrationPhase
-
-        plan_id = args["plan_id"]
-        phase_number = int(args["phase_number"])
-        mvp_id = int(args["mvp_id"])
-        approved = bool(args["approved"])
-        feedback = args.get("feedback", "")
-        pid = UUID(plan_id)
-
-        with self._db.get_session() as session:
-            phase = (
-                session.query(MigrationPhase)
-                .filter(
-                    MigrationPhase.plan_id == pid,
-                    MigrationPhase.phase_number == phase_number,
-                    MigrationPhase.mvp_id == mvp_id,
-                )
-                .first()
-            )
-            if not phase:
-                return {"error": f"Phase {phase_number} not found for mvp {mvp_id}"}
-
-            phase.approved = approved
-            if feedback:
-                meta = dict(phase.phase_metadata or {})
-                meta["approval_feedback"] = feedback
-                phase.phase_metadata = meta
-            session.commit()
+            logger.error("build_phase_context failed: %s", exc)
+            return {"error": f"Context build failed: {exc}"}
 
         return {
             "plan_id": plan_id,
-            "phase_number": phase_number,
             "mvp_id": mvp_id,
-            "approved": approved,
-            "message": "Phase approved." if approved else "Phase rejected.",
+            "phase_type": phase_type,
+            "context": context_str,
+            "token_estimate": len(context_str) // 4,
         }
 
     async def _get_source_unit(self, args: Dict) -> Dict:
@@ -1124,8 +1096,8 @@ class CodeLoomMCPServer:
         project_id = args["project_id"]
         target_brief = args["target_brief"]
         target_stack_str = args["target_stack"]
-        architecture_doc = args["architecture_doc"]
-        discovery_doc = args["discovery_doc"]
+        architecture_doc = self._unescape_markdown(args["architecture_doc"])
+        discovery_doc = self._unescape_markdown(args["discovery_doc"])
         output_dir = args.get("output_dir", f"migration-output/{project_id}/")
 
         try:
@@ -1300,12 +1272,12 @@ class CodeLoomMCPServer:
         }
 
     async def _complete_transform(self, args: Dict) -> Dict:
-        from codeloom.core.db.models import MigrationPhase, FunctionalMVP
+        from codeloom.core.db.models import MigrationPhase, MigrationPlan, FunctionalMVP
         from datetime import datetime
 
         plan_id = args["plan_id"]
         mvp_id = int(args["mvp_id"])
-        transform_summary = args["transform_summary"]
+        transform_summary = self._unescape_markdown(args["transform_summary"])
         output_files = args.get("output_files", [])
         status = args.get("status", "complete")  # "complete" | "failed"
 
@@ -1324,13 +1296,26 @@ class CodeLoomMCPServer:
             if not phase:
                 return {"error": f"Phase 3 not found for plan {plan_id} mvp {mvp_id}"}
 
-            # Store file metadata only (no code content — code stays on disk)
-            files_meta = [
-                {"file_path": f.get("file_path", ""), "language": f.get("language", "")}
-                for f in output_files
-            ]
+            # Store file metadata only (no code content — code stays on disk).
+            # source_path is an optional hint for the diff viewer to match
+            # migrated files back to their original source (e.g. ORDCOMP.cbl → compordm.py).
+            files_meta = []
+            for f in output_files:
+                entry: dict = {"file_path": f.get("file_path", ""), "language": f.get("language", "")}
+                if f.get("source_path"):
+                    entry["source_path"] = f["source_path"]
+                files_meta.append(entry)
             phase.output = transform_summary
             phase.output_files = files_meta
+
+            # Persist output_dir in phase_metadata so get_diff_context can
+            # resolve relative file paths back to disk for inline display.
+            plan = session.query(MigrationPlan).filter(MigrationPlan.plan_id == pid).first()
+            plan_output_dir = (plan.discovery_metadata or {}).get("output_dir", "") if plan else ""
+            existing_meta = dict(phase.phase_metadata or {})
+            if plan_output_dir and not existing_meta.get("output_path"):
+                existing_meta["output_path"] = plan_output_dir
+                phase.phase_metadata = existing_meta
 
             if status == "failed":
                 phase.status = "failed"
@@ -1462,6 +1447,66 @@ class CodeLoomMCPServer:
             "shared_files": shared_files,
             "import_edges": edges[:2000],
             "truncated": len(edges) > 2000,
+        }
+
+    async def _save_accuracy_report(self, args: Dict) -> Dict:
+        """Persist migration accuracy report to DB after compare+fix completes.
+
+        Also auto-completes all MVPs (status=migrated) and the plan (status=complete)
+        since comparison is the final step — compilation was verified during transform.
+        """
+        from codeloom.core.db.models import MigrationPlan, FunctionalMVP, MigrationPhase
+        from datetime import datetime
+        plan_id = args["plan_id"]
+        pid = UUID(plan_id)
+        with self._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter(
+                MigrationPlan.plan_id == pid
+            ).first()
+            if not plan:
+                return {"error": f"Plan {plan_id} not found"}
+
+            # Save accuracy data
+            plan.accuracy_score         = float(args["overall_score"])
+            plan.accuracy_fixed_score   = float(args["fixed_score"])
+            plan.accuracy_fixes_applied = int(args["fixes_applied"])
+            plan.accuracy_fixes_pending = int(args["fixes_pending"])
+            plan.accuracy_report_md     = self._unescape_markdown(args["report_markdown"])
+            plan.accuracy_per_mvp       = args.get("per_mvp", [])
+            plan.accuracy_last_run      = datetime.utcnow()
+
+            # Auto-complete all MVPs — compare is the final step
+            mvps = session.query(FunctionalMVP).filter(
+                FunctionalMVP.plan_id == pid
+            ).all()
+            mvp_count = len(mvps)
+            for mvp in mvps:
+                mvp.status = "migrated"
+                # Auto-approve any pending/in-progress phases for this MVP
+                phases = session.query(MigrationPhase).filter(
+                    MigrationPhase.plan_id == pid,
+                    MigrationPhase.mvp_id == mvp.mvp_id,
+                ).all()
+                for phase in phases:
+                    if phase.status != "complete":
+                        phase.status = "complete"
+                    if not phase.approved:
+                        phase.approved = True
+                        phase.approved_at = datetime.utcnow()
+
+            # Mark plan complete
+            plan.status = "complete"
+
+            session.commit()
+
+        return {
+            "plan_id": plan_id,
+            "accuracy_score": args["overall_score"],
+            "fixed_score": args["fixed_score"],
+            "fixes_applied": args["fixes_applied"],
+            "fixes_pending": args["fixes_pending"],
+            "mvps_completed": mvp_count,
+            "message": "Accuracy report saved. Migration marked complete.",
         }
 
     # ── Internal helpers ────────────────────────────────────────────────

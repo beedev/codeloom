@@ -1741,6 +1741,18 @@ Current suggestions (rule-based):
 Valid strategies: version_upgrade, framework_migration, rewrite, convert, keep_as_is, no_change
 
 For each asset type, confirm or override the strategy. If overriding, provide a one-line reason.
+
+For languages with sub-types (e.g., JCL step categories or COBOL program categories):
+- The inventory above includes sub-type breakdowns and, for JCL, full step source with EXEC, DD, PARM details.
+- Use EXEC statements, DD allocations (DSN, DISP), PARM values, and SYSIN data to validate or override classifications.
+- Return a "sub_types" dict inside the language entry with per-sub-type strategy overrides.
+- compile_link (COBOLCL, IGYWCL, IEWL) → typically "no_change" (no compilation needed in modern targets)
+- sort_merge (SORT, DFSORT, SYNCSORT) → "rewrite" to target-lang streaming or "convert" to shell script
+- data_mgmt (IDCAMS, IEBGENER, IEFBR14) → "rewrite" to target-lang streaming or "convert" to shell script
+- application_run (EXEC PGM=<user_program>) → "convert" to shell script wrappers
+- For unfamiliar PGM names: examine DD cards — SORTIN/SORTOUT suggests sort_merge; SYSUT1/SYSUT2 suggests data_mgmt; SYSLMOD suggests compile_link
+- Example: {{"jcl": {{"strategy": "rewrite", "sub_types": {{"compile_link": {{"strategy": "no_change", "reason": "..."}}}}}}}}
+
 Return ONLY a JSON object mapping language to {{"strategy": "...", "target": "..." or null, "reason": "..."}}.
 No markdown fences, no extra text.
 """

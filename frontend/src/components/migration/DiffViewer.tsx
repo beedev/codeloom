@@ -14,6 +14,9 @@ import { diffLines, type Change } from 'diff';
 import { ChevronUp, ChevronDown, ArrowRight } from 'lucide-react';
 import type { DiffViewMode } from '../../types/index.ts';
 
+// Register COBOL + JCL grammars on the shared Prism instance
+import './prism-mainframe.ts';
+
 // ── Language label mapping ──────────────────────────────────────────
 const LANG_LABELS: Record<string, string> = {
   java: 'Java',
@@ -23,6 +26,8 @@ const LANG_LABELS: Record<string, string> = {
   typescript: 'TypeScript',
   go: 'Go',
   rust: 'Rust',
+  cobol: 'COBOL',
+  jcl: 'JCL',
 };
 
 const PRISM_LANG: Record<string, string> = {
@@ -33,6 +38,10 @@ const PRISM_LANG: Record<string, string> = {
   csharp: 'csharp',
   go: 'go',
   rust: 'rust',
+  cobol: 'cobol',
+  cbl: 'cobol',
+  cob: 'cobol',
+  jcl: 'jcl',
 };
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -63,9 +72,31 @@ interface DiffStats {
 
 interface DiffViewerProps {
   sourceFile: { file_path: string; language: string; content: string } | null;
-  migratedFile: { file_path: string; language: string; content: string };
+  migratedFile: { file_path: string; language: string; content?: string };
   sourceLanguage: string;
   targetLanguage: string;
+}
+
+// ── COBOL fixed-format cleanup ──────────────────────────────────────
+// Fixed-format COBOL: cols 1-6 = sequence, col 7 = indicator, 8-72 = code, 73-80 = ident
+const COBOL_LANGS = new Set(['cobol', 'cbl', 'cob']);
+
+function cleanCobolSource(content: string): string {
+  return content
+    .split('\n')
+    .map(line => {
+      if (line.length >= 72) {
+        // Strip cols 73-80 (sequence/ident area), keep cols 1-72
+        line = line.slice(0, 72);
+      }
+      // Strip cols 1-6 (sequence number area) — preserve col 7+ (indicator + code)
+      // Col 7 indicator: space=normal, *=comment, /=page, -=continuation
+      if (line.length > 6) {
+        line = line.slice(6);
+      }
+      return line.trimEnd();
+    })
+    .join('\n');
 }
 
 // ── Collapse threshold ──────────────────────────────────────────────
@@ -191,9 +222,10 @@ export function DiffViewer({
     return () => mq.removeEventListener('change', handler);
   }, []);
 
-  // Compute diff
-  const sourceContent = sourceFile?.content ?? '';
-  const targetContent = migratedFile.content;
+  // Compute diff — strip COBOL sequence numbers (cols 73-80) from source
+  const rawSource = sourceFile?.content ?? '';
+  const sourceContent = COBOL_LANGS.has(sourceLanguage) ? cleanCobolSource(rawSource) : rawSource;
+  const targetContent = migratedFile.content ?? '';
 
   const diffLines_ = useMemo(
     () => computeDiffLines(sourceContent, targetContent),
@@ -347,22 +379,15 @@ export function DiffViewer({
         </div>
       )}
 
-      {/* ── No source file ── */}
+      {/* ── No source file: show migrated code full-width ── */}
       {!sourceFile && !isIdentical && (
         <div className="flex flex-1 overflow-hidden">
-          <div className="flex w-1/2 items-center justify-center border-r border-void-surface text-text-dim">
-            <div className="text-center">
-              <span className="material-symbols-outlined text-2xl">help_outline</span>
-              <p className="mt-2 text-xs">No original source found</p>
-              <p className="mt-1 text-[10px]">Source file could not be matched to this migrated file.</p>
-            </div>
-          </div>
-          <div className="w-1/2 overflow-auto">
+          <div className="flex-1 overflow-auto">
             <DiffCodePanel
-              content={migratedFile.content}
+              content={migratedFile.content ?? ''}
               language={targetLanguage}
               header="MIGRATED"
-              badge="AI Generated"
+              badge="New File"
             />
           </div>
         </div>
@@ -626,7 +651,7 @@ function HighlightedLine({
   return (
     <Highlight theme={themes.nightOwl} code={content} language={language}>
       {({ style, tokens, getTokenProps }) => (
-        <span style={{ ...style, background: 'transparent' }}>
+        <span style={{ ...style, background: 'transparent', whiteSpace: 'pre' }}>
           {tokens[0]?.map((token, key) => (
             <span key={key} {...getTokenProps({ token })} />
           ))}

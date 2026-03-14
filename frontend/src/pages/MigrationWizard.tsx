@@ -5,7 +5,7 @@
  *
  * Version-aware (plan.pipeline_version):
  *   V1 (6-phase): Phase 1 Discovery → Phase 2 Architecture → per-MVP: Analyze, Design, Transform, Test
- *   V2 (4-phase): Phase 1 Architecture → Phase 2 Discovery → per-MVP: Transform, Test
+ *   V2 (4-phase): Phase 1 Architecture → Phase 2 Discovery → per-MVP: Transform
  *
  * Layout modes:
  *   1. New plan form (planId === 'new')
@@ -17,7 +17,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams, useNavigate, Link } from 'react-router-dom';
-import { Loader2, Trash2, ArrowLeft, ArrowRight, Lock, Play } from 'lucide-react';
+import { Loader2, Trash2, ArrowLeft, ArrowRight, Lock } from 'lucide-react';
 import { Layout } from '../components/Layout.tsx';
 import { PhaseTimeline } from '../components/migration/PhaseTimeline.tsx';
 import { PhaseViewer } from '../components/migration/PhaseViewer.tsx';
@@ -27,13 +27,14 @@ import { MvpTimeline } from '../components/migration/MvpTimeline.tsx';
 import { MvpInfoBar } from '../components/migration/MvpInfoBar.tsx';
 import { AssetInventory } from '../components/migration/AssetInventory.tsx';
 import { BatchExecutionPanel } from '../components/migration/BatchExecutionPanel.tsx';
+import { AccuracyPanel } from '../components/migration/AccuracyPanel.tsx';
 import * as api from '../services/api.ts';
 import type { BatchStatus } from '../services/api.ts';
 import type { MigrationPlan, MigrationPhaseOutput } from '../types/index.ts';
 
 // Version-aware per-MVP phase constants
 const MVP_PHASE_NUMBERS_V1 = [3, 4, 5, 6] as const;
-const MVP_PHASE_NUMBERS_V2 = [3, 4] as const;
+const MVP_PHASE_NUMBERS_V2 = [3] as const;
 
 const MVP_PHASE_LABELS_V1: Record<number, string> = {
   3: 'Analyze',
@@ -43,7 +44,6 @@ const MVP_PHASE_LABELS_V1: Record<number, string> = {
 };
 const MVP_PHASE_LABELS_V2: Record<number, string> = {
   3: 'Transform',
-  4: 'Test',
 };
 
 function getMvpPhaseNumbers(version: number): readonly number[] {
@@ -74,13 +74,10 @@ export function MigrationWizard() {
   // ── Plan-level phase state ──
   const [activePhase, setActivePhase] = useState(1);
   const [phaseOutput, setPhaseOutput] = useState<MigrationPhaseOutput | null>(null);
-  const [isExecuting, setIsExecuting] = useState(false);
-
   // ── MVP-level phase state ──
   const [selectedMvpId, setSelectedMvpId] = useState<number | null>(null);
   const [mvpActivePhase, setMvpActivePhase] = useState<number>(3);
   const [mvpPhaseOutput, setMvpPhaseOutput] = useState<MigrationPhaseOutput | null>(null);
-  const [isMvpExecuting, setIsMvpExecuting] = useState(false);
 
   // ── Framework doc enrichment ──
   const [isEnriching, setIsEnriching] = useState(false);
@@ -92,7 +89,7 @@ export function MigrationWizard() {
   const [viewMode, setViewMode] = useState<'plan' | 'mvp'>('plan');
 
   // ── Batch run state (controls sidebar + panel when no MVP selected) ──
-  const [batchRuns, setBatchRuns] = useState<BatchStatus[]>([]);
+  const [, setBatchRuns] = useState<BatchStatus[]>([]);
   const [selectedBatchRunId, setSelectedBatchRunId] = useState<string | null>(null);
   const batchInitRef = useRef(false);
 
@@ -100,7 +97,11 @@ export function MigrationWizard() {
   const version = plan?.pipeline_version ?? 1;
   const mvpPhaseNumbers = useMemo(() => getMvpPhaseNumbers(version), [version]);
   const mvpPhaseLabels = useMemo(() => getMvpPhaseLabels(version), [version]);
-  const lastMvpPhase = mvpPhaseNumbers[mvpPhaseNumbers.length - 1];
+  // Phase types to show in MvpTimeline (lowercase label values, e.g. ['transform'] for V2)
+  const mvpPhaseTypes = useMemo(
+    () => Object.values(mvpPhaseLabels).map(l => l.toLowerCase()),
+    [mvpPhaseLabels]
+  );
 
   // V1: Discovery is Phase 1, Architecture is Phase 2
   // V2: Architecture is Phase 1, Discovery is Phase 2
@@ -124,6 +125,11 @@ export function MigrationWizard() {
 
   // Migration is underway once both plan phases are approved and MVP phases exist
   const migrationUnderway = bothPlanPhasesApproved && hasMvpPhases;
+
+  // Plan is fully complete when all MVPs are migrated or plan status is 'complete'
+  const planComplete =
+    plan?.status === 'complete' ||
+    (hasMvps && (plan?.mvps?.every(m => m.status === 'migrated') ?? false));
 
   const selectedMvp = plan?.mvps?.find(m => m.mvp_id === selectedMvpId) ?? null;
 
@@ -163,16 +169,15 @@ export function MigrationWizard() {
 
         if (bothApproved && mvpPhasesExist) {
           // Migration is underway — route to the right execution view
-          const anyMvpInProgress = p.mvps?.find(m =>
-            m.phases.some(ph => ph.status === 'running' || ph.status === 'complete')
+          // Only auto-select an MVP if one is actively running; otherwise land on Execution Overview
+          const runningMvp = p.mvps?.find(m =>
+            m.phases.some(ph => ph.status === 'running')
           );
-          if (anyMvpInProgress) {
-            setViewMode('mvp');
-            setSelectedMvpId(anyMvpInProgress.mvp_id);
-          } else {
-            // Default to MVP execution — batch panel shows when no MVP selected
-            setViewMode('mvp');
+          setViewMode('mvp');
+          if (runningMvp) {
+            setSelectedMvpId(runningMvp.mvp_id);
           }
+          // else: no auto-select → Execution Overview shows with all MVPs + accuracy
         }
 
         // Set active plan-level phase
@@ -270,7 +275,10 @@ export function MigrationWizard() {
   // Auto-select first MVP active phase when MVP selection changes
   useEffect(() => {
     if (!selectedMvp) return;
-    const mvpPhases = selectedMvp.phases;
+    // Only consider phases that belong to this pipeline version
+    const mvpPhases = selectedMvp.phases.filter(p =>
+      (mvpPhaseNumbers as readonly number[]).includes(p.phase_number)
+    );
     // Find the first non-approved phase, or the last approved one
     const firstPending = mvpPhases.find(p => p.status === 'pending');
     const lastComplete = [...mvpPhases].reverse().find(p => p.status === 'complete' && !p.approved);
@@ -286,7 +294,7 @@ export function MigrationWizard() {
       setMvpActivePhase(mvpPhaseNumbers[0]); // default to first MVP phase
     }
     setMvpPhaseOutput(null);
-  }, [selectedMvpId, selectedMvp]);
+  }, [selectedMvpId, selectedMvp, mvpPhaseNumbers]);
 
   // ── Handlers: Plan creation ──
   const handleCreatePlan = useCallback(async (data: Parameters<typeof api.createMigrationPlan>[0]) => {
@@ -294,6 +302,10 @@ export function MigrationWizard() {
     setError(null);
     try {
       const newPlan = await api.createMigrationPlan(data);
+      // Copy the CLI migrate command so the user can paste it immediately
+      const cmd = `claude /migrate --project ${newPlan.plan_id}`;
+      navigator.clipboard.writeText(cmd).catch(() => {});
+      // Navigate to the plan so Asset Inventory shows before going to plans list
       navigate(`/migration/${newPlan.plan_id}`, { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create plan');
@@ -301,107 +313,6 @@ export function MigrationWizard() {
       setIsCreating(false);
     }
   }, [navigate]);
-
-  // ── Handlers: Plan-level phase execution ──
-  const handleExecute = useCallback(async () => {
-    if (!planId || isNewPlan) return;
-    setIsExecuting(true);
-    setError(null);
-    try {
-      let result: MigrationPhaseOutput;
-      // Discovery is the special phase that runs clustering + LLM
-      // V1: Phase 1 = Discovery. V2: Phase 2 = Discovery.
-      if (activePhase === discoveryPhase) {
-        const discovery = await api.runDiscovery(planId);
-        result = {
-          phase_id: '',
-          phase_number: discoveryPhase,
-          phase_type: 'discovery',
-          status: 'complete',
-          output: discovery.phase_output?.output ?? '',
-          output_files: discovery.phase_output?.output_files ?? [],
-          approved: false,
-          approved_at: null,
-          input_summary: null,
-          mvp_id: null,
-          phase_metadata: null,
-        };
-      } else {
-        result = await api.executeMigrationPhase(planId, activePhase);
-      }
-      setPhaseOutput(result);
-      await refreshPlan();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Phase execution failed');
-      await refreshPlan();
-    } finally {
-      setIsExecuting(false);
-    }
-  }, [planId, activePhase, isNewPlan, discoveryPhase, refreshPlan]);
-
-  // ── Handlers: Plan-level phase approval ──
-  const handleApprove = useCallback(async () => {
-    if (!planId || isNewPlan) return;
-    setError(null);
-    try {
-      const updated = await api.approveMigrationPhase(planId, activePhase);
-      setPlan(updated);
-
-      // After Phase 2 approved (the second plan-level phase): auto-create per-MVP phases
-      if (activePhase === 2 && updated.mvps?.length > 0) {
-        try {
-          await api.createMvpPhases(planId);
-          await refreshPlan();
-        } catch {
-          // MVP phases may already exist
-        }
-      }
-
-      // Auto-advance to next plan-level phase
-      if (activePhase < 2) {
-        setActivePhase(activePhase + 1);
-        setPhaseOutput(null);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to approve phase');
-    }
-  }, [planId, activePhase, isNewPlan, refreshPlan]);
-
-  // ── Handlers: MVP phase execution ──
-  const handleMvpExecute = useCallback(async () => {
-    if (!planId || !selectedMvpId) return;
-    setIsMvpExecuting(true);
-    setError(null);
-    try {
-      const result = await api.executeMigrationPhase(planId, mvpActivePhase, selectedMvpId);
-      setMvpPhaseOutput(result);
-      await refreshPlan();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'MVP phase execution failed');
-      await refreshPlan();
-    } finally {
-      setIsMvpExecuting(false);
-    }
-  }, [planId, selectedMvpId, mvpActivePhase, refreshPlan]);
-
-  // ── Handlers: MVP phase approval ──
-  const handleMvpApprove = useCallback(async () => {
-    if (!planId || !selectedMvpId) return;
-    setError(null);
-    try {
-      const updated = await api.approveMigrationPhase(planId, mvpActivePhase, selectedMvpId);
-      setPlan(updated);
-
-      // Auto-advance to next MVP phase
-      const nextPhase = mvpActivePhase + 1;
-      if (nextPhase <= lastMvpPhase) {
-        setMvpActivePhase(nextPhase);
-        setMvpPhaseOutput(null);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to approve MVP phase');
-    }
-  }, [planId, selectedMvpId, mvpActivePhase, lastMvpPhase]);
 
   // ── Handlers: Create MVP phases ──
   const handleCreateMvpPhases = useCallback(async () => {
@@ -469,23 +380,6 @@ export function MigrationWizard() {
       if (running) setSelectedBatchRunId(running.batch_id);
     }
   }, []);
-
-  // ── Computed: can execute ──
-  const canExecutePlanPhase = (() => {
-    if (!plan) return false;
-    if (activePhase === 1) return true;
-    const prevPhase = plan.plan_phases.find(p => p.phase_number === activePhase - 1);
-    return prevPhase?.approved ?? false;
-  })();
-
-  const canExecuteMvpPhase = (() => {
-    if (!selectedMvp) return false;
-    // First MVP phase can run if both plan-level phases are approved
-    if (mvpActivePhase === mvpPhaseNumbers[0]) return bothPlanPhasesApproved;
-    // Other phases need previous MVP phase approved
-    const prevMvpPhase = selectedMvp.phases.find(p => p.phase_number === mvpActivePhase - 1);
-    return prevMvpPhase?.approved ?? false;
-  })();
 
   const activePhaseInfo = plan?.plan_phases.find(p => p.phase_number === activePhase);
   const mvpActivePhaseInfo = selectedMvp?.phases.find(p => p.phase_number === mvpActivePhase);
@@ -689,8 +583,8 @@ export function MigrationWizard() {
               planId={planId!}
               plan={plan}
               onConfirm={async () => {
-                // After saving strategies, refresh plan and proceed
                 await refreshPlan();
+                navigate('/migrations', { replace: true });
               }}
             />
           </div>
@@ -748,10 +642,6 @@ export function MigrationWizard() {
                   phase={phaseOutput}
                   phaseNumber={activePhase}
                   phaseType={activePhaseInfo?.phase_type ?? 'unknown'}
-                  canExecute={canExecutePlanPhase}
-                  isExecuting={isExecuting}
-                  onExecute={handleExecute}
-                  onApprove={handleApprove}
                   planId={planId}
                   sourceProjectId={sourceProjectId}
                 />
@@ -776,69 +666,18 @@ export function MigrationWizard() {
         {/* Existing plan — MVP execution view */}
         {!isNewPlan && plan && viewMode === 'mvp' && (
           <div className="flex flex-1 overflow-hidden">
-            {/* Left sidebar: MVP Timeline or Batch Runs */}
+            {/* Left sidebar: MVP Timeline — always visible in MVP execution view */}
             <div className="w-60 shrink-0 overflow-y-auto border-r border-void-surface">
-              {selectedMvpId ? (
-                <MvpTimeline
-                  mvps={plan.mvps}
-                  selectedMvpId={selectedMvpId}
-                  onSelectMvp={handleSelectMvp}
-                />
-              ) : (
-                <div className="flex flex-col">
-                  <div className="p-3 text-[10px] font-medium uppercase tracking-wider text-text-dim">
-                    Batch Runs
-                  </div>
-                  {/* New Batch option */}
-                  <button
-                    onClick={() => setSelectedBatchRunId(null)}
-                    className={`mx-2 mb-1 flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition-colors ${
-                      selectedBatchRunId === null
-                        ? 'border border-glow/30 bg-glow/10 text-glow'
-                        : 'border border-transparent text-text-muted hover:bg-void-light/50'
-                    }`}
-                  >
-                    <Play className="h-3.5 w-3.5" />
-                    New Batch
-                  </button>
-                  {/* Past runs */}
-                  {batchRuns.length > 0 && (
-                    <div className="mt-1 border-t border-void-surface/50">
-                      {batchRuns.map((run, idx) => (
-                        <button
-                          key={run.batch_id}
-                          onClick={() => setSelectedBatchRunId(run.batch_id)}
-                          className={`flex w-full items-center gap-2.5 px-4 py-2.5 text-left transition-colors ${
-                            selectedBatchRunId === run.batch_id
-                              ? 'border-l-2 border-glow bg-glow/5'
-                              : 'border-l-2 border-transparent hover:bg-void-light/30'
-                          }`}
-                        >
-                          <div className={`h-2 w-2 shrink-0 rounded-full ${
-                            run.status === 'complete' ? 'bg-success' :
-                            run.status === 'running' ? 'bg-glow animate-pulse' :
-                            run.status === 'partial_failure' ? 'bg-danger' :
-                            'bg-warning'
-                          }`} />
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-xs text-text-muted">
-                              Run #{batchRuns.length - idx}
-                            </div>
-                            <div className="text-[10px] text-text-dim">
-                              {run.total_mvps} MVPs &middot; {run.completed} done
-                              {run.failed > 0 && ` · ${run.failed} failed`}
-                            </div>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              <MvpTimeline
+                mvps={plan.mvps}
+                selectedMvpId={selectedMvpId}
+                onSelectMvp={handleSelectMvp}
+                phaseTypes={mvpPhaseTypes}
+              />
             </div>
 
             {/* Center: Phase execution for selected MVP */}
-            <div className="flex flex-1 flex-col overflow-hidden">
+            <div className="flex flex-1 flex-col overflow-y-auto">
               {selectedMvp ? (
                 <>
                   {/* Back to execution overview */}
@@ -905,28 +744,67 @@ export function MigrationWizard() {
                     phase={mvpPhaseOutput}
                     phaseNumber={mvpActivePhase}
                     phaseType={mvpActivePhaseInfo?.phase_type ?? 'unknown'}
-                    canExecute={canExecuteMvpPhase}
-                    isExecuting={isMvpExecuting}
-                    onExecute={handleMvpExecute}
-                    onApprove={handleMvpApprove}
                     planId={planId}
                     mvpId={selectedMvpId}
                     sourceProjectId={sourceProjectId}
                   />
                 </>
-              ) : (
-                <div className="flex-1 overflow-y-auto">
-                  <BatchExecutionPanel
-                    planId={planId!}
-                    totalMvps={plan.mvps.length}
-                    onMvpClick={(mvpId) => handleSelectMvp(mvpId)}
-                    onBatchComplete={() => refreshPlan()}
-                    initialBatchId={selectedBatchRunId}
-                    onRunsLoaded={handleBatchRunsLoaded}
-                    onBatchIdChange={setSelectedBatchRunId}
-                  />
+              ) : planComplete ? (
+                /* Completed plan — show MVP status grid (Execution Overview) */
+                <div className="p-6 space-y-4">
+                  <h2 className="text-sm font-semibold text-text">Execution Overview</h2>
+                  <div className="grid grid-cols-1 gap-3">
+                    {plan.mvps.map((mvp) => {
+                      const allPhasesApproved = mvp.phases.length > 0 && mvp.phases.every(ph => ph.approved);
+                      const statusColor =
+                        mvp.status === 'migrated' ? 'text-success border-success/30 bg-success/10' :
+                        mvp.status === 'in_progress' ? 'text-glow border-glow/30 bg-glow/10' :
+                        mvp.status === 'refined' ? 'text-nebula-bright border-nebula/30 bg-nebula/10' :
+                        'text-text-dim border-void-surface bg-void-surface/50';
+                      return (
+                        <button
+                          key={mvp.mvp_id}
+                          onClick={() => handleSelectMvp(mvp.mvp_id)}
+                          className="flex items-center gap-4 rounded-xl border border-void-surface bg-void-light/30 px-5 py-3.5 text-left transition-colors hover:border-glow/20 hover:bg-void-light/50"
+                        >
+                          <span className="inline-flex items-center rounded-md bg-glow/10 px-1.5 py-0.5 text-[10px] font-semibold text-glow shrink-0">
+                            #{mvp.priority}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium text-text truncate">{mvp.name}</div>
+                            {mvp.description && (
+                              <div className="text-xs text-text-dim truncate mt-0.5">{mvp.description}</div>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {allPhasesApproved && (
+                              <span className="material-symbols-outlined text-[16px] text-success">check_circle</span>
+                            )}
+                            <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusColor}`}>
+                              {mvp.status.replace('_', ' ')}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
+              ) : (
+                <BatchExecutionPanel
+                  planId={planId!}
+                  totalMvps={plan.mvps.length}
+                  onMvpClick={(mvpId) => handleSelectMvp(mvpId)}
+                  onBatchComplete={() => refreshPlan()}
+                  initialBatchId={selectedBatchRunId}
+                  onRunsLoaded={handleBatchRunsLoaded}
+                  onBatchIdChange={setSelectedBatchRunId}
+                />
               )}
+
+              {/* Accuracy report — always visible below batch/phase panel */}
+              <div className="border-t border-void-surface px-6 py-6">
+                <AccuracyPanel planId={planId!} selectedMvpName={selectedMvp?.name} />
+              </div>
             </div>
           </div>
         )}

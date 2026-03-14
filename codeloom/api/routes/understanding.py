@@ -88,7 +88,12 @@ async def get_results(
                      FROM analysis_units WHERE project_id = :pid) AS analyzed,
                     (SELECT COUNT(*) FROM code_units
                      WHERE project_id = :pid
-                       AND unit_type IN ('function', 'method', 'class')) AS total
+                       AND unit_type IN (
+                           'function', 'method', 'class',
+                           'program', 'paragraph',
+                           'procedure', 'entry',
+                           'job', 'step'
+                       )) AS total
             """),
             {"pid": UUID(project_id)},
         )

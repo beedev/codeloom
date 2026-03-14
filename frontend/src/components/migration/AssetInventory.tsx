@@ -47,14 +47,6 @@ const STRATEGY_OPTIONS: { value: AssetStrategy; label: string }[] = [
   { value: 'no_change', label: 'No Change' },
 ];
 
-const ACTIVE_STRATEGIES: Set<AssetStrategy> = new Set([
-  'version_upgrade', 'framework_migration', 'rewrite',
-]);
-
-const PASSIVE_STRATEGIES: Set<AssetStrategy> = new Set([
-  'keep_as_is', 'convert',
-]);
-
 const TARGET_ENABLED_STRATEGIES: Set<AssetStrategy> = new Set([
   'version_upgrade', 'framework_migration', 'rewrite', 'convert',
 ]);
@@ -264,7 +256,7 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
         <div>
           <h2 className="text-2xl font-bold text-text">Asset Inventory</h2>
           <p className="mt-1 text-sm text-text-muted max-w-2xl">
-            Review file types and assign migration strategies before running discovery.
+            Review file types and assign migration strategies before starting the migration.
           </p>
         </div>
         <div className="flex items-center gap-2 rounded-full border border-void-surface bg-void-light px-4 py-2 text-sm">
@@ -621,7 +613,7 @@ export function AssetInventory({ planId, plan, onConfirm, onCancel }: AssetInven
               </>
             ) : (
               <>
-                Confirm & Run Discovery
+                Confirm & Start Migrate
                 <ArrowRight className="h-4 w-4" />
               </>
             )}

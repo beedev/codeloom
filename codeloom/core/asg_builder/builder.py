@@ -120,7 +120,38 @@ class ASGBuilder:
                 session.execute(stmt)
 
             logger.info(f"ASG built: {len(unique_edges)} edges for project {project_id}")
-            return len(unique_edges)
+
+        # Sync to Apache AGE graph (non-fatal — queries fall back to SQL)
+        try:
+            from .age_sync import AGEGraphSync
+            from .age_client import AGEClient
+
+            age = AGEClient(self._db)
+            sync = AGEGraphSync(age)
+            sync.sync_project(str(pid), units, unique_edges)
+
+            # Update project status
+            from ..db.models import Project
+            with self._db.get_session() as session:
+                project = session.query(Project).filter(
+                    Project.project_id == pid
+                ).first()
+                if project:
+                    project.age_graph_status = "synced"
+        except Exception as e:
+            logger.warning(f"AGE graph sync failed (relational fallback active): {e}")
+            try:
+                from ..db.models import Project
+                with self._db.get_session() as session:
+                    project = session.query(Project).filter(
+                        Project.project_id == pid
+                    ).first()
+                    if project:
+                        project.age_graph_status = "error"
+            except Exception:
+                pass
+
+        return len(unique_edges)
 
     # ── Re-enrichment for existing projects ──────────────────────────
 
