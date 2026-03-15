@@ -195,19 +195,35 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
 
   // Dimensions
-  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
+  const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
 
   // ------ Effects ------
+
+  // Use a callback ref to measure as soon as the container mounts.
+  // This handles the case where the Graph tab is activated after initial page load.
+  const measuredRef = useRef(false);
+  const setContainerRef = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    if (node && !measuredRef.current) {
+      const rect = node.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setDimensions({ width: rect.width, height: rect.height });
+        measuredRef.current = true;
+      }
+    }
+  }, []);
 
   useEffect(() => {
     if (!containerRef.current) return;
     const obs = new ResizeObserver((entries) => {
       const { width, height } = entries[0].contentRect;
-      setDimensions({ width, height });
+      if (width > 0 && height > 0) {
+        setDimensions({ width, height });
+      }
     });
     obs.observe(containerRef.current);
     return () => obs.disconnect();
-  }, []);
+  }, [dimensions]); // re-run when dimensions first set (container mounted)
 
   useEffect(() => {
     if (asgStatus !== 'complete') {
@@ -270,12 +286,11 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
     const isOpen = selectedNode != null;
     if (isOpen !== panelOpenRef.current) {
       panelOpenRef.current = isOpen;
-      if (graphRef.current && dimensions.width > 0) {
-        // Small delay to let the width change propagate first
+      if (graphRef.current && dimensions && dimensions.width > 0) {
         setTimeout(() => graphRef.current?.zoomToFit(400, 60), 50);
       }
     }
-  }, [selectedNode, dimensions.width]);
+  }, [selectedNode, dimensions]);
 
   // ------ Filtered graph data ------
 
@@ -469,12 +484,13 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
   const panelOpen = selectedNode != null;
   const orphanCount = orphanIds.size;
   const PANEL_WIDTH = 360;
-  const graphWidth = panelOpen ? dimensions.width - PANEL_WIDTH : dimensions.width;
+  const graphWidth = dimensions ? (panelOpen ? dimensions.width - PANEL_WIDTH : dimensions.width) : 0;
+  const graphHeight = dimensions?.height ?? 0;
 
   // ------ Render: main ------
 
   return (
-    <div className="relative h-full graph-viewer-root" ref={containerRef}>
+    <div className="relative h-full graph-viewer-root" ref={setContainerRef}>
       {/* Toolbar */}
       <div className="absolute left-3 top-3 z-10 flex flex-col gap-2">
         {/* Search */}
@@ -570,11 +586,11 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
         * nodeVal) and add onBackgroundClick as a manual fallback for any nodes
         * the shadow canvas still misses.
         */}
-      <ForceGraph2D
+      {dimensions && <ForceGraph2D
         ref={graphRef}
         graphData={filteredData}
         width={graphWidth}
-        height={dimensions.height}
+        height={graphHeight}
         backgroundColor="#0f172a"
         nodeLabel={(node: any) => {
           const label = node.qualified_name ?? node.name;
@@ -603,7 +619,7 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
         onEngineStop={() => graphRef.current?.zoomToFit(400, 60)}
         cooldownTicks={100}
         d3VelocityDecay={0.3}
-      />
+      />}
 
       {/* Detail panel */}
       {panelOpen && (
