@@ -166,15 +166,13 @@ function getEdgeColor(type: string): string {
 
 function getNodeVal(unitType: string, isDrilled: boolean): number {
   if (!isDrilled) {
-    // Level 1: containers are bigger
-    if (unitType === 'program' || unitType === 'class') return 4;
-    if (unitType === 'module' || unitType === 'interface' || unitType === 'job') return 3;
-    if (unitType === 'copybook') return 2;
-    return 2;
+    // Level 1: moderate size, let labels do the work
+    if (unitType === 'program' || unitType === 'class') return 2;
+    if (unitType === 'module' || unitType === 'interface' || unitType === 'job') return 1.5;
+    return 1;
   }
-  // Level 2: children are smaller
-  if (unitType === 'class') return 3;
-  if (unitType === 'interface' || unitType === 'module') return 2;
+  // Level 2
+  if (unitType === 'class' || unitType === 'program') return 2;
   return 1;
 }
 
@@ -305,10 +303,10 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg) return;
-    // Stronger charge repulsion spreads nodes out
-    fg.d3Force('charge')?.strength(-120).distanceMax(500);
-    // Weaker link force prevents tight clustering
-    fg.d3Force('link')?.distance(50).strength(0.3);
+    // Strong repulsion to spread nodes evenly across the viewport
+    fg.d3Force('charge')?.strength(-300).distanceMax(800);
+    // Longer link distance keeps connected nodes apart
+    fg.d3Force('link')?.distance(80).strength(0.2);
     // Gentle center pull keeps the graph from drifting
     fg.d3Force('center')?.strength(0.05);
     // Reheat simulation to apply new forces
@@ -733,7 +731,7 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
             : `${prefix}: ${label}`;
         }}
         nodeColor={getNodeDisplayColor}
-        nodeRelSize={6}
+        nodeRelSize={4}
         nodeVal={(node: any) => getNodeVal(node.unit_type, drillTarget != null)}
         linkColor={(link: any) => getEdgeColor(link.edge_type)}
         linkLabel={(link: any) => EDGE_LABELS[link.edge_type] ?? link.edge_type}
