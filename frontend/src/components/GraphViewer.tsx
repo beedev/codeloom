@@ -280,6 +280,20 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedNode]);
 
+  // Configure d3 forces for better spread — runs once after graph mounts
+  useEffect(() => {
+    const fg = graphRef.current;
+    if (!fg) return;
+    // Stronger charge repulsion spreads nodes out
+    fg.d3Force('charge')?.strength(-120).distanceMax(500);
+    // Weaker link force prevents tight clustering
+    fg.d3Force('link')?.distance(50).strength(0.3);
+    // Gentle center pull keeps the graph from drifting
+    fg.d3Force('center')?.strength(0.05);
+    // Reheat simulation to apply new forces
+    fg.d3ReheatSimulation();
+  }, [graphData]);
+
   // Re-fit graph when panel opens/closes so nodes fill the available space
   const panelOpenRef = useRef(false);
   useEffect(() => {
@@ -616,9 +630,11 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
           const el = containerRef.current;
           if (el) el.style.cursor = node ? 'pointer' : 'default';
         }}
-        onEngineStop={() => graphRef.current?.zoomToFit(400, 60)}
-        cooldownTicks={100}
+        onEngineStop={() => graphRef.current?.zoomToFit(400, 40)}
+        cooldownTicks={200}
         d3VelocityDecay={0.3}
+        d3AlphaDecay={0.02}
+        warmupTicks={50}
       />}
 
       {/* Detail panel */}
