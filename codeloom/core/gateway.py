@@ -263,7 +263,7 @@ class LLMGateway(CustomLLM):
 
     # ── Retry ─────────────────────────────────────────────────────────
 
-    def _retry_call(self, fn, *args, **kwargs):
+    def _retry_call(self, fn, *args, max_time: int = 180, **kwargs):
         """Execute fn with exponential backoff on retryable errors."""
         if self._retryable_exceptions is None:
             object.__setattr__(
@@ -274,7 +274,7 @@ class LLMGateway(CustomLLM):
             backoff.expo,
             self._retryable_exceptions,
             max_tries=3,
-            max_time=60,
+            max_time=max_time,
             on_backoff=self._on_retry,
         )
         def _do_call():

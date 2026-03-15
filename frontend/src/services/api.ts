@@ -370,6 +370,17 @@ export async function deleteMigrationPlan(planId: string): Promise<void> {
   return request<void>(`/api/migration/${planId}`, { method: 'DELETE' });
 }
 
+export async function updateMigrationBrief(
+  planId: string,
+  brief: Record<string, string>,
+): Promise<{ status: string; plan_id: string }> {
+  return request(`/api/migration/${planId}/brief`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ migration_brief: brief }),
+  });
+}
+
 // ── Asset Inventory ──
 
 export async function getAssetInventory(

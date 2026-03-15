@@ -17,7 +17,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams, useNavigate, Link } from 'react-router-dom';
-import { Loader2, Trash2, ArrowLeft, ArrowRight, Lock } from 'lucide-react';
+import { Loader2, Trash2, ArrowLeft, ArrowRight, Lock, Terminal, Save } from 'lucide-react';
 import { Layout } from '../components/Layout.tsx';
 import { PhaseTimeline } from '../components/migration/PhaseTimeline.tsx';
 import { PhaseViewer } from '../components/migration/PhaseViewer.tsx';
@@ -26,6 +26,7 @@ import { MvpDiscoveryPanel } from '../components/migration/MvpDiscoveryPanel.tsx
 import { MvpTimeline } from '../components/migration/MvpTimeline.tsx';
 import { MvpInfoBar } from '../components/migration/MvpInfoBar.tsx';
 import { AssetInventory } from '../components/migration/AssetInventory.tsx';
+import { DraftBriefEditor } from '../components/migration/DraftBriefEditor.tsx';
 import { BatchExecutionPanel } from '../components/migration/BatchExecutionPanel.tsx';
 import { AccuracyPanel } from '../components/migration/AccuracyPanel.tsx';
 import * as api from '../services/api.ts';
@@ -132,6 +133,13 @@ export function MigrationWizard() {
     (hasMvps && (plan?.mvps?.every(m => m.status === 'migrated') ?? false));
 
   const selectedMvp = plan?.mvps?.find(m => m.mvp_id === selectedMvpId) ?? null;
+
+  // CLI-created draft plan waiting for business context via Web UI
+  const isCliDraft =
+    plan != null &&
+    plan.status === 'draft' &&
+    plan.discovery_metadata != null &&
+    plan.discovery_metadata.orchestrator === 'claude_code_cli';
 
   // Asset inventory gate: show AssetInventory before discovery if no strategies saved
   const needsAssetInventory = plan != null && !isNewPlan && !plan.asset_strategies && !discoveryComplete;
@@ -576,8 +584,15 @@ export function MigrationWizard() {
           </div>
         )}
 
+        {/* CLI Draft: business context editor — shown when plan was created from CLI as draft */}
+        {isCliDraft && plan && (
+          <div className="flex-1 overflow-y-auto p-6">
+            <DraftBriefEditor planId={planId!} plan={plan} onSaved={refreshPlan} />
+          </div>
+        )}
+
         {/* Asset Inventory step — shown before discovery when no strategies are saved */}
-        {needsAssetInventory && plan && viewMode === 'plan' && (
+        {needsAssetInventory && !isCliDraft && plan && viewMode === 'plan' && (
           <div className="flex-1 overflow-y-auto p-6">
             <AssetInventory
               planId={planId!}
@@ -591,7 +606,7 @@ export function MigrationWizard() {
         )}
 
         {/* View mode tab bar — shown when migration is underway (replaces old banner) */}
-        {!isNewPlan && plan && !needsAssetInventory && migrationUnderway && (
+        {!isNewPlan && plan && !needsAssetInventory && !isCliDraft && migrationUnderway && (
           <div className="flex items-center gap-1 border-b border-void-surface px-4 py-2">
             {([
               { key: 'plan' as const, label: 'Plan Overview', icon: <Lock className="h-3 w-3" /> },
@@ -617,7 +632,7 @@ export function MigrationWizard() {
         )}
 
         {/* Existing plan — Plan-level view */}
-        {!isNewPlan && plan && !needsAssetInventory && viewMode === 'plan' && (
+        {!isNewPlan && plan && !needsAssetInventory && !isCliDraft && viewMode === 'plan' && (
           <>
             {/* Phase timeline (plan-level phases only) */}
             <div className="border-b border-void-surface">

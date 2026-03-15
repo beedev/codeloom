@@ -46,8 +46,13 @@ _COBOL_SELECT_RE = re.compile(
 )
 
 # Tier thresholds (tokens) — defaults; overridden by config if present
-TIER_1_MAX = 100_000
-TIER_2_MAX = 200_000
+TIER_1_MAX = 20_000   # Full source — safe for LLM response within timeout
+TIER_2_MAX = 60_000   # Depth-prioritized truncation (budget caps actual payload)
+SOURCE_PAYLOAD_BUDGET = 20_000  # Max tokens of source sent to LLM regardless of tier
+
+# Chunked analysis thresholds
+CHUNK_LINE_THRESHOLD = 2500  # Programs larger than this get chunked analysis
+CHUNK_TARGET_LINES = 500     # Target lines per chunk
 
 # Quality gate defaults
 DEFAULT_REQUIRE_EVIDENCE_REFS = True
@@ -70,15 +75,11 @@ class ChainAnalyzer:
         call_tree: CallTreeNode,
         framework_contexts: Optional[List[Dict[str, Any]]] = None,
     ) -> DeepContextBundle:
-        """Run tiered analysis on a call chain.
+        """Run analysis on a call chain.
 
-        Steps:
-        1. Count total tokens across all units in the tree
-        2. Select tier based on total tokens
-        3. Prepare source payload (full, truncated, or summarized)
-        4. Build prompt with framework hints
-        5. Call LLM and parse structured JSON output
-        6. Validate evidence references
+        For small programs (< CHUNK_LINE_THRESHOLD lines): single-pass analysis.
+        For large programs: chunk into ~500-line segments, analyze each chunk
+        separately, then consolidate results via a merge prompt.
 
         Args:
             entry_point: The entry point being analyzed
@@ -88,20 +89,26 @@ class ChainAnalyzer:
         Returns:
             DeepContextBundle with extracted knowledge
         """
-        # Step 1: Count tokens
         total_tokens = self._count_tree_tokens(call_tree)
-
-        # Step 2: Select tier
         tier = self._select_tier(total_tokens)
+
+        # Check if program needs chunked analysis
+        total_lines = (call_tree.end_line - call_tree.start_line + 1) if call_tree.source else 0
+        if total_lines > CHUNK_LINE_THRESHOLD:
+            logger.info(
+                f"Chunked analysis for {entry_point.qualified_name}: "
+                f"{total_lines} lines, {total_tokens} tokens"
+            )
+            return self._analyze_chunked(
+                entry_point, call_tree, tier, total_tokens, framework_contexts
+            )
+
         logger.info(
             f"Analyzing {entry_point.qualified_name}: "
             f"{total_tokens} tokens → {tier.value}"
         )
 
-        # Step 3: Prepare source payload
         source_payload = self._prepare_source(call_tree, tier, total_tokens)
-
-        # Step 4: Build prompt
         prompt = prompts.build_chain_analysis_prompt(
             entry_point=entry_point,
             source_payload=source_payload,
@@ -109,7 +116,6 @@ class ChainAnalyzer:
             framework_contexts=framework_contexts or [],
         )
 
-        # Step 5: Call LLM
         llm = Settings.llm
         if llm is None:
             raise RuntimeError("No LLM configured")
@@ -117,9 +123,8 @@ class ChainAnalyzer:
         response = llm.complete(prompt)
         raw_output = response.text.strip()
 
-        # Step 6: Parse and validate
         parsed = self._parse_json_output(raw_output)
-        bundle = self._build_bundle(
+        return self._build_bundle(
             entry_point=entry_point,
             tier=tier,
             total_tokens=total_tokens,
@@ -127,7 +132,273 @@ class ChainAnalyzer:
             parsed=parsed,
         )
 
-        return bundle
+    # ── Chunked Analysis ─────────────────────────────────────────────
+
+    def _analyze_chunked(
+        self,
+        entry_point: EntryPoint,
+        call_tree: CallTreeNode,
+        tier: AnalysisTier,
+        total_tokens: int,
+        framework_contexts: Optional[List[Dict[str, Any]]] = None,
+    ) -> DeepContextBundle:
+        """Split large program into chunks, analyze each, then consolidate.
+
+        1. Partition children (paragraphs/sections) into ~500-line chunks
+        2. Analyze each chunk with a focused extraction prompt
+        3. Merge all chunk results via a consolidation prompt
+        """
+        llm = Settings.llm
+        if llm is None:
+            raise RuntimeError("No LLM configured")
+
+        # Partition children into chunks by line count
+        chunks = self._partition_children(call_tree)
+        logger.info(
+            f"Split {entry_point.qualified_name} into {len(chunks)} chunks "
+            f"({[sum(c.end_line - c.start_line + 1 for c in ch) for ch in chunks]} lines each)"
+        )
+
+        # Phase 1: Analyze each chunk
+        chunk_results = []
+        for i, chunk_nodes in enumerate(chunks):
+            chunk_source = self._format_chunk_source(
+                entry_point, call_tree, chunk_nodes, i + 1, len(chunks)
+            )
+            chunk_prompt = self._build_chunk_prompt(
+                entry_point, chunk_source, i + 1, len(chunks), framework_contexts
+            )
+
+            logger.info(f"Analyzing chunk {i + 1}/{len(chunks)} for {entry_point.qualified_name}")
+            response = llm.complete(chunk_prompt)
+            parsed = self._parse_json_output(response.text.strip())
+            chunk_results.append(parsed)
+
+        # Phase 2: Consolidate chunk results
+        consolidated = self._consolidate_chunks(
+            entry_point, chunk_results, llm
+        )
+
+        return self._build_bundle(
+            entry_point=entry_point,
+            tier=AnalysisTier.CHUNKED,
+            total_tokens=total_tokens,
+            call_tree=call_tree,
+            parsed=consolidated,
+        )
+
+    def _partition_children(self, call_tree: CallTreeNode) -> List[List[CallTreeNode]]:
+        """Partition call tree children into chunks of ~CHUNK_TARGET_LINES lines."""
+        children = call_tree.children
+        if not children:
+            # No children — chunk the root source directly
+            return [[call_tree]]
+
+        chunks: List[List[CallTreeNode]] = []
+        current_chunk: List[CallTreeNode] = []
+        current_lines = 0
+
+        for child in children:
+            child_lines = (child.end_line - child.start_line + 1) if child.source else 0
+            if current_lines + child_lines > CHUNK_TARGET_LINES and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_lines = 0
+            current_chunk.append(child)
+            current_lines += child_lines
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
+
+    def _format_chunk_source(
+        self,
+        entry_point: EntryPoint,
+        call_tree: CallTreeNode,
+        chunk_nodes: List[CallTreeNode],
+        chunk_num: int,
+        total_chunks: int,
+    ) -> str:
+        """Format source for a single chunk, including program header context."""
+        parts = []
+
+        # Include program signature (first ~20 lines) for context
+        if call_tree.source:
+            header_lines = call_tree.source.split("\n")[:20]
+            parts.append(f"## Program Header: {call_tree.qualified_name}")
+            parts.append(f"```{call_tree.language}")
+            parts.append("\n".join(header_lines))
+            parts.append("```")
+            parts.append(f"(... {len(call_tree.children)} total paragraphs, "
+                         f"showing chunk {chunk_num}/{total_chunks})")
+            parts.append("")
+
+        # Include each paragraph/section in this chunk
+        for node in chunk_nodes:
+            parts.append(f"### {node.qualified_name}")
+            parts.append(f"[{node.file_path}:{node.start_line}-{node.end_line}]")
+            if node.source:
+                parts.append(f"```{node.language}")
+                parts.append(node.source)
+                parts.append("```")
+            parts.append("")
+
+        return "\n".join(parts)
+
+    def _build_chunk_prompt(
+        self,
+        entry_point: EntryPoint,
+        chunk_source: str,
+        chunk_num: int,
+        total_chunks: int,
+        framework_contexts: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
+        """Build a focused extraction prompt for a single chunk."""
+        return f"""You are analyzing chunk {chunk_num} of {total_chunks} from a large program.
+
+## ENTRY POINT
+- Name: {entry_point.qualified_name}
+- File: {entry_point.file_path}
+- Language: {entry_point.language}
+
+## SOURCE CODE (Chunk {chunk_num}/{total_chunks})
+{chunk_source}
+
+## INSTRUCTIONS
+Extract the following from THIS CHUNK ONLY. Other chunks will be analyzed separately and results merged.
+
+Return a JSON object with these fields:
+```json
+{{
+  "business_rules": [
+    {{
+      "id": "BR-<chunk>-<n>",
+      "name": "Rule name",
+      "description": "What it does",
+      "evidence_refs": [{{"qualified_name": "...", "file_path": "...", "start_line": 0, "end_line": 0}}]
+    }}
+  ],
+  "data_entities": [
+    {{
+      "name": "Entity name",
+      "fields": ["field1", "field2"],
+      "description": "What it represents"
+    }}
+  ],
+  "integrations": [
+    {{
+      "type": "file_io|database|messaging|screen",
+      "name": "Integration name",
+      "description": "How it's used"
+    }}
+  ],
+  "side_effects": ["description of side effect"],
+  "narrative": "2-3 sentence summary of what this chunk does",
+  "confidence": 0.8
+}}
+```
+
+Return ONLY the JSON object, no markdown fencing or explanation."""
+
+    def _consolidate_chunks(
+        self,
+        entry_point: EntryPoint,
+        chunk_results: List[Dict[str, Any]],
+        llm,
+    ) -> Dict[str, Any]:
+        """Merge chunk results into a single analysis, deduplicating via LLM."""
+        # Collect all items from chunks
+        all_rules = []
+        all_entities = []
+        all_integrations = []
+        all_side_effects = []
+        all_narratives = []
+        confidences = []
+
+        for i, result in enumerate(chunk_results):
+            all_rules.extend(result.get("business_rules", []))
+            all_entities.extend(result.get("data_entities", []))
+            all_integrations.extend(result.get("integrations", []))
+            all_side_effects.extend(result.get("side_effects", []))
+            narrative = result.get("narrative", "")
+            if narrative:
+                all_narratives.append(f"Chunk {i + 1}: {narrative}")
+            confidences.append(float(result.get("confidence", 0.0) or 0.0))
+
+        # If only 1-2 chunks, merge directly without another LLM call
+        if len(chunk_results) <= 2:
+            return {
+                "business_rules": all_rules,
+                "data_entities": all_entities,
+                "integrations": all_integrations,
+                "side_effects": all_side_effects,
+                "cross_cutting_concerns": [],
+                "narrative": " ".join(all_narratives),
+                "confidence": sum(confidences) / len(confidences) if confidences else 0.0,
+                "coverage": 0.9,
+                "chain_truncated": False,
+            }
+
+        # For 3+ chunks, use LLM to consolidate and deduplicate
+        merge_input = json.dumps({
+            "business_rules": all_rules,
+            "data_entities": all_entities,
+            "integrations": all_integrations,
+            "side_effects": all_side_effects,
+            "chunk_narratives": all_narratives,
+        }, indent=2)
+
+        merge_prompt = f"""You are merging analysis results from {len(chunk_results)} chunks of program {entry_point.qualified_name}.
+
+## RAW CHUNK RESULTS
+{merge_input}
+
+## INSTRUCTIONS
+1. Deduplicate business rules (merge rules that describe the same logic)
+2. Deduplicate data entities (merge entities with same name)
+3. Deduplicate integrations (merge by name/type)
+4. Combine side effects, removing duplicates
+5. Write a unified narrative (3-5 sentences) describing the program's purpose
+6. Identify cross-cutting concerns (error handling patterns, logging, security)
+
+Return a single consolidated JSON:
+```json
+{{
+  "business_rules": [...],
+  "data_entities": [...],
+  "integrations": [...],
+  "side_effects": [...],
+  "cross_cutting_concerns": [...],
+  "narrative": "Unified summary...",
+  "confidence": 0.8,
+  "coverage": 0.9,
+  "chain_truncated": false
+}}
+```
+
+Return ONLY the JSON object."""
+
+        logger.info(f"Consolidating {len(chunk_results)} chunks for {entry_point.qualified_name}")
+        response = llm.complete(merge_prompt)
+        merged = self._parse_json_output(response.text.strip())
+
+        # Fallback if merge fails
+        if "parse_error" in merged:
+            logger.warning("Consolidation parse failed, using raw merge")
+            return {
+                "business_rules": all_rules,
+                "data_entities": all_entities,
+                "integrations": all_integrations,
+                "side_effects": all_side_effects,
+                "cross_cutting_concerns": [],
+                "narrative": " ".join(all_narratives),
+                "confidence": sum(confidences) / len(confidences) if confidences else 0.0,
+                "coverage": 0.9,
+                "chain_truncated": False,
+            }
+
+        return merged
 
     # ── Token Counting ──────────────────────────────────────────────────
 
@@ -170,9 +441,9 @@ class ChainAnalyzer:
         if tier == AnalysisTier.TIER_1:
             return self._format_full_source(tree)
         elif tier == AnalysisTier.TIER_2:
-            return self._format_depth_prioritized(tree, budget=TIER_2_MAX)
+            return self._format_depth_prioritized(tree, budget=SOURCE_PAYLOAD_BUDGET)
         else:
-            return self._format_with_summaries(tree, budget=TIER_2_MAX)
+            return self._format_with_summaries(tree, budget=SOURCE_PAYLOAD_BUDGET)
 
     def _format_full_source(
         self,

@@ -43,11 +43,13 @@ const ENTRY_TYPE_META: Record<
   { label: string; icon: typeof Globe }
 > = {
   http_endpoint: { label: 'HTTP Endpoints', icon: Globe },
+  cics_transaction: { label: 'CICS Transactions', icon: Terminal },
   message_handler: { label: 'Message Handlers', icon: Mail },
   scheduled_task: { label: 'Scheduled Tasks', icon: Clock },
   cli_command: { label: 'CLI Commands', icon: Terminal },
   event_listener: { label: 'Event Listeners', icon: Radio },
   startup_hook: { label: 'Startup Hooks', icon: Rocket },
+  batch_job: { label: 'Batch Jobs', icon: Package },
   public_api: { label: 'Public API', icon: Package },
   unknown: { label: 'Unknown', icon: HelpCircle },
 };

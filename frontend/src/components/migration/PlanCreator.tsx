@@ -20,6 +20,14 @@ interface PlanCreatorProps {
     target_stack: { languages: string[]; frameworks: string[] };
     constraints?: { timeline?: string; team_size?: number; risk_tolerance?: string };
     migration_type: MigrationType;
+    migration_brief?: {
+      dead_code?: string;
+      processing_volumes?: string;
+      integrations?: string;
+      landmines?: string;
+      compliance?: string;
+      deployment_platform?: string;
+    };
   }) => void;
   isCreating: boolean;
 }
@@ -64,6 +72,14 @@ export function PlanCreator({ projectId, projectName, onCreatePlan, isCreating }
   const [teamSize, setTeamSize] = useState('');
   const [riskTolerance, setRiskTolerance] = useState('medium');
 
+  // Migration brief — business context fields
+  const [deadCode, setDeadCode] = useState('');
+  const [processingVolumes, setProcessingVolumes] = useState('');
+  const [integrations, setIntegrations] = useState('');
+  const [landmines, setLandmines] = useState('');
+  const [compliance, setCompliance] = useState('');
+  const [deploymentPlatform, setDeploymentPlatform] = useState('');
+
   // Project selector state — used when no projectId is provided via URL
   const [projects, setProjects] = useState<{ project_id: string; name: string }[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState(projectId);
@@ -90,12 +106,21 @@ export function PlanCreator({ projectId, projectName, onCreatePlan, isCreating }
     if (teamSize.trim()) constraints.team_size = parseInt(teamSize, 10);
     if (riskTolerance) constraints.risk_tolerance = riskTolerance;
 
+    const brief: Record<string, string> = {};
+    if (deadCode.trim()) brief.dead_code = deadCode.trim();
+    if (processingVolumes.trim()) brief.processing_volumes = processingVolumes.trim();
+    if (integrations.trim()) brief.integrations = integrations.trim();
+    if (landmines.trim()) brief.landmines = landmines.trim();
+    if (compliance.trim()) brief.compliance = compliance.trim();
+    if (deploymentPlatform.trim()) brief.deployment_platform = deploymentPlatform.trim();
+
     onCreatePlan({
       source_project_id: effectiveProjectId,
       target_brief: targetBrief.trim(),
       target_stack: { languages: [], frameworks: [] },
       constraints: Object.keys(constraints).length > 0 ? constraints : undefined,
       migration_type: migrationType,
+      migration_brief: Object.keys(brief).length > 0 ? brief : undefined,
     });
   };
 
@@ -212,6 +237,95 @@ export function PlanCreator({ projectId, projectName, onCreatePlan, isCreating }
                 <option value="medium">Medium</option>
                 <option value="high">High</option>
               </select>
+            </div>
+          </div>
+        </details>
+
+        {/* Business context — migration brief */}
+        <details className="rounded-md border border-void-surface/50">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-text-muted hover:text-text-dim">
+            Business Context (recommended)
+          </summary>
+          <div className="space-y-3 p-3 pt-1">
+            <div>
+              <label className="block text-[10px] font-medium text-text-dim">
+                Dead / unused programs to skip
+              </label>
+              <input
+                type="text"
+                value={deadCode}
+                onChange={e => setDeadCode(e.target.value)}
+                placeholder="e.g., CBOLD01C, TESTPGM — or leave blank"
+                className="mt-1 w-full rounded border border-void-surface bg-void-light px-2 py-1.5 text-xs text-text placeholder:text-text-dim focus:border-glow/50 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-medium text-text-dim">
+                Processing volumes (batch job daily record counts)
+              </label>
+              <input
+                type="text"
+                value={processingVolumes}
+                onChange={e => setProcessingVolumes(e.target.value)}
+                placeholder="e.g., CBTRN01C: ~50K/day, 200K peak — or unknown"
+                className="mt-1 w-full rounded border border-void-surface bg-void-light px-2 py-1.5 text-xs text-text placeholder:text-text-dim focus:border-glow/50 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-medium text-text-dim">
+                External integrations (queues, file transfers, shared databases)
+              </label>
+              <textarea
+                value={integrations}
+                onChange={e => setIntegrations(e.target.value)}
+                placeholder="e.g., MQ: ACCT.REQUEST.Q → Core Banking; Daily file from Payment Gateway"
+                rows={2}
+                className="mt-1 w-full rounded border border-void-surface bg-void-light px-2 py-1.5 text-xs text-text placeholder:text-text-dim focus:border-glow/50 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-medium text-text-dim">
+                Known landmines (undocumented rules, workarounds, gotchas)
+              </label>
+              <textarea
+                value={landmines}
+                onChange={e => setLandmines(e.target.value)}
+                placeholder="e.g., CBACT04C treats status '77' as success — undocumented"
+                rows={2}
+                className="mt-1 w-full rounded border border-void-surface bg-void-light px-2 py-1.5 text-xs text-text placeholder:text-text-dim focus:border-glow/50 focus:outline-none"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-medium text-text-dim">Compliance</label>
+                <select
+                  value={compliance}
+                  onChange={e => setCompliance(e.target.value)}
+                  className="mt-1 w-full rounded border border-void-surface bg-void-light px-2 py-1.5 text-xs text-text focus:border-glow/50 focus:outline-none"
+                >
+                  <option value="">None / Not sure</option>
+                  <option value="pci-dss">PCI-DSS</option>
+                  <option value="sox">SOX</option>
+                  <option value="gdpr">GDPR</option>
+                  <option value="hipaa">HIPAA</option>
+                  <option value="multiple">Multiple</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-medium text-text-dim">Deployment Platform</label>
+                <select
+                  value={deploymentPlatform}
+                  onChange={e => setDeploymentPlatform(e.target.value)}
+                  className="mt-1 w-full rounded border border-void-surface bg-void-light px-2 py-1.5 text-xs text-text focus:border-glow/50 focus:outline-none"
+                >
+                  <option value="">Not decided</option>
+                  <option value="aws">AWS (ECS / Lambda)</option>
+                  <option value="kubernetes">Kubernetes</option>
+                  <option value="azure">Azure App Service</option>
+                  <option value="gcp">Google Cloud</option>
+                  <option value="on-prem">On-premises</option>
+                </select>
+              </div>
             </div>
           </div>
         </details>

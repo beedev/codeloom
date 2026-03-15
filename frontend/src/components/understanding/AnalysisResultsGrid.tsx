@@ -18,15 +18,25 @@ const TIER_STYLES: Record<string, string> = {
   tier_1: 'bg-success/10 text-success',
   tier_2: 'bg-warning/10 text-warning',
   tier_3: 'bg-danger/10 text-danger',
+  chunked: 'bg-info/10 text-info',
+};
+
+const TIER_LABELS: Record<string, string> = {
+  tier_1: 'TIER 1',
+  tier_2: 'TIER 2',
+  tier_3: 'TIER 3',
+  chunked: 'CHUNKED',
 };
 
 const ENTRY_TYPE_BADGE: Record<string, string> = {
   http_endpoint: 'bg-glow/10 text-glow',
+  cics_transaction: 'bg-nebula-bright/10 text-nebula-bright',
   message_handler: 'bg-nebula/10 text-nebula-bright',
   scheduled_task: 'bg-warning/10 text-warning',
   cli_command: 'bg-success/10 text-success',
   event_listener: 'bg-glow-bright/10 text-glow-bright',
   startup_hook: 'bg-danger/10 text-danger',
+  batch_job: 'bg-info/10 text-info',
   public_api: 'bg-nebula/10 text-nebula',
   unknown: 'bg-void-surface text-text-dim',
 };
@@ -165,7 +175,7 @@ function AnalysisCard({
         <span
           className={`rounded px-1.5 py-0.5 text-[8px] font-bold uppercase ${tierStyle}`}
         >
-          {analysis.tier.replace('_', ' ')}
+          {TIER_LABELS[analysis.tier] ?? analysis.tier.replace('_', ' ')}
         </span>
         <div className="flex items-center gap-1.5">
           <span className={`text-[10px] font-medium ${confColor}`}>

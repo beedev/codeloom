@@ -24,6 +24,11 @@ const ENTRY_TYPE_STYLES: Record<
   { bg: string; label: string; icon: typeof Globe }
 > = {
   http_endpoint: { bg: 'bg-glow/10 text-glow', label: 'HE', icon: Globe },
+  cics_transaction: {
+    bg: 'bg-nebula-bright/10 text-nebula-bright',
+    label: 'CT',
+    icon: Terminal,
+  },
   message_handler: {
     bg: 'bg-nebula/10 text-nebula-bright',
     label: 'MH',
@@ -45,6 +50,7 @@ const ENTRY_TYPE_STYLES: Record<
     icon: Zap,
   },
   startup_hook: { bg: 'bg-danger/10 text-danger', label: 'SH', icon: Power },
+  batch_job: { bg: 'bg-info/10 text-info', label: 'BJ', icon: Box },
   public_api: { bg: 'bg-nebula/10 text-nebula', label: 'PA', icon: Box },
   unknown: {
     bg: 'bg-void-surface text-text-dim',
@@ -55,6 +61,8 @@ const ENTRY_TYPE_STYLES: Record<
 
 const TYPE_ORDER = [
   'http_endpoint',
+  'cics_transaction',
+  'batch_job',
   'message_handler',
   'scheduled_task',
   'cli_command',

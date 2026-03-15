@@ -119,6 +119,7 @@ class MigrationEngine:
         target_stack: Dict,
         constraints: Optional[Dict] = None,
         migration_type: str = "framework_migration",
+        migration_brief: Optional[Dict] = None,
     ) -> Dict:
         """Create a new migration plan with 2 plan-level phases.
 
@@ -127,6 +128,8 @@ class MigrationEngine:
 
         Args:
             migration_type: One of "version_upgrade", "framework_migration", "rewrite".
+            migration_brief: Business context from user (dead_code, volumes,
+                integrations, landmines, compliance, deployment_platform).
 
         Returns:
             Plan dict with plan_id and phase summaries.
@@ -140,6 +143,11 @@ class MigrationEngine:
         pid = UUID(source_project_id) if isinstance(source_project_id, str) else source_project_id
         version = 2  # New plans always use V2 pipeline
 
+        # Store migration brief in discovery_metadata for architecture phase access
+        discovery_meta = {}
+        if migration_brief:
+            discovery_meta["migration_brief"] = migration_brief
+
         with self._db.get_session() as session:
             plan = MigrationPlan(
                 plan_id=plan_id,
@@ -148,6 +156,7 @@ class MigrationEngine:
                 target_brief=target_brief,
                 target_stack=target_stack,
                 constraints=constraints or {},
+                discovery_metadata=discovery_meta,
                 status="draft",
                 current_phase=0,
                 migration_type=migration_type,

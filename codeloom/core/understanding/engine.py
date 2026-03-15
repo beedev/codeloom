@@ -217,13 +217,23 @@ class UnderstandingEngine:
         if not row:
             return {"error": "Analysis not found"}
 
-        # Parse result_json
+        # Parse result_json and normalize field names
         result_data = {}
         if row.result_json:
             try:
                 result_data = json.loads(row.result_json) if isinstance(row.result_json, str) else row.result_json
             except (json.JSONDecodeError, TypeError):
                 result_data = {"parse_error": "Could not parse result_json"}
+
+        # Normalize evidence_refs → evidence for frontend compatibility
+        for key in ("business_rules", "data_entities", "integrations", "side_effects"):
+            items = result_data.get(key, [])
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict) and "evidence_refs" in item and "evidence" not in item:
+                        item["evidence"] = item.pop("evidence_refs")
+                    if isinstance(item, dict) and "evidence" not in item:
+                        item["evidence"] = []
 
         # Get analysis_units
         with self._db.get_session() as session:
@@ -253,6 +263,18 @@ class UnderstandingEngine:
                 for r in units_result.fetchall()
             ]
 
+        # Cap large lists to prevent UI freeze on massive programs
+        MAX_LIST_ITEMS = 50
+        capped_result = dict(result_data)
+        total_counts = {}
+        for key in ("business_rules", "data_entities", "integrations", "side_effects"):
+            items = capped_result.get(key, [])
+            if isinstance(items, list) and len(items) > MAX_LIST_ITEMS:
+                total_counts[key] = len(items)
+                capped_result[key] = items[:MAX_LIST_ITEMS]
+        if total_counts:
+            capped_result["_truncated"] = total_counts
+
         return {
             "analysis_id": str(row.analysis_id),
             "entry_point": {
@@ -271,6 +293,7 @@ class UnderstandingEngine:
             "schema_version": row.schema_version,
             "prompt_version": row.prompt_version,
             "analyzed_at": row.analyzed_at.isoformat() if row.analyzed_at else None,
-            "result": result_data,
-            "units": units,
+            "result": capped_result,
+            "units": units[:100],  # Cap units list for UI performance
+            "units_total": len(units),
         }

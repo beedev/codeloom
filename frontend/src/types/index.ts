@@ -486,11 +486,11 @@ export type DiffViewMode = 'side-by-side' | 'unified';
 // ---- Understanding / Deep Analysis types ------------------------------------
 
 export type EntryPointType =
-  | 'http_endpoint' | 'message_handler' | 'scheduled_task'
+  | 'http_endpoint' | 'cics_transaction' | 'message_handler' | 'scheduled_task'
   | 'cli_command' | 'event_listener' | 'startup_hook'
-  | 'public_api' | 'unknown';
+  | 'batch_job' | 'public_api' | 'unknown';
 
-export type AnalysisTier = 'tier_1' | 'tier_2' | 'tier_3';
+export type AnalysisTier = 'tier_1' | 'tier_2' | 'tier_3' | 'chunked';
 
 export interface EntryPoint {
   unit_id: string;

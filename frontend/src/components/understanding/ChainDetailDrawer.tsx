@@ -26,6 +26,14 @@ const TIER_STYLES: Record<string, string> = {
   tier_1: 'bg-success/10 text-success',
   tier_2: 'bg-warning/10 text-warning',
   tier_3: 'bg-danger/10 text-danger',
+  chunked: 'bg-info/10 text-info',
+};
+
+const TIER_LABELS: Record<string, string> = {
+  tier_1: 'TIER 1',
+  tier_2: 'TIER 2',
+  tier_3: 'TIER 3',
+  chunked: 'CHUNKED',
 };
 
 const SEVERITY_STYLES: Record<string, string> = {
@@ -89,7 +97,7 @@ export function ChainDetailDrawer({
                 <span
                   className={`rounded px-1.5 py-0.5 text-[8px] font-bold uppercase ${tierStyle}`}
                 >
-                  {chain.tier.replace('_', ' ')}
+                  {TIER_LABELS[chain.tier] ?? chain.tier.replace('_', ' ')}
                 </span>
                 <button
                   onClick={onClose}
@@ -144,17 +152,17 @@ export function ChainDetailDrawer({
                   icon={BookOpen}
                   title="Business Rules"
                   count={chain.result.business_rules.length}
-                  defaultExpanded
+                  defaultExpanded={false}
                 >
-                  <div className="space-y-2">
-                    {chain.result.business_rules.map((rule, i) => (
+                  <PaginatedItems items={chain.result.business_rules} initialLimit={20}>
+                    {(rule, i) => (
                       <ItemCard key={i} description={rule.description}>
-                        {rule.evidence.length > 0 && (
+                        {(rule.evidence?.length ?? 0) > 0 && (
                           <EvidenceList evidence={rule.evidence} />
                         )}
                       </ItemCard>
-                    ))}
-                  </div>
+                    )}
+                  </PaginatedItems>
                 </DrawerSection>
               )}
 
@@ -164,22 +172,22 @@ export function ChainDetailDrawer({
                   icon={Database}
                   title="Data Entities"
                   count={chain.result.data_entities.length}
-                  defaultExpanded
+                  defaultExpanded={false}
                 >
-                  <div className="space-y-2">
-                    {chain.result.data_entities.map((entity, i) => (
+                  <PaginatedItems items={chain.result.data_entities} initialLimit={20}>
+                    {(entity, i) => (
                       <ItemCard
                         key={i}
                         title={entity.name}
                         subtitle={entity.type}
                         description={entity.description}
                       >
-                        {entity.evidence.length > 0 && (
+                        {(entity.evidence?.length ?? 0) > 0 && (
                           <EvidenceList evidence={entity.evidence} />
                         )}
                       </ItemCard>
-                    ))}
-                  </div>
+                    )}
+                  </PaginatedItems>
                 </DrawerSection>
               )}
 
@@ -190,20 +198,20 @@ export function ChainDetailDrawer({
                   title="Integrations"
                   count={chain.result.integrations.length}
                 >
-                  <div className="space-y-2">
-                    {chain.result.integrations.map((integ, i) => (
+                  <PaginatedItems items={chain.result.integrations} initialLimit={10}>
+                    {(integ, i) => (
                       <ItemCard
                         key={i}
                         title={integ.name}
                         subtitle={integ.type}
                         description={integ.description}
                       >
-                        {integ.evidence.length > 0 && (
+                        {(integ.evidence?.length ?? 0) > 0 && (
                           <EvidenceList evidence={integ.evidence} />
                         )}
                       </ItemCard>
-                    ))}
-                  </div>
+                    )}
+                  </PaginatedItems>
                 </DrawerSection>
               )}
 
@@ -214,25 +222,31 @@ export function ChainDetailDrawer({
                   title="Side Effects"
                   count={chain.result.side_effects.length}
                 >
-                  <div className="space-y-2">
-                    {chain.result.side_effects.map((effect, i) => {
-                      const sevStyle =
-                        SEVERITY_STYLES[effect.severity] ??
-                        'bg-void-surface text-text-dim';
+                  <PaginatedItems items={chain.result.side_effects} initialLimit={10}>
+                    {(effect, i) => {
+                      // Handle both string and object shapes from LLM
+                      const desc = typeof effect === 'string' ? effect : (effect.description ?? '');
+                      const sev = typeof effect === 'string' ? null : effect.severity;
+                      const evidence = typeof effect === 'string' ? [] : (effect.evidence ?? []);
+                      const sevStyle = sev
+                        ? (SEVERITY_STYLES[sev] ?? 'bg-void-surface text-text-dim')
+                        : '';
                       return (
-                        <ItemCard key={i} description={effect.description}>
-                          <span
-                            className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[8px] font-bold uppercase ${sevStyle}`}
-                          >
-                            {effect.severity}
-                          </span>
-                          {effect.evidence.length > 0 && (
-                            <EvidenceList evidence={effect.evidence} />
+                        <ItemCard key={i} description={desc}>
+                          {sev && (
+                            <span
+                              className={`mt-1 inline-block rounded px-1.5 py-0.5 text-[8px] font-bold uppercase ${sevStyle}`}
+                            >
+                              {sev}
+                            </span>
+                          )}
+                          {evidence.length > 0 && (
+                            <EvidenceList evidence={evidence} />
                           )}
                         </ItemCard>
                       );
-                    })}
-                  </div>
+                    }}
+                  </PaginatedItems>
                 </DrawerSection>
               )}
 
@@ -244,24 +258,30 @@ export function ChainDetailDrawer({
                   count={chain.result.cross_cutting_concerns.length}
                 >
                   <div className="flex flex-wrap gap-1.5">
-                    {chain.result.cross_cutting_concerns.map((concern, i) => (
-                      <span
-                        key={i}
-                        className="rounded-full bg-void-surface px-2 py-0.5 text-[10px] text-text-muted"
-                      >
-                        {concern}
-                      </span>
-                    ))}
+                    {chain.result.cross_cutting_concerns.map((concern, i) => {
+                      const label = typeof concern === 'string'
+                        ? concern
+                        : (concern as any)?.name ?? JSON.stringify(concern);
+                      return (
+                        <span
+                          key={i}
+                          className="rounded-full bg-void-surface px-2 py-0.5 text-[10px] text-text-muted"
+                          title={typeof concern === 'string' ? undefined : (concern as any)?.description}
+                        >
+                          {label}
+                        </span>
+                      );
+                    })}
                   </div>
                 </DrawerSection>
               )}
 
-              {/* Traced Units */}
+              {/* Traced Units — collapsed by default, paginated for large programs */}
               {chain.units.length > 0 && (
                 <DrawerSection
                   icon={FileCode2}
                   title="Traced Units"
-                  count={chain.units.length}
+                  count={(chain as any).units_total ?? chain.units.length}
                   defaultExpanded={false}
                 >
                   <div className="overflow-x-auto">
@@ -366,6 +386,40 @@ function DrawerSection({
         )}
       </button>
       {isExpanded && <div className="px-5 pb-3">{children}</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PaginatedItems — renders a limited number of items with expand toggle
+// ---------------------------------------------------------------------------
+
+function PaginatedItems<T>({
+  items,
+  initialLimit,
+  children,
+}: {
+  items: T[];
+  initialLimit: number;
+  children: (item: T, index: number) => React.ReactNode;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const visibleItems = showAll ? items : items.slice(0, initialLimit);
+  const hasMore = items.length > initialLimit;
+
+  return (
+    <div className="space-y-2">
+      {visibleItems.map((item, i) => children(item, i))}
+      {hasMore && (
+        <button
+          onClick={() => setShowAll(!showAll)}
+          className="mt-1 w-full rounded-md border border-void-surface/30 bg-void-light/10 py-1.5 text-[10px] font-medium text-glow hover:bg-void-light/30 hover:text-glow-bright transition-colors"
+        >
+          {showAll
+            ? `Show first ${initialLimit} items`
+            : `Show all ${items.length} items`}
+        </button>
+      )}
     </div>
   );
 }

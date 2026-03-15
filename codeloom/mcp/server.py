@@ -229,8 +229,16 @@ _TOOL_DEFINITIONS: List[Tool] = [
                     "type": "string",
                     "description": "Target output directory for generated code files (e.g. migration-output/<project_id>/)",
                 },
+                "migration_brief": {
+                    "type": "string",
+                    "description": "JSON string with business context: {dead_code, processing_volumes, integrations, landmines, compliance, deployment_platform}",
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Plan status: 'draft' (waiting for UI input) or 'in_progress' (default)",
+                },
             },
-            "required": ["project_id", "target_brief", "target_stack", "architecture_doc", "discovery_doc"],
+            "required": ["project_id", "target_brief", "target_stack"],
         },
     ),
     Tool(
@@ -1096,9 +1104,10 @@ class CodeLoomMCPServer:
         project_id = args["project_id"]
         target_brief = args["target_brief"]
         target_stack_str = args["target_stack"]
-        architecture_doc = self._unescape_markdown(args["architecture_doc"])
-        discovery_doc = self._unescape_markdown(args["discovery_doc"])
+        architecture_doc = self._unescape_markdown(args.get("architecture_doc", ""))
+        discovery_doc = self._unescape_markdown(args.get("discovery_doc", ""))
         output_dir = args.get("output_dir", f"migration-output/{project_id}/")
+        plan_status = args.get("status", "in_progress")
 
         try:
             target_stack = json.loads(target_stack_str)
@@ -1115,55 +1124,67 @@ class CodeLoomMCPServer:
                 return {"error": "No users found in DB — cannot create plan without a user_id"}
             user_id = user.user_id
 
+            # Parse migration brief if provided
+            brief_data = {}
+            brief_str = args.get("migration_brief")
+            if brief_str:
+                try:
+                    brief_data = json.loads(brief_str)
+                except json.JSONDecodeError:
+                    pass  # Ignore malformed brief — not critical
+
             plan = MigrationPlan(
                 plan_id=plan_id,
                 user_id=user_id,
                 source_project_id=pid,
                 target_brief=target_brief,
                 target_stack=target_stack,
-                status="in_progress",
+                status=plan_status,
                 pipeline_version=2,
                 migration_type="framework_migration",
                 discovery_metadata={
                     "output_dir": output_dir,
                     "orchestrator": "claude_code_cli",
+                    **({"migration_brief": brief_data} if brief_data else {}),
                 },
             )
             session.add(plan)
             session.flush()  # Get plan_id assigned
 
-            # Phase 1: Architecture (plan-level, already complete)
-            arch_phase = MigrationPhase(
-                plan_id=plan_id,
-                mvp_id=None,
-                phase_number=1,
-                phase_type="architecture",
-                status="complete",
-                output=architecture_doc,
-                approved=True,
-                approved_at=datetime.utcnow(),
-            )
-            session.add(arch_phase)
+            # Only create plan-level phases if their docs are provided
+            if architecture_doc:
+                arch_phase = MigrationPhase(
+                    plan_id=plan_id,
+                    mvp_id=None,
+                    phase_number=1,
+                    phase_type="architecture",
+                    status="complete",
+                    output=architecture_doc,
+                    approved=True,
+                    approved_at=datetime.utcnow(),
+                )
+                session.add(arch_phase)
 
-            # Phase 2: Discovery (plan-level, already complete)
-            disc_phase = MigrationPhase(
-                plan_id=plan_id,
-                mvp_id=None,
-                phase_number=2,
-                phase_type="discovery",
-                status="complete",
-                output=discovery_doc,
-                approved=True,
-                approved_at=datetime.utcnow(),
-            )
-            session.add(disc_phase)
+            if discovery_doc:
+                disc_phase = MigrationPhase(
+                    plan_id=plan_id,
+                    mvp_id=None,
+                    phase_number=2,
+                    phase_type="discovery",
+                    status="complete",
+                    output=discovery_doc,
+                    approved=True,
+                    approved_at=datetime.utcnow(),
+                )
+                session.add(disc_phase)
             session.commit()
 
+        phases_created = sum(1 for doc in [architecture_doc, discovery_doc] if doc)
         return {
             "plan_id": str(plan_id),
-            "status": "in_progress",
+            "status": plan_status,
             "output_dir": output_dir,
-            "message": f"Plan created with 2 completed plan-level phases. View in CodeLoom UI at /migration.",
+            "message": f"Plan created with {phases_created} completed plan-level phase(s). View in CodeLoom UI at /migration.",
         }
 
     async def _save_mvps(self, args: Dict) -> Dict:

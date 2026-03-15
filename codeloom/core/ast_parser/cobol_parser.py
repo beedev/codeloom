@@ -25,6 +25,7 @@ EXEC SQL/CICS handling:
 """
 
 import logging
+import os
 import re
 from typing import Dict, List, Optional
 
@@ -242,6 +243,32 @@ class CobolParser(BaseLanguageParser):
                     child.start_point[0] + 1,
                     child.end_point[0] + 1,
                 )
+
+        # -----------------------------------------------------------------
+        # Copybook fallback: .cpy files have no program_definition node.
+        # Emit a single "copybook" unit covering the entire file so that
+        # COPY statement → imports edges can resolve to this unit.
+        # -----------------------------------------------------------------
+        if not units and file_path.lower().endswith(".cpy"):
+            basename = os.path.splitext(os.path.basename(file_path))[0].upper()
+            full_source = source.decode("utf-8", errors="replace")
+            line_count = full_source.count("\n") + 1
+            units.append(CodeUnit(
+                unit_type="copybook",
+                name=basename,
+                qualified_name=basename,
+                language="cobol",
+                start_line=1,
+                end_line=line_count,
+                source=full_source,
+                file_path=file_path,
+                signature=f"COPY {basename}",
+                metadata={
+                    "cobol_dialect": "cobol85",
+                    "is_copybook": True,
+                },
+            ))
+            logger.info("Parsed copybook %s (%d lines)", basename, line_count)
 
         return units
 

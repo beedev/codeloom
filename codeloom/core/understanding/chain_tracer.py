@@ -431,7 +431,7 @@ class ChainTracer:
         if unit_type == "program":
             prog_cat = meta.get("program_category", "")
             if prog_cat == "cics_online":
-                return EntryPointType.HTTP_ENDPOINT
+                return EntryPointType.CICS_TRANSACTION
             return EntryPointType.BATCH_JOB
         if unit_type == "job":
             return EntryPointType.BATCH_JOB

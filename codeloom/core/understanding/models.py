@@ -14,6 +14,7 @@ from uuid import UUID
 class EntryPointType(Enum):
     """Classification of detected entry points."""
     HTTP_ENDPOINT = "http_endpoint"
+    CICS_TRANSACTION = "cics_transaction"  # COBOL CICS online program (3270 terminal)
     MESSAGE_HANDLER = "message_handler"
     SCHEDULED_TASK = "scheduled_task"
     CLI_COMMAND = "cli_command"
@@ -29,6 +30,7 @@ class AnalysisTier(Enum):
     TIER_1 = "tier_1"   # Full source, <=100K tokens
     TIER_2 = "tier_2"   # Depth-prioritized truncation, <=200K tokens
     TIER_3 = "tier_3"   # Summarization fallback, >200K tokens
+    CHUNKED = "chunked"  # Split into chunks, analyzed separately, consolidated
 
 
 @dataclass

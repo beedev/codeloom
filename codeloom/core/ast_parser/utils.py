@@ -32,6 +32,7 @@ SUPPORTED_EXTENSIONS: Dict[str, str] = {
     ".cbl": "cobol",
     ".cob": "cobol",
     ".cobol": "cobol",
+    ".cpy": "cobol",  # Copybook (COPY member) — shared data layouts
     # PL/1 (regex-based parser)
     ".pl1": "pl1",
     ".pli": "pl1",

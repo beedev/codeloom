@@ -152,7 +152,8 @@ class LocalRAGModel:
         if provider == "openai":
             model = OpenAI(
                 model=model_name,
-                temperature=setting.ollama.temperature
+                temperature=setting.ollama.temperature,
+                timeout=300.0,
             )
         elif provider == "claude":
             from llama_index.llms.anthropic import Anthropic

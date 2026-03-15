@@ -195,6 +195,10 @@ class UnderstandingWorker:
             entry_points = self._tracer.detect_entry_points(job.project_id)
             logger.info(f"Found {len(entry_points)} entry points for project {job.project_id}")
 
+            # Skip entry points already analyzed with confidence >= 75%
+            entry_points = self._filter_needs_analysis(job.project_id, entry_points)
+            logger.info(f"{len(entry_points)} entry points need analysis (not analyzed or confidence < 75%%)")
+
             # Update job progress
             self._update_job_progress(job.job_id, len(entry_points), 0)
 
@@ -306,6 +310,45 @@ class UnderstandingWorker:
                 """),
                 {"now": datetime.utcnow(), "worker_id": self.worker_id},
             )
+
+    def _filter_needs_analysis(
+        self, project_id: str, entry_points: list
+    ) -> list:
+        """Filter out entry points already analyzed with confidence >= 75%.
+
+        Returns only entry points that either:
+          - Have no existing analysis, or
+          - Have an existing analysis with confidence_score < 0.75
+        """
+        pid = UUID(project_id) if isinstance(project_id, str) else project_id
+        with self._db.get_session() as session:
+            rows = session.execute(
+                text("""
+                    SELECT entry_unit_id, confidence_score
+                    FROM deep_analyses
+                    WHERE project_id = :pid
+                      AND schema_version = 1
+                """),
+                {"pid": pid},
+            ).fetchall()
+
+        high_confidence = {
+            str(r.entry_unit_id)
+            for r in rows
+            if r.confidence_score is not None and r.confidence_score >= 0.75
+        }
+
+        if not high_confidence:
+            return entry_points
+
+        filtered = [ep for ep in entry_points if ep.unit_id not in high_confidence]
+        skipped = len(entry_points) - len(filtered)
+        if skipped:
+            logger.info(
+                f"Skipping {skipped} entry points with confidence >= 75%% "
+                f"(use full re-analyze to force)"
+            )
+        return filtered
 
     def _update_job_progress(self, job_id: str, total: int, completed: int):
         """Update job progress counters."""

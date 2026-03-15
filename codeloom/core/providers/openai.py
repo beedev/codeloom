@@ -92,6 +92,7 @@ class OpenAILLMProvider(LLMProvider):
             "api_key": self._api_key,
             "temperature": self._temperature,
             "context_window": context_window,
+            "timeout": 300.0,  # 5 min — large analysis prompts need time
         }
 
         if self._max_tokens:

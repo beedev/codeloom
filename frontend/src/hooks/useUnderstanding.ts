@@ -6,7 +6,7 @@
  * result browsing, and chain detail loading.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, startTransition } from 'react';
 import type {
   EntryPoint,
   AnalysisSummary,
@@ -146,10 +146,13 @@ export function useUnderstanding(
       setError(null);
       try {
         const chain = await api.getChainDetail(projectId, analysisId);
-        setSelectedChain(chain);
+        // Use startTransition to keep UI responsive during large renders
+        startTransition(() => {
+          setSelectedChain(chain);
+          setIsLoadingChain(false);
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load chain detail');
-      } finally {
         setIsLoadingChain(false);
       }
     },

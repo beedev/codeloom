@@ -511,6 +511,25 @@ def _execute_architecture(
         if lang_guidance:
             layer_summary_str = layer_summary_str + "\n\n" + lang_guidance if layer_summary_str else lang_guidance
 
+    # Inject migration brief (business context from user) into codebase context
+    discovery_meta = plan.get("discovery_metadata") or {}
+    migration_brief = discovery_meta.get("migration_brief")
+    if migration_brief:
+        brief_lines = ["\n### Migration Brief (User-Provided Business Context)"]
+        if migration_brief.get("dead_code"):
+            brief_lines.append(f"**Dead Code / Skip**: {migration_brief['dead_code']}")
+        if migration_brief.get("processing_volumes"):
+            brief_lines.append(f"**Processing Volumes**: {migration_brief['processing_volumes']}")
+        if migration_brief.get("integrations"):
+            brief_lines.append(f"**External Integrations**: {migration_brief['integrations']}")
+        if migration_brief.get("landmines"):
+            brief_lines.append(f"**Known Landmines**: {migration_brief['landmines']}")
+        if migration_brief.get("compliance"):
+            brief_lines.append(f"**Compliance**: {migration_brief['compliance']}")
+        if migration_brief.get("deployment_platform"):
+            brief_lines.append(f"**Deployment Platform**: {migration_brief['deployment_platform']}")
+        codebase_context = codebase_context + "\n" + "\n".join(brief_lines) + "\n"
+
     prompt = prompts.phase_2_architecture(
         target_brief=plan["target_brief"],
         target_stack=plan["target_stack"],

@@ -54,6 +54,7 @@ class CreatePlanRequest(BaseModel):
     target_stack: dict  # {"languages": [...], "frameworks": [...]}
     constraints: dict | None = None
     migration_type: str = "framework_migration"  # version_upgrade, framework_migration, rewrite
+    migration_brief: dict | None = None  # Business context: dead_code, volumes, integrations, landmines, compliance
 
 
 class DiscoveryRequest(BaseModel):
@@ -94,6 +95,10 @@ class BatchExecuteRequest(BaseModel):
 
 
 
+class UpdateBriefRequest(BaseModel):
+    migration_brief: dict
+
+
 class BatchRetryRequest(BaseModel):
     mvp_ids: list[int] | None = None         # None = all failed MVPs from that batch
 
@@ -126,6 +131,7 @@ async def create_plan(
             target_stack=data.target_stack,
             constraints=data.constraints,
             migration_type=data.migration_type,
+            migration_brief=data.migration_brief,
         )
         return plan
     except Exception as e:
@@ -774,3 +780,36 @@ async def download_accuracy_report(
         media_type="text/markdown",
         headers={"Content-Disposition": "attachment; filename=MIGRATION_ACCURACY.md"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Migration brief (business context) update
+# ---------------------------------------------------------------------------
+
+@router.patch("/{plan_id}/brief")
+async def update_migration_brief(
+    plan_id: str,
+    data: UpdateBriefRequest,
+    user: dict = Depends(require_admin),
+    engine=Depends(get_migration_engine),
+):
+    """Update the migration brief (business context) on an existing plan."""
+    from uuid import UUID as _UUID
+    from codeloom.core.db.models import MigrationPlan
+    from sqlalchemy.orm.attributes import flag_modified
+
+    try:
+        with engine._db.get_session() as session:
+            plan = session.query(MigrationPlan).filter_by(plan_id=_UUID(plan_id)).first()
+            if not plan:
+                raise HTTPException(status_code=404, detail="Plan not found")
+            meta = plan.discovery_metadata or {}
+            meta["migration_brief"] = data.migration_brief
+            plan.discovery_metadata = meta
+            flag_modified(plan, "discovery_metadata")
+            session.commit()
+        return {"status": "ok", "plan_id": plan_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
