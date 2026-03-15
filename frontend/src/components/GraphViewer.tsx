@@ -335,7 +335,7 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
 
     // ── Drill-down filtering ──
     if (drillTarget) {
-      // Level 2: show the drilled container + all its "contains" children
+      // Level 2: show the drilled container + its direct children (paragraphs/methods)
       const childIds = new Set<string>();
       childIds.add(drillTarget.id);
       for (const l of graphData.links) {
@@ -344,13 +344,29 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
           if (src === drillTarget.id) childIds.add(tgt);
         }
       }
-      // Also include nodes connected to children via calls/imports (cross-references)
+
+      // Build a lookup of node id → node for type checking
+      const nodeById = new Map(graphData.nodes.map((n) => [n.id, n]));
+
+      // Also include OTHER container-level nodes that have edges to/from
+      // the drilled program or its children (shows inter-program relationships)
       const expandedIds = new Set(childIds);
       for (const l of graphData.links) {
+        if (l.edge_type === 'contains') continue;
         const { src, tgt } = getLinkId(l);
-        if (l.edge_type !== 'contains') {
-          if (childIds.has(src)) expandedIds.add(tgt);
-          if (childIds.has(tgt)) expandedIds.add(src);
+        if (childIds.has(src)) {
+          const targetNode = nodeById.get(tgt);
+          // Include the target if it's a container (other program/class)
+          // or if it belongs to the drilled program (internal edge)
+          if (targetNode && (CONTAINER_TYPES.has(targetNode.unit_type) || childIds.has(tgt))) {
+            expandedIds.add(tgt);
+          }
+        }
+        if (childIds.has(tgt)) {
+          const sourceNode = nodeById.get(src);
+          if (sourceNode && (CONTAINER_TYPES.has(sourceNode.unit_type) || childIds.has(src))) {
+            expandedIds.add(src);
+          }
         }
       }
       baseNodes = graphData.nodes.filter((n) => expandedIds.has(n.id));
