@@ -93,15 +93,15 @@ const NODE_COLORS: Record<string, string> = {
 };
 
 const EDGE_COLORS: Record<string, string> = {
-  calls:      '#60a5fa',
-  contains:   '#6b7280',
-  inherits:   '#fbbf24',
-  imports:    '#34d399',
-  implements: '#a78bfa',
-  overrides:  '#f472b6',
-  type_dep:   '#fb923c',
-  calls_sp:   '#fdba74',
-  data_flow:  '#67e8f9',
+  calls:      '#00e5ff',  // electric cyan
+  contains:   '#ff00e5',  // hot magenta
+  inherits:   '#ff9100',  // neon orange
+  imports:    '#39ff14',  // neon green
+  implements: '#ffea00',  // electric yellow
+  overrides:  '#ff3d71',  // neon coral-red
+  type_dep:   '#b388ff',  // bright violet
+  calls_sp:   '#ffd180',  // warm neon peach
+  data_flow:  '#18ffff',  // bright aqua
 };
 
 const EDGE_LABELS: Record<string, string> = {
@@ -473,7 +473,7 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
   // ------ Render: main ------
 
   return (
-    <div className="relative h-full" ref={containerRef}>
+    <div className="relative h-full graph-viewer-root" ref={containerRef}>
       {/* Toolbar */}
       <div className="absolute left-3 top-3 z-10 flex flex-col gap-2">
         {/* Search */}
