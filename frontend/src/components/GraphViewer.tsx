@@ -304,9 +304,9 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
     const fg = graphRef.current;
     if (!fg) return;
     // Strong repulsion to spread nodes evenly across the viewport
-    fg.d3Force('charge')?.strength(-300).distanceMax(800);
+    fg.d3Force('charge')?.strength(-400).distanceMax(1000);
     // Longer link distance keeps connected nodes apart
-    fg.d3Force('link')?.distance(80).strength(0.2);
+    fg.d3Force('link')?.distance(100).strength(0.15);
     // Gentle center pull keeps the graph from drifting
     fg.d3Force('center')?.strength(0.05);
     // Reheat simulation to apply new forces
@@ -425,9 +425,18 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
 
   const selectNode = useCallback((node: any) => {
     if (!node) return;
+    const gn = node as GraphNode;
+    // At Level 1, clicking a container drills into it
+    if (!drillTarget && CONTAINER_TYPES.has(gn.unit_type)) {
+      setDrillTarget(gn);
+      setSelectedNode(null);
+      selectedIdRef.current = null;
+      setTimeout(() => graphRef.current?.zoomToFit(400, 40), 300);
+      return;
+    }
     selectedIdRef.current = node.id;
-    setSelectedNode(node as GraphNode);
-  }, []);
+    setSelectedNode(gn);
+  }, [drillTarget]);
 
   // Double-click drills into a container node
   const handleNodeDoubleClick = useCallback((node: any) => {
@@ -604,19 +613,6 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
           <span className="text-[10px] text-text-dim">
             ({filteredData.nodes.length} units, {filteredData.links.length} edges)
           </span>
-        </div>
-      )}
-
-      {/* Drill-in button — shown when a container is selected at Level 1 */}
-      {!drillTarget && selectedNode && CONTAINER_TYPES.has(selectedNode.unit_type) && (
-        <div className="absolute left-1/2 bottom-12 z-30 -translate-x-1/2">
-          <button
-            onClick={() => handleNodeDoubleClick(selectedNode)}
-            className="flex items-center gap-2 rounded-lg bg-glow/90 px-4 py-2 text-xs font-medium text-white shadow-lg backdrop-blur-sm hover:bg-glow"
-          >
-            <Layers className="h-3.5 w-3.5" />
-            Drill into {selectedNode.name}
-          </button>
         </div>
       )}
 
