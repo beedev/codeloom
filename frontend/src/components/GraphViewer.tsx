@@ -299,19 +299,19 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
     return () => window.removeEventListener('keydown', onKey);
   }, [selectedNode]);
 
-  // Configure d3 forces for better spread — runs once after graph mounts
+  // Configure d3 forces — re-apply when data or drill state changes
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg) return;
-    // Strong repulsion to spread nodes evenly across the viewport
-    fg.d3Force('charge')?.strength(-400).distanceMax(1000);
-    // Longer link distance keeps connected nodes apart
-    fg.d3Force('link')?.distance(100).strength(0.15);
-    // Gentle center pull keeps the graph from drifting
-    fg.d3Force('center')?.strength(0.05);
-    // Reheat simulation to apply new forces
+    const nodeCount = filteredData.nodes.length;
+    // Scale repulsion with node count — fewer nodes = more spread
+    const charge = nodeCount < 30 ? -800 : nodeCount < 80 ? -500 : -300;
+    const linkDist = nodeCount < 30 ? 200 : nodeCount < 80 ? 120 : 80;
+    fg.d3Force('charge')?.strength(charge).distanceMax(1500);
+    fg.d3Force('link')?.distance(linkDist).strength(0.1);
+    fg.d3Force('center')?.strength(0.03);
     fg.d3ReheatSimulation();
-  }, [graphData]);
+  }, [filteredData]);
 
   // Re-fit graph when panel opens/closes so nodes fill the available space
   const panelOpenRef = useRef(false);
