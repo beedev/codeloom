@@ -27,6 +27,8 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  ArrowLeft,
+  Layers,
 } from 'lucide-react';
 import * as api from '../services/api.ts';
 import type { GraphOverview, UnitDetail, EdgeUnit } from '../types/index.ts';
@@ -139,6 +141,14 @@ const LANG_MAP: Record<string, string> = {
 
 const ALL_EDGE_TYPES = Object.keys(EDGE_LABELS);
 
+// Container unit types — shown at Level 1 (top-level view)
+const CONTAINER_TYPES = new Set([
+  'program', 'copybook', 'class', 'interface', 'module',
+  'stored_procedure', 'sql_function', 'job',
+  'struts_action', 'struts_form', 'jsp_page',
+  'record', 'struct', 'enum',
+]);
+
 // Dimmed color for orphan (isolated) nodes
 const ORPHAN_OPACITY = '50';  // hex alpha suffix for ~31% opacity
 
@@ -154,7 +164,15 @@ function getEdgeColor(type: string): string {
   return EDGE_COLORS[type] ?? '#374151';
 }
 
-function getNodeVal(unitType: string): number {
+function getNodeVal(unitType: string, isDrilled: boolean): number {
+  if (!isDrilled) {
+    // Level 1: containers are bigger
+    if (unitType === 'program' || unitType === 'class') return 4;
+    if (unitType === 'module' || unitType === 'interface' || unitType === 'job') return 3;
+    if (unitType === 'copybook') return 2;
+    return 2;
+  }
+  // Level 2: children are smaller
   if (unitType === 'class') return 3;
   if (unitType === 'interface' || unitType === 'module') return 2;
   return 1;
@@ -193,6 +211,9 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
   const selectedIdRef = useRef<string | null>(null);
   const [unitDetail, setUnitDetail] = useState<UnitDetail | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+
+  // Drill-down: null = Level 1 (containers only), string = Level 2 (children of this node)
+  const [drillTarget, setDrillTarget] = useState<GraphNode | null>(null);
 
   // Dimensions
   const [dimensions, setDimensions] = useState<{ width: number; height: number } | null>(null);
@@ -311,7 +332,49 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
   const { filteredData, orphanIds } = useMemo(() => {
     if (!graphData) return { filteredData: { nodes: [], links: [] }, orphanIds: new Set<string>() };
 
-    const filteredLinks = graphData.links.filter((l) =>
+    let baseNodes = graphData.nodes;
+    let baseLinks = graphData.links;
+
+    // ── Drill-down filtering ──
+    if (drillTarget) {
+      // Level 2: show the drilled container + all its "contains" children
+      const childIds = new Set<string>();
+      childIds.add(drillTarget.id);
+      for (const l of graphData.links) {
+        if (l.edge_type === 'contains') {
+          const { src, tgt } = getLinkId(l);
+          if (src === drillTarget.id) childIds.add(tgt);
+        }
+      }
+      // Also include nodes connected to children via calls/imports (cross-references)
+      const expandedIds = new Set(childIds);
+      for (const l of graphData.links) {
+        const { src, tgt } = getLinkId(l);
+        if (l.edge_type !== 'contains') {
+          if (childIds.has(src)) expandedIds.add(tgt);
+          if (childIds.has(tgt)) expandedIds.add(src);
+        }
+      }
+      baseNodes = graphData.nodes.filter((n) => expandedIds.has(n.id));
+      baseLinks = graphData.links.filter((l) => {
+        const { src, tgt } = getLinkId(l);
+        return expandedIds.has(src) && expandedIds.has(tgt);
+      });
+    } else {
+      // Level 1: show only container-type nodes
+      const containerIds = new Set(
+        graphData.nodes.filter((n) => CONTAINER_TYPES.has(n.unit_type)).map((n) => n.id),
+      );
+      baseNodes = graphData.nodes.filter((n) => containerIds.has(n.id));
+      // Only show edges between containers (exclude contains edges at this level)
+      baseLinks = graphData.links.filter((l) => {
+        if (l.edge_type === 'contains') return false;
+        const { src, tgt } = getLinkId(l);
+        return containerIds.has(src) && containerIds.has(tgt);
+      });
+    }
+
+    const filteredLinks = baseLinks.filter((l) =>
       enabledEdgeTypes.has(l.edge_type),
     );
 
@@ -325,14 +388,14 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
 
     // Identify orphan nodes (not connected by any visible edge)
     const orphans = new Set<string>();
-    for (const n of graphData.nodes) {
+    for (const n of baseNodes) {
       if (!connectedIds.has(n.id)) orphans.add(n.id);
     }
 
     // Include connected nodes + optionally orphans
     let filteredNodes = showOrphans
-      ? graphData.nodes
-      : graphData.nodes.filter((n) => connectedIds.has(n.id));
+      ? baseNodes
+      : baseNodes.filter((n) => connectedIds.has(n.id));
 
     // Search filter: matched nodes + immediate neighbors
     if (searchQuery.trim()) {
@@ -358,7 +421,7 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
       filteredData: { nodes: filteredNodes, links: filteredLinks },
       orphanIds: orphans,
     };
-  }, [graphData, enabledEdgeTypes, searchQuery, showOrphans]);
+  }, [graphData, enabledEdgeTypes, searchQuery, showOrphans, drillTarget]);
 
   // ------ Callbacks ------
 
@@ -366,6 +429,26 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
     if (!node) return;
     selectedIdRef.current = node.id;
     setSelectedNode(node as GraphNode);
+  }, []);
+
+  // Double-click drills into a container node
+  const handleNodeDoubleClick = useCallback((node: any) => {
+    if (!node) return;
+    const gn = node as GraphNode;
+    if (CONTAINER_TYPES.has(gn.unit_type)) {
+      setDrillTarget(gn);
+      setSelectedNode(null);
+      selectedIdRef.current = null;
+      // Zoom to fit after drill-in
+      setTimeout(() => graphRef.current?.zoomToFit(400, 40), 300);
+    }
+  }, []);
+
+  const handleDrillBack = useCallback(() => {
+    setDrillTarget(null);
+    setSelectedNode(null);
+    selectedIdRef.current = null;
+    setTimeout(() => graphRef.current?.zoomToFit(400, 40), 300);
   }, []);
 
   const handleNavigateToUnit = useCallback(
@@ -505,8 +588,42 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
 
   return (
     <div className="relative h-full graph-viewer-root" ref={setContainerRef}>
+      {/* Drill-down breadcrumb bar */}
+      {drillTarget && (
+        <div className="absolute left-0 right-0 top-0 z-30 flex items-center gap-2 border-b border-void-surface bg-void-light/95 px-4 py-2 backdrop-blur-sm">
+          <button
+            onClick={handleDrillBack}
+            className="flex items-center gap-1.5 rounded-md bg-void-surface px-2.5 py-1 text-xs text-text-muted hover:bg-glow/20 hover:text-text"
+          >
+            <ArrowLeft className="h-3 w-3" />
+            All Programs
+          </button>
+          <ChevronRight className="h-3 w-3 text-text-dim/40" />
+          <span className="flex items-center gap-1.5 text-xs font-medium text-text">
+            <Layers className="h-3 w-3 text-glow" />
+            {drillTarget.name}
+          </span>
+          <span className="text-[10px] text-text-dim">
+            ({filteredData.nodes.length} units, {filteredData.links.length} edges)
+          </span>
+        </div>
+      )}
+
+      {/* Drill-in button — shown when a container is selected at Level 1 */}
+      {!drillTarget && selectedNode && CONTAINER_TYPES.has(selectedNode.unit_type) && (
+        <div className="absolute left-1/2 bottom-12 z-30 -translate-x-1/2">
+          <button
+            onClick={() => handleNodeDoubleClick(selectedNode)}
+            className="flex items-center gap-2 rounded-lg bg-glow/90 px-4 py-2 text-xs font-medium text-white shadow-lg backdrop-blur-sm hover:bg-glow"
+          >
+            <Layers className="h-3.5 w-3.5" />
+            Drill into {selectedNode.name}
+          </button>
+        </div>
+      )}
+
       {/* Toolbar */}
-      <div className="absolute left-3 top-3 z-10 flex flex-col gap-2">
+      <div className={`absolute left-3 z-10 flex flex-col gap-2 ${drillTarget ? 'top-12' : 'top-3'}`}>
         {/* Search */}
         <div className="flex items-center gap-1.5 rounded-lg bg-void-light/90 px-2.5 py-1.5 backdrop-blur-sm">
           <Search className="h-3.5 w-3.5 text-text-dim" />
@@ -617,12 +734,13 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
         }}
         nodeColor={getNodeDisplayColor}
         nodeRelSize={6}
-        nodeVal={(node: any) => getNodeVal(node.unit_type)}
+        nodeVal={(node: any) => getNodeVal(node.unit_type, drillTarget != null)}
         linkColor={(link: any) => getEdgeColor(link.edge_type)}
         linkLabel={(link: any) => EDGE_LABELS[link.edge_type] ?? link.edge_type}
-        linkWidth={0.5}
-        linkDirectionalArrowLength={3}
-        linkDirectionalArrowRelPos={1}
+        linkWidth={0.8}
+        linkCurvature={0.2}
+        linkDirectionalArrowLength={4}
+        linkDirectionalArrowRelPos={0.9}
         onNodeClick={selectNode}
         onNodeDragEnd={selectNode}
         onBackgroundClick={handleBackgroundClick as any}
