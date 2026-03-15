@@ -3259,12 +3259,17 @@ body.printing-dashboard .main-content {
  * (react-kapsule wrapper + .force-graph-container) with no width/height,
  * causing the canvas to not fill the available space.
  */
-.graph-viewer-root > div:not([class]) {
-  width: 100%;
-  height: 100%;
+.graph-viewer-root > div:not([class]),
+.graph-viewer-root > div:has(> .force-graph-container),
+.graph-viewer-root > div:has(.force-graph-container) {
+  width: 100% !important;
+  height: 100% !important;
+  position: absolute !important;
+  top: 0;
+  left: 0;
 }
 
 .graph-viewer-root .force-graph-container {
-  width: 100%;
-  height: 100%;
+  width: 100% !important;
+  height: 100% !important;
 }

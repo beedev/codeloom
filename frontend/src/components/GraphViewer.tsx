@@ -67,29 +67,30 @@ interface Props {
 // ---------------------------------------------------------------------------
 
 const NODE_COLORS: Record<string, string> = {
-  function:         '#3b82f6',  // vivid blue
-  method:           '#6366f1',  // vivid indigo
-  class:            '#f59e0b',  // bright amber
-  interface:        '#8b5cf6',  // vivid violet
-  type_alias:       '#a855f7',  // bright purple
-  module:           '#10b981',  // vivid emerald
-  constructor:      '#06b6d4',  // vivid cyan
-  property:         '#22c55e',  // vivid green
-  stored_procedure: '#f97316',  // vivid orange
-  sql_function:     '#ea580c',  // deep orange
-  step:             '#ec4899',  // vivid pink
-  paragraph:        '#0ea5e9',  // vivid sky
-  section:          '#2563eb',  // bold blue
-  program:          '#ef4444',  // vivid red
-  division:         '#d946ef',  // vivid fuchsia
-  job:              '#eab308',  // vivid yellow
-  proc_step:        '#e11d48',  // vivid rose
-  struts_action:    '#f43f5e',  // bright rose
-  struts_form:      '#fb7185',  // warm rose
-  jsp_page:         '#14b8a6',  // vivid teal
-  record:           '#84cc16',  // vivid lime
-  struct:           '#c026d3',  // bright fuchsia
-  enum:             '#06b6d4',  // bright cyan
+  function:         '#00bfff',  // neon sky blue
+  method:           '#7b68ee',  // neon medium slate
+  class:            '#ffab00',  // neon amber
+  interface:        '#e040fb',  // neon purple-pink
+  type_alias:       '#d500f9',  // neon violet
+  module:           '#00e676',  // neon green
+  constructor:      '#00e5ff',  // neon cyan
+  property:         '#76ff03',  // neon lime
+  stored_procedure: '#ff6d00',  // neon orange
+  sql_function:     '#ff9100',  // neon deep orange
+  step:             '#ff4081',  // neon pink
+  paragraph:        '#40c4ff',  // neon light blue
+  section:          '#448aff',  // neon blue
+  program:          '#ff1744',  // neon red
+  division:         '#ea80fc',  // neon light purple
+  job:              '#ffea00',  // neon yellow
+  proc_step:        '#ff5252',  // neon coral
+  struts_action:    '#ff4081',  // neon rose
+  struts_form:      '#ff80ab',  // neon light rose
+  jsp_page:         '#1de9b6',  // neon teal
+  record:           '#b2ff59',  // neon lime green
+  struct:           '#e040fb',  // neon fuchsia
+  enum:             '#18ffff',  // neon aqua
+  copybook:         '#ffd740',  // neon gold
 };
 
 const EDGE_COLORS: Record<string, string> = {
