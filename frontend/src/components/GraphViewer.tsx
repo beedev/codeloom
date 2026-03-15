@@ -745,6 +745,16 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
         nodeColor={getNodeDisplayColor}
         nodeRelSize={4}
         nodeVal={(node: any) => getNodeVal(node.unit_type, drillTarget != null)}
+        nodeCanvasObjectMode={() => 'after'}
+        nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
+          const label = node.name ?? '';
+          const fontSize = Math.max(10 / globalScale, 2);
+          ctx.font = `${fontSize}px Sans-Serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+          ctx.fillText(label, node.x, node.y + 5 / globalScale);
+        }}
         linkColor={(link: any) => getEdgeColor(link.edge_type)}
         linkLabel={(link: any) => EDGE_LABELS[link.edge_type] ?? link.edge_type}
         linkWidth={0.8}
