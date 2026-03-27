@@ -6,6 +6,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from . import defaults
 from .registry import PluginRegistry
 from .interfaces import (
     RetrievalStrategy,
@@ -75,17 +76,15 @@ def get_configured_llm(**override_kwargs) -> LLMProvider:
     """
     Get LLM provider configured from environment.
 
-    Environment variables:
-        LLM_PROVIDER: Provider name (ollama, openai, anthropic)
-        LLM_MODEL: Model name
+    Uses centralized defaults from codeloom.core.defaults.
 
     Returns:
         Configured LLMProvider instance
     """
     register_default_plugins()
 
-    provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-    model = os.getenv("LLM_MODEL")
+    provider = defaults.LLM_PROVIDER.lower()
+    model = defaults.LLM_MODEL
 
     kwargs = {}
     if model:
@@ -99,17 +98,15 @@ def get_configured_embedding(**override_kwargs) -> EmbeddingProvider:
     """
     Get embedding provider configured from environment.
 
-    Environment variables:
-        EMBEDDING_PROVIDER: Provider name (huggingface)
-        EMBEDDING_MODEL: Model name
+    Uses centralized defaults from codeloom.core.defaults.
 
     Returns:
         Configured EmbeddingProvider instance
     """
     register_default_plugins()
 
-    provider = os.getenv("EMBEDDING_PROVIDER", "huggingface").lower()
-    model = os.getenv("EMBEDDING_MODEL")
+    provider = defaults.EMBEDDING_PROVIDER.lower()
+    model = defaults.EMBEDDING_MODEL
 
     kwargs = {}
     if model:
@@ -139,16 +136,14 @@ def get_configured_image_provider(**override_kwargs) -> ImageGenerationProvider:
     """
     Get image generation provider configured from environment.
 
-    Environment variables:
-        IMAGE_GENERATION_PROVIDER: Provider name (gemini)
-        GEMINI_IMAGE_MODEL: Model name
+    Uses centralized defaults from codeloom.core.defaults.
 
     Returns:
         Configured ImageGenerationProvider instance
     """
     register_default_plugins()
 
-    provider = os.getenv("IMAGE_GENERATION_PROVIDER", "gemini").lower()
+    provider = defaults.IMAGE_GENERATION_PROVIDER.lower()
     model = os.getenv("GEMINI_IMAGE_MODEL")
 
     kwargs = {}
@@ -163,17 +158,14 @@ def get_configured_vision_provider(**override_kwargs) -> VisionProvider:
     """
     Get vision provider configured from environment.
 
-    Environment variables:
-        VISION_PROVIDER: Provider name (gemini, openai)
-        GEMINI_VISION_MODEL: Gemini vision model name
-        OPENAI_VISION_MODEL: OpenAI vision model name
+    Uses centralized defaults from codeloom.core.defaults.
 
     Returns:
         Configured VisionProvider instance
     """
     register_default_plugins()
 
-    provider = os.getenv("VISION_PROVIDER", "gemini").lower()
+    provider = defaults.VISION_PROVIDER.lower()
 
     kwargs = {}
     if provider == "gemini":
@@ -212,14 +204,14 @@ def get_plugin_info() -> dict:
 
     return {
         "current_config": {
-            "llm_provider": os.getenv("LLM_PROVIDER", "ollama"),
-            "llm_model": os.getenv("LLM_MODEL", "default"),
-            "embedding_provider": os.getenv("EMBEDDING_PROVIDER", "huggingface"),
-            "embedding_model": os.getenv("EMBEDDING_MODEL", "nomic-ai/nomic-embed-text-v1.5"),
+            "llm_provider": defaults.LLM_PROVIDER,
+            "llm_model": defaults.LLM_MODEL or "(auto-detect from provider)",
+            "embedding_provider": defaults.EMBEDDING_PROVIDER,
+            "embedding_model": defaults.EMBEDDING_MODEL,
             "retrieval_strategy": os.getenv("RETRIEVAL_STRATEGY", "hybrid"),
-            "image_provider": os.getenv("IMAGE_GENERATION_PROVIDER", "gemini"),
+            "image_provider": defaults.IMAGE_GENERATION_PROVIDER,
             "image_model": os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.0-flash-exp"),
-            "vision_provider": os.getenv("VISION_PROVIDER", "gemini"),
+            "vision_provider": defaults.VISION_PROVIDER,
             "vision_model": os.getenv("GEMINI_VISION_MODEL", "gemini-2.0-flash-exp"),
         },
         "available_plugins": PluginRegistry.discover_plugins(),

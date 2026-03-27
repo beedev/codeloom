@@ -4,6 +4,8 @@
  * 3-panel layout: File tree | Code viewer | Structure panel
  * Top bar with breadcrumbs and ASG status badge
  * Bottom status bar with file info
+ *
+ * For knowledge projects, renders KnowledgeProjectView instead.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -26,6 +28,11 @@ import { CodeViewer } from '../components/CodeViewer.tsx';
 import { GraphViewer } from '../components/GraphViewer.tsx';
 import { ProjectUpload } from '../components/ProjectUpload.tsx';
 import { UnderstandingPanel } from '../components/understanding/UnderstandingPanel.tsx';
+import { ReverseEngineeringPanel } from '../components/ReverseEngineeringPanel.tsx';
+import { ComplexityPanel } from '../components/ComplexityPanel.tsx';
+import { DeadCodePanel } from '../components/DeadCodePanel.tsx';
+import { MetadataSearchPanel } from '../components/MetadataSearchPanel.tsx';
+import { KnowledgeProjectView } from '../components/KnowledgeProjectView.tsx';
 import { useProjects } from '../hooks/useProjects.ts';
 import * as api from '../services/api.ts';
 import type { Project, FileTreeNode, CodeFile, CodeUnit, GraphNeighbor } from '../types/index.ts';
@@ -49,7 +56,7 @@ export function ProjectView() {
   const [isLoadingFile, setIsLoadingFile] = useState(false);
 
   const [showUpload, setShowUpload] = useState(false);
-  const [activeTab, setActiveTab] = useState<'code' | 'graph' | 'understanding'>('code');
+  const [activeTab, setActiveTab] = useState<'code' | 'graph' | 'analysis' | 'understanding' | 'docs'>('code');
   const [pendingUnitId, setPendingUnitId] = useState<string | null>(null);
 
   // Existing migration plan for this project (if any)
@@ -242,6 +249,26 @@ export function ProjectView() {
     );
   }
 
+  // Show loading while project loads (needed for project_type check)
+  if (isLoadingTree && !project) {
+    return (
+      <Layout projects={projects} projectsLoading={projectsLoading}>
+        <div className="flex h-full items-center justify-center">
+          <Loader2 className="h-6 w-6 animate-spin text-text-dim" />
+        </div>
+      </Layout>
+    );
+  }
+
+  // Branch: knowledge projects get a dedicated view
+  if (project?.project_type === 'knowledge') {
+    return (
+      <Layout projects={projects} projectsLoading={projectsLoading}>
+        <KnowledgeProjectView projectId={projectId} project={project} />
+      </Layout>
+    );
+  }
+
   // Build breadcrumb segments from selected file path
   const breadcrumbSegments = selectedFilePath
     ? selectedFilePath.split('/').filter(Boolean)
@@ -278,7 +305,7 @@ export function ProjectView() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {/* Code / Graph tabs */}
+          {/* Code / Graph / Analysis / Understanding / Docs tabs */}
           <div className="flex rounded-md border border-void-surface">
             <button
               onClick={() => setActiveTab('code')}
@@ -303,6 +330,17 @@ export function ProjectView() {
               Graph
             </button>
             <button
+              onClick={() => setActiveTab('analysis')}
+              className={`flex items-center gap-1 px-2.5 py-1 text-xs ${
+                activeTab === 'analysis'
+                  ? 'bg-void-surface text-text'
+                  : 'text-text-muted hover:text-text-dim'
+              }`}
+            >
+              <BarChart3 className="h-3 w-3" />
+              Analysis
+            </button>
+            <button
               onClick={() => setActiveTab('understanding')}
               className={`flex items-center gap-1 px-2.5 py-1 text-xs ${
                 activeTab === 'understanding'
@@ -312,6 +350,17 @@ export function ProjectView() {
             >
               <Brain className="h-3 w-3" />
               Understanding
+            </button>
+            <button
+              onClick={() => setActiveTab('docs')}
+              className={`flex items-center gap-1 px-2.5 py-1 text-xs ${
+                activeTab === 'docs'
+                  ? 'bg-void-surface text-text'
+                  : 'text-text-muted hover:text-text-dim'
+              }`}
+            >
+              <BookOpen className="h-3 w-3" />
+              Docs
             </button>
           </div>
 
@@ -404,12 +453,22 @@ export function ProjectView() {
       )}
 
       {/* Main content area */}
-      {activeTab === 'understanding' ? (
+      {activeTab === 'docs' ? (
+        <div className="flex-1 overflow-hidden">
+          <ReverseEngineeringPanel projectId={projectId} />
+        </div>
+      ) : activeTab === 'understanding' ? (
         <div className="flex-1 overflow-hidden">
           <UnderstandingPanel
             projectId={projectId}
             asgStatus={project?.asg_status ?? 'pending'}
           />
+        </div>
+      ) : activeTab === 'analysis' ? (
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          <ComplexityPanel projectId={projectId} />
+          <DeadCodePanel projectId={projectId} />
+          <MetadataSearchPanel projectId={projectId} />
         </div>
       ) : activeTab === 'graph' ? (
         <div className="flex-1 overflow-hidden">

@@ -4,6 +4,7 @@ import logging
 import os
 from typing import Dict, Type, Optional, Any, List
 
+from . import defaults
 from .interfaces import (
     RetrievalStrategy,
     LLMProvider,
@@ -28,8 +29,8 @@ class PluginRegistry:
         # Register a provider
         PluginRegistry.register_llm_provider("openai", OpenAIProvider)
 
-        # Get an instance
-        llm = PluginRegistry.get_llm_provider("openai", api_key="...")
+        # Get an instance (pass credentials via kwargs or env vars)
+        llm = PluginRegistry.get_llm_provider("openai")
 
         # Get configured from environment
         llm = PluginRegistry.get_configured_llm()
@@ -150,9 +151,7 @@ class PluginRegistry:
         """
         Get an LLM provider configured from environment.
 
-        Environment variables:
-            LLM_PROVIDER: Provider name (default: "ollama")
-            LLM_MODEL: Model name (default: provider-specific)
+        Uses centralized defaults from codeloom.core.defaults.
 
         Args:
             **override_kwargs: Override environment configuration
@@ -160,8 +159,8 @@ class PluginRegistry:
         Returns:
             Configured LLMProvider instance
         """
-        provider_name = os.getenv("LLM_PROVIDER", "ollama")
-        model = os.getenv("LLM_MODEL")
+        provider_name = defaults.LLM_PROVIDER
+        model = defaults.LLM_MODEL
 
         kwargs = {}
         if model:
@@ -222,9 +221,7 @@ class PluginRegistry:
         """
         Get an embedding provider configured from environment.
 
-        Environment variables:
-            EMBEDDING_PROVIDER: Provider name (default: "huggingface")
-            EMBEDDING_MODEL: Model name (default: provider-specific)
+        Uses centralized defaults from codeloom.core.defaults.
 
         Args:
             **override_kwargs: Override environment configuration
@@ -232,8 +229,8 @@ class PluginRegistry:
         Returns:
             Configured EmbeddingProvider instance
         """
-        provider_name = os.getenv("EMBEDDING_PROVIDER", "huggingface")
-        model = os.getenv("EMBEDDING_MODEL")
+        provider_name = defaults.EMBEDDING_PROVIDER
+        model = defaults.EMBEDDING_MODEL
 
         kwargs = {}
         if model:
@@ -370,9 +367,7 @@ class PluginRegistry:
         """
         Get an image generation provider configured from environment.
 
-        Environment variables:
-            IMAGE_GENERATION_PROVIDER: Provider name (default: "gemini")
-            GEMINI_IMAGE_MODEL: Model name (default: gemini-2.0-flash-exp)
+        Uses centralized defaults from codeloom.core.defaults.
 
         Args:
             **override_kwargs: Override environment configuration
@@ -380,7 +375,7 @@ class PluginRegistry:
         Returns:
             Configured ImageGenerationProvider instance
         """
-        provider_name = os.getenv("IMAGE_GENERATION_PROVIDER", "gemini")
+        provider_name = defaults.IMAGE_GENERATION_PROVIDER
         model = os.getenv("GEMINI_IMAGE_MODEL")
 
         kwargs = {}
@@ -442,10 +437,7 @@ class PluginRegistry:
         """
         Get a vision provider configured from environment.
 
-        Environment variables:
-            VISION_PROVIDER: Provider name (default: "gemini")
-            GEMINI_VISION_MODEL: Gemini model name
-            OPENAI_VISION_MODEL: OpenAI model name
+        Uses centralized defaults from codeloom.core.defaults.
 
         Args:
             **override_kwargs: Override environment configuration
@@ -453,7 +445,7 @@ class PluginRegistry:
         Returns:
             Configured VisionProvider instance
         """
-        provider_name = os.getenv("VISION_PROVIDER", "gemini")
+        provider_name = defaults.VISION_PROVIDER
 
         kwargs = {}
         if provider_name == "gemini":

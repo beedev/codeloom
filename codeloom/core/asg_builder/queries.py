@@ -3,11 +3,22 @@
 Provides functions to query the code_edges table for
 callers, callees, dependencies, dependents, and structural views.
 
+Also provides advanced analysis queries:
+- Cyclomatic complexity reporting (from enricher metadata)
+- Decorator/annotation and return-type search
+- Dead code detection (uncalled functions with smart exclusions)
+- Transitive call chains (full caller/callee closure)
+- Module-level dependency graphs (file and directory aggregation)
+
 Traversal queries try Apache AGE Cypher first (if graph is synced),
 falling back to recursive CTEs on the relational code_edges table.
 """
 
+import fnmatch
 import logging
+import os
+import re
+from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -16,6 +27,11 @@ from sqlalchemy import text
 from ..db import DatabaseManager
 
 logger = logging.getLogger(__name__)
+
+
+# =========================================================================
+# Core traversal queries
+# =========================================================================
 
 
 def get_callers(
@@ -217,7 +233,7 @@ def get_interface_implementations(
     db: DatabaseManager,
     project_id: str,
 ) -> Dict[str, Any]:
-    """Get the interface → implementor graph for a project.
+    """Get the interface -> implementor graph for a project.
 
     Returns:
         Dict with 'nodes' (interfaces and implementors) and
@@ -520,7 +536,581 @@ def get_edge_stats(
         return {row.edge_type: row.cnt for row in result.fetchall()}
 
 
-# ── Private helpers ──────────────────────────────────────────────────
+# =========================================================================
+# Feature 1: Cyclomatic complexity report
+# =========================================================================
+
+
+def get_complexity_report(
+    db: DatabaseManager,
+    project_id: str,
+    sort: str = "desc",
+    limit: int = 50,
+    min_complexity: int = 1,
+    language: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Get a complexity report for callable units in a project.
+
+    Uses McCabe cyclomatic complexity from enricher metadata when available,
+    falling back to a heuristic estimate from source text otherwise.
+
+    Args:
+        db: DatabaseManager instance
+        project_id: UUID string of the project
+        sort: "desc" (highest first) or "asc" (lowest first)
+        limit: Maximum number of results
+        min_complexity: Minimum complexity threshold to include
+        language: Optional language filter
+
+    Returns:
+        List of dicts with unit info and complexity score
+    """
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+
+    order = "DESC" if sort == "desc" else "ASC"
+    lang_filter = "AND u.language = :lang" if language else ""
+
+    # Primary: use enricher metadata when available
+    sql = f"""
+        SELECT u.unit_id, u.name, u.qualified_name, u.unit_type, u.language,
+               cf.file_path, u.start_line, u.end_line,
+               u.metadata->>'cyclomatic_complexity' AS cc_raw,
+               u.source,
+               u.metadata AS metadata
+        FROM code_units u
+        JOIN code_files cf ON u.file_id = cf.file_id
+        WHERE u.project_id = :pid
+          AND u.unit_type IN ('function', 'method', 'constructor', 'paragraph')
+          {lang_filter}
+        ORDER BY u.start_line
+    """
+
+    params: Dict[str, Any] = {"pid": pid}
+    if language:
+        params["lang"] = language
+
+    with db.get_session() as session:
+        result = session.execute(text(sql), params)
+        rows = result.fetchall()
+
+    scored = []
+    for row in rows:
+        # Prefer enricher-computed McCabe complexity
+        if row.cc_raw is not None:
+            complexity = int(row.cc_raw)
+        else:
+            # Fallback: heuristic estimate from source text
+            complexity = _estimate_branch_complexity(row.source or "")
+
+        if complexity < min_complexity:
+            continue
+
+        line_count = None
+        if row.start_line is not None and row.end_line is not None:
+            line_count = row.end_line - row.start_line + 1
+
+        scored.append({
+            "unit_id": str(row.unit_id),
+            "name": row.name,
+            "qualified_name": row.qualified_name,
+            "unit_type": row.unit_type,
+            "language": row.language,
+            "file_path": row.file_path,
+            "start_line": row.start_line,
+            "end_line": row.end_line,
+            "line_count": line_count,
+            "complexity": complexity,
+        })
+
+    reverse = sort != "asc"
+    scored.sort(key=lambda x: x["complexity"], reverse=reverse)
+
+    return scored[:limit]
+
+
+# =========================================================================
+# Feature 2: Decorator / annotation search and return type search
+# =========================================================================
+
+
+def find_units_by_decorator(
+    db: DatabaseManager,
+    project_id: str,
+    decorator_name: str,
+    unit_type: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Search units by annotation/decorator name.
+
+    Searches across metadata annotations array, metadata modifiers array,
+    and the unit's signature text for decorator matches.
+
+    Args:
+        db: DatabaseManager instance
+        project_id: UUID string of the project
+        decorator_name: Decorator/annotation name (partial match, case-insensitive)
+        unit_type: Optional filter by unit_type (e.g. "method", "class")
+        limit: Maximum results
+
+    Returns:
+        List of dicts with unit info and matched decorator context
+    """
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+
+    # Normalize: strip leading @ if present
+    clean_name = decorator_name.lstrip("@").strip()
+    pattern = f"%{clean_name}%"
+    sig_pattern = f"%@{clean_name}%"
+    unit_type_filter = "AND u.unit_type = :utype" if unit_type else ""
+
+    sql = f"""
+        SELECT u.unit_id, u.name, u.qualified_name, u.unit_type, u.language,
+               cf.file_path, u.start_line, u.end_line,
+               u.metadata->'modifiers' AS modifiers,
+               u.metadata->'annotations' AS annotations,
+               u.signature
+        FROM code_units u
+        JOIN code_files cf ON u.file_id = cf.file_id
+        WHERE u.project_id = :pid
+          AND (
+            EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(
+                    COALESCE(u.metadata->'annotations', '[]'::jsonb)
+                ) a WHERE a ILIKE :pat
+            )
+            OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(
+                    COALESCE(u.metadata->'modifiers', '[]'::jsonb)
+                ) m WHERE m ILIKE :pat
+            )
+            OR u.signature ILIKE :sig_pat
+          )
+          {unit_type_filter}
+        ORDER BY cf.file_path, u.name
+        LIMIT :lim
+    """
+
+    params: Dict[str, Any] = {
+        "pid": pid, "pat": pattern, "sig_pat": sig_pattern, "lim": limit,
+    }
+    if unit_type:
+        params["utype"] = unit_type
+
+    with db.get_session() as session:
+        result = session.execute(text(sql), params)
+        return [
+            {
+                "unit_id": str(row.unit_id),
+                "name": row.name,
+                "qualified_name": row.qualified_name,
+                "unit_type": row.unit_type,
+                "language": row.language,
+                "file_path": row.file_path,
+                "start_line": row.start_line,
+                "end_line": row.end_line,
+                "modifiers": row.modifiers,
+                "annotations": row.annotations,
+                "signature": row.signature,
+            }
+            for row in result.fetchall()
+        ]
+
+
+def find_units_by_return_type(
+    db: DatabaseManager,
+    project_id: str,
+    return_type: str,
+    unit_type: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Search callable units by return type.
+
+    Searches the metadata return_type field for a case-insensitive match.
+
+    Args:
+        db: DatabaseManager instance
+        project_id: UUID string of the project
+        return_type: Return type to search for (partial match, case-insensitive)
+        unit_type: Optional filter by unit_type
+        limit: Maximum results
+
+    Returns:
+        List of dicts with unit info and return type
+    """
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+
+    pattern = f"%{return_type}%"
+    unit_type_filter = "AND u.unit_type = :utype" if unit_type else ""
+
+    sql = f"""
+        SELECT u.unit_id, u.name, u.qualified_name, u.unit_type, u.language,
+               cf.file_path, u.start_line, u.end_line,
+               u.metadata->>'return_type' AS return_type
+        FROM code_units u
+        JOIN code_files cf ON u.file_id = cf.file_id
+        WHERE u.project_id = :pid
+          AND u.metadata->>'return_type' ILIKE :pat
+          {unit_type_filter}
+        ORDER BY cf.file_path, u.name
+        LIMIT :lim
+    """
+
+    params: Dict[str, Any] = {"pid": pid, "pat": pattern, "lim": limit}
+    if unit_type:
+        params["utype"] = unit_type
+
+    with db.get_session() as session:
+        result = session.execute(text(sql), params)
+        return [
+            {
+                "unit_id": str(row.unit_id),
+                "name": row.name,
+                "qualified_name": row.qualified_name,
+                "unit_type": row.unit_type,
+                "language": row.language,
+                "file_path": row.file_path,
+                "start_line": row.start_line,
+                "end_line": row.end_line,
+                "return_type": row.return_type,
+            }
+            for row in result.fetchall()
+        ]
+
+
+# =========================================================================
+# Feature 3: Dead code detection
+# =========================================================================
+
+# Names that are typically entry points or framework-invoked, not dead code
+_ENTRY_POINT_NAMES = frozenset({
+    "main", "__init__", "__main__", "setUp", "tearDown", "setUpClass",
+    "tearDownClass", "configure", "setup", "run", "execute", "handle",
+    "init", "destroy", "close", "start", "stop",
+})
+
+
+def get_dead_code(
+    db: DatabaseManager,
+    project_id: str,
+    exclude_patterns: Optional[List[str]] = None,
+    exclude_decorators: Optional[List[str]] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Detect potentially dead (uncalled) functions and methods.
+
+    A unit is considered dead if no incoming 'calls' edge exists. Results
+    are post-filtered in Python to exclude common false positives: entry
+    points, overrides, test methods, and user-specified patterns/decorators.
+
+    Args:
+        db: DatabaseManager instance
+        project_id: UUID string of the project
+        exclude_patterns: Optional list of fnmatch patterns on file_path to exclude
+        exclude_decorators: Optional list of decorator names to exclude
+        limit: Maximum results
+
+    Returns:
+        List of dicts with unit info for potentially dead functions
+    """
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+
+    sql = """
+        SELECT u.unit_id, u.name, u.qualified_name, u.unit_type, u.language,
+               cf.file_path, u.start_line, u.end_line,
+               u.metadata
+        FROM code_units u
+        JOIN code_files cf ON u.file_id = cf.file_id
+        LEFT JOIN code_edges e ON e.target_unit_id = u.unit_id
+            AND e.edge_type = 'calls' AND e.project_id = :pid
+        WHERE u.project_id = :pid
+          AND u.unit_type IN ('function', 'method')
+          AND e.id IS NULL
+        ORDER BY cf.file_path, u.name
+    """
+
+    with db.get_session() as session:
+        result = session.execute(text(sql), {"pid": pid})
+        raw_rows = result.fetchall()
+
+    # Post-filter in Python for nuanced exclusion rules
+    exclude_patterns = exclude_patterns or []
+    exclude_decorators_lower = set(d.lower() for d in (exclude_decorators or []))
+    filtered = []
+
+    for row in raw_rows:
+        name_lower = (row.name or "").lower()
+
+        # 1. Exclude common entry-point names
+        if name_lower in _ENTRY_POINT_NAMES:
+            continue
+
+        # 2. Exclude test methods (test_ prefix or Test class methods)
+        if name_lower.startswith("test_") or name_lower.startswith("test"):
+            # Be more specific: only skip test_ prefix (PEP) or Test* (JUnit)
+            if row.name and (row.name.startswith("test_") or row.name.startswith("Test")):
+                continue
+
+        # 3. Exclude file path patterns
+        if any(fnmatch.fnmatch(row.file_path or "", pat) for pat in exclude_patterns):
+            continue
+
+        # 4. Exclude overrides (from metadata)
+        meta = row.metadata or {} if hasattr(row, 'metadata') else {}
+        if meta.get("is_override"):
+            continue
+
+        # 5. Exclude units with specified decorators
+        if exclude_decorators_lower:
+            annotations = [a.lower() for a in (meta.get("annotations") or [])]
+            modifiers = [m.lower() for m in (meta.get("modifiers") or [])]
+            all_markers = set(annotations + modifiers)
+            if any(d in marker for d in exclude_decorators_lower for marker in all_markers):
+                continue
+
+        filtered.append({
+            "unit_id": str(row.unit_id),
+            "name": row.name,
+            "qualified_name": row.qualified_name,
+            "unit_type": row.unit_type,
+            "language": row.language,
+            "file_path": row.file_path,
+            "start_line": row.start_line,
+            "end_line": row.end_line,
+        })
+
+        if len(filtered) >= limit:
+            break
+
+    return filtered
+
+
+# =========================================================================
+# Feature 4: Transitive call chains
+# =========================================================================
+
+
+def get_all_callers(
+    db: DatabaseManager,
+    project_id: str,
+    unit_id: str,
+    max_depth: int = 10,
+) -> Dict[str, Any]:
+    """Get the full transitive closure of callers for a unit.
+
+    Traverses the call graph in the incoming direction up to max_depth,
+    returning all direct and indirect callers grouped by depth.
+
+    Args:
+        db: DatabaseManager instance
+        project_id: UUID string of the project
+        unit_id: UUID string of the target unit
+        max_depth: Maximum traversal depth
+
+    Returns:
+        Dict with unit_id, total_count, by_depth (dict of depth -> units),
+        max_depth_reached, and flat results list
+    """
+    results = _traverse(
+        db, project_id, unit_id, max_depth,
+        direction="incoming", edge_types=("calls",),
+    )
+
+    # Enrich with file_path
+    results = _enrich_file_paths(db, project_id, results)
+
+    by_depth: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for r in results:
+        d = r.get("depth", 1)
+        by_depth[d].append(r)
+
+    return {
+        "unit_id": unit_id,
+        "total_count": len(results),
+        "max_depth_reached": max(by_depth.keys()) if by_depth else 0,
+        "by_depth": dict(by_depth),
+        "results": results,
+    }
+
+
+def get_all_callees(
+    db: DatabaseManager,
+    project_id: str,
+    unit_id: str,
+    max_depth: int = 10,
+) -> Dict[str, Any]:
+    """Get the full transitive closure of callees for a unit.
+
+    Traverses the call graph in the outgoing direction up to max_depth,
+    returning all direct and indirect callees grouped by depth.
+
+    Args:
+        db: DatabaseManager instance
+        project_id: UUID string of the project
+        unit_id: UUID string of the source unit
+        max_depth: Maximum traversal depth
+
+    Returns:
+        Dict with unit_id, total_count, by_depth, max_depth_reached,
+        and flat results list
+    """
+    results = _traverse(
+        db, project_id, unit_id, max_depth,
+        direction="outgoing", edge_types=("calls",),
+    )
+
+    # Enrich with file_path
+    results = _enrich_file_paths(db, project_id, results)
+
+    by_depth: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for r in results:
+        d = r.get("depth", 1)
+        by_depth[d].append(r)
+
+    return {
+        "unit_id": unit_id,
+        "total_count": len(results),
+        "max_depth_reached": max(by_depth.keys()) if by_depth else 0,
+        "by_depth": dict(by_depth),
+        "results": results,
+    }
+
+
+# =========================================================================
+# Feature 5: Module dependency graph
+# =========================================================================
+
+
+def get_module_dependency_graph(
+    db: DatabaseManager,
+    project_id: str,
+    level: str = "file",
+    prefix: Optional[str] = None,
+    min_weight: int = 1,
+    dir_depth: int = 2,
+) -> Dict[str, Any]:
+    """Get the module-level dependency graph for a project.
+
+    Aggregates import edges between files or directories into a weighted
+    dependency graph suitable for visualization.
+
+    Args:
+        db: DatabaseManager instance
+        project_id: UUID string of the project
+        level: "file" for file-level or "directory" for directory-level aggregation
+        prefix: Optional path prefix filter (e.g. "src/main/java")
+        min_weight: Minimum number of imports to include an edge
+        dir_depth: Number of directory segments to use for directory-level grouping
+
+    Returns:
+        Dict with 'nodes' and 'links' for graph rendering
+    """
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+
+    prefix_filter = "AND sf.file_path LIKE :prefix AND tf.file_path LIKE :prefix" if prefix else ""
+
+    sql = f"""
+        SELECT sf.file_id AS source_id, sf.file_path AS source_path,
+               tf.file_id AS target_id, tf.file_path AS target_path,
+               COUNT(*) AS weight
+        FROM code_edges e
+        JOIN code_units su ON e.source_unit_id = su.unit_id
+        JOIN code_units tu ON e.target_unit_id = tu.unit_id
+        JOIN code_files sf ON su.file_id = sf.file_id
+        JOIN code_files tf ON tu.file_id = tf.file_id
+        WHERE e.project_id = :pid AND e.edge_type = 'imports'
+          AND sf.file_id != tf.file_id
+          {prefix_filter}
+        GROUP BY sf.file_id, sf.file_path, tf.file_id, tf.file_path
+        HAVING COUNT(*) >= :min_w
+        ORDER BY weight DESC
+    """
+
+    params: Dict[str, Any] = {"pid": pid, "min_w": min_weight}
+    if prefix:
+        params["prefix"] = f"{prefix}%"
+
+    with db.get_session() as session:
+        result = session.execute(text(sql), params)
+        rows = result.fetchall()
+
+    if level == "directory":
+        return _aggregate_to_directory(rows, dir_depth)
+
+    # File-level graph
+    nodes_seen: Dict[str, Dict[str, Any]] = {}
+    links = []
+
+    for row in rows:
+        src_id = str(row.source_id)
+        tgt_id = str(row.target_id)
+
+        if src_id not in nodes_seen:
+            nodes_seen[src_id] = {
+                "id": src_id,
+                "file_path": row.source_path,
+                "label": row.source_path.rsplit("/", 1)[-1] if "/" in row.source_path else row.source_path,
+            }
+        if tgt_id not in nodes_seen:
+            nodes_seen[tgt_id] = {
+                "id": tgt_id,
+                "file_path": row.target_path,
+                "label": row.target_path.rsplit("/", 1)[-1] if "/" in row.target_path else row.target_path,
+            }
+
+        links.append({
+            "source": src_id,
+            "target": tgt_id,
+            "weight": row.weight,
+        })
+
+    return {
+        "nodes": list(nodes_seen.values()),
+        "links": links,
+        "node_count": len(nodes_seen),
+        "link_count": len(links),
+        "level": level,
+    }
+
+
+def _aggregate_to_directory(rows: list, dir_depth: int) -> Dict[str, Any]:
+    """Aggregate file-level import edges to directory-level.
+
+    Groups files by their first dir_depth path segments and sums weights.
+    """
+    def _dir_key(path: str) -> str:
+        parts = path.split("/")
+        if len(parts) > dir_depth:
+            return "/".join(parts[:dir_depth])
+        return os.path.dirname(path) if "/" in path else "."
+
+    dir_edges: Dict[tuple, int] = defaultdict(int)
+    dir_set: set = set()
+
+    for row in rows:
+        src_dir = _dir_key(row.source_path)
+        tgt_dir = _dir_key(row.target_path)
+        if src_dir == tgt_dir:
+            continue  # Skip internal dependencies
+        dir_set.add(src_dir)
+        dir_set.add(tgt_dir)
+        dir_edges[(src_dir, tgt_dir)] += row.weight
+
+    nodes = [{"id": d, "label": d} for d in sorted(dir_set)]
+    links = [
+        {"source": src, "target": tgt, "weight": w}
+        for (src, tgt), w in sorted(dir_edges.items(), key=lambda x: -x[1])
+    ]
+
+    return {
+        "nodes": nodes,
+        "links": links,
+        "node_count": len(nodes),
+        "link_count": len(links),
+        "level": "directory",
+    }
+
+
+# -- Private helpers ----------------------------------------------------------
 
 # AGE edge type label map (lowercase -> uppercase)
 _AGE_EDGE_MAP = {
@@ -528,6 +1118,68 @@ _AGE_EDGE_MAP = {
     "inherits": "INHERITS", "implements": "IMPLEMENTS", "overrides": "OVERRIDES",
     "type_dep": "TYPE_DEP", "calls_sp": "CALLS_SP", "data_flow": "DATA_FLOW",
 }
+
+# Regex patterns for estimating branching complexity (fallback)
+_BRANCH_PATTERNS = [
+    re.compile(r'\b(if|elif|else if)\b'),
+    re.compile(r'\b(for|foreach|while|do)\b'),
+    re.compile(r'\b(switch|case)\b'),
+    re.compile(r'\b(try|catch|except|finally)\b'),
+    re.compile(r'\b(&&|\|\|)\b'),
+    re.compile(r'\?.*:'),  # ternary operator
+]
+
+
+def _estimate_branch_complexity(source: str) -> int:
+    """Estimate branching complexity from source text.
+
+    Counts occurrences of branching keywords and logical operators.
+    This is a rough heuristic fallback when enricher metadata is unavailable.
+    Returns 1 + branch_count (McCabe convention).
+    """
+    if not source:
+        return 1
+
+    count = 1  # Base complexity
+    for pattern in _BRANCH_PATTERNS:
+        count += len(pattern.findall(source))
+    return count
+
+
+def _enrich_file_paths(
+    db: DatabaseManager,
+    project_id: str,
+    results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Batch-enrich traversal results with file_path from code_files table.
+
+    The _traverse functions return file_id but not file_path. This helper
+    resolves file_ids to file_paths in a single query.
+    """
+    if not results:
+        return results
+
+    file_ids = list({r.get("file_id") for r in results if r.get("file_id")})
+    if not file_ids:
+        return results
+
+    pid = UUID(project_id) if isinstance(project_id, str) else project_id
+
+    try:
+        file_uuids = [UUID(fid) if isinstance(fid, str) else fid for fid in file_ids]
+        with db.get_session() as session:
+            rows = session.execute(
+                text("SELECT file_id, file_path FROM code_files WHERE file_id = ANY(:ids) AND project_id = :pid"),
+                {"ids": file_uuids, "pid": pid},
+            )
+            path_map = {str(r.file_id): r.file_path for r in rows.fetchall()}
+    except Exception:
+        path_map = {}
+
+    for r in results:
+        r["file_path"] = path_map.get(r.get("file_id", ""), "")
+
+    return results
 
 
 def _age_available(db: DatabaseManager, project_id: str) -> bool:
@@ -553,7 +1205,7 @@ def _traverse(
     direction: str,
     edge_types: tuple,
 ) -> List[Dict[str, Any]]:
-    """Generic graph traversal — tries Cypher for single-type queries, SQL for multi-type.
+    """Generic graph traversal -- tries Cypher for single-type queries, SQL for multi-type.
 
     AGE doesn't support multi-label variable-length paths, so multi-edge-type
     traversals stay on the SQL recursive CTE for correctness.

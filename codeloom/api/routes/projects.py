@@ -1,7 +1,7 @@
 """Project management API routes (FastAPI).
 
 Provides CRUD operations, zip upload with ingestion,
-and file/unit browsing for code projects.
+and file/unit browsing for code and knowledge projects.
 """
 
 import logging
@@ -26,12 +26,19 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 MAX_UPLOAD_SIZE_MB = 50
 
+# Supported document formats for knowledge projects
+KNOWLEDGE_EXTENSIONS = {
+    ".pdf", ".docx", ".txt", ".md", ".markdown", ".epub",
+    ".pptx", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tiff",
+}
+
 
 # ── Request/Response models ──────────────────────────────────────────────
 
 class ProjectCreate(BaseModel):
     name: str
     description: str = ""
+    project_type: str = "code"  # 'code' | 'knowledge'
 
 
 class ProjectUpdate(BaseModel):
@@ -44,6 +51,10 @@ class ProjectResponse(BaseModel):
     user_id: str
     name: str
     description: str
+    project_type: str = "code"
+    parent_project_id: str | None = None
+    migration_notebook_id: str | None = None
+    migration_notebook_name: str | None = None
     primary_language: str | None = None
     languages: list[str] = []
     file_count: int = 0
@@ -79,6 +90,15 @@ class IngestionResponse(BaseModel):
     elapsed_seconds: float
 
 
+class KnowledgeIngestionResponse(BaseModel):
+    project_id: str
+    file_name: str
+    chunks_created: int
+    embeddings_stored: int
+    errors: list[str]
+    elapsed_seconds: float
+
+
 # ── Background analysis auto-trigger ─────────────────────────────────────
 
 def _auto_trigger_analysis(engine, project_id: str, user_id: str):
@@ -102,16 +122,21 @@ async def create_project(
     user: dict = Depends(require_admin),
     pm=Depends(get_project_manager),
 ):
-    """Create a new project."""
+    """Create a new project.
+
+    Set project_type='knowledge' for document-only RAG projects
+    (PDF, DOCX, TXT, etc.). Default is 'code' for codebase projects.
+    """
     try:
         project = pm.create_project(
             user_id=user["user_id"],
             name=data.name,
             description=data.description,
+            project_type=data.project_type,
         )
         return ProjectResponse(**project)
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400 if "Invalid project_type" in str(e) else 409, detail=str(e))
 
 
 @router.get("", response_model=list[ProjectResponse])
@@ -121,6 +146,17 @@ async def list_projects(
 ):
     """List all projects for the current user."""
     projects = pm.list_projects(user["user_id"])
+    # Enrich code projects with migration notebook IDs
+    notebook_map = {}
+    for p in projects:
+        if p.get("project_type") == "knowledge" and p.get("parent_project_id"):
+            notebook_map[p["parent_project_id"]] = (p["project_id"], p["name"])
+    for p in projects:
+        if p.get("project_type") == "code":
+            nb = notebook_map.get(p["project_id"])
+            if nb:
+                p["migration_notebook_id"] = nb[0]
+                p["migration_notebook_name"] = nb[1]
     return [ProjectResponse(**p) for p in projects]
 
 
@@ -134,6 +170,12 @@ async def get_project(
     project = pm.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    # Enrich code projects with their migration notebook
+    if project.get("project_type") == "code" and not project.get("migration_notebook_id"):
+        notebook = pm.get_migration_notebook(project_id)
+        if notebook:
+            project["migration_notebook_id"] = notebook["project_id"]
+            project["migration_notebook_name"] = notebook["name"]
     return ProjectResponse(**project)
 
 
@@ -171,6 +213,19 @@ async def delete_project(
     return {"success": True, "message": f"Project {project_id} deleted"}
 
 
+@router.get("/{project_id}/migration-notebook")
+async def get_migration_notebook(
+    project_id: str,
+    user: dict = Depends(get_current_user),
+    pm=Depends(get_project_manager),
+):
+    """Get the migration notebook for a code project. Returns the notebook project details."""
+    notebook = pm.get_migration_notebook(project_id)
+    if not notebook:
+        raise HTTPException(status_code=404, detail="No migration notebook found for this project")
+    return ProjectResponse(**notebook)
+
+
 @router.post("/{project_id}/upload", response_model=IngestionResponse)
 async def upload_codebase(
     project_id: str,
@@ -183,14 +238,21 @@ async def upload_codebase(
 ):
     """Upload a zip file and ingest the codebase.
 
-    Validates file type and size, extracts, parses with AST,
-    chunks, embeds, and stores in pgvector.
+    For code projects only. Validates file type and size, extracts,
+    parses with AST, chunks, embeds, and stores in pgvector.
     Auto-triggers deep understanding analysis after successful ingestion.
     """
     # Validate project exists
     project = pm.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # Knowledge projects should use the /upload-document endpoint
+    if project.get("project_type") == "knowledge":
+        raise HTTPException(
+            status_code=400,
+            detail="Use POST /{project_id}/upload-document for knowledge projects.",
+        )
 
     # Validate file type
     if not file.filename or not file.filename.endswith(".zip"):
@@ -241,6 +303,80 @@ async def upload_codebase(
 
     finally:
         # Clean up temp file
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+@router.post("/{project_id}/upload-document", response_model=KnowledgeIngestionResponse)
+async def upload_document(
+    project_id: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(require_admin),
+    pm=Depends(get_project_manager),
+    ingestion=Depends(get_code_ingestion),
+):
+    """Upload a document to a knowledge project.
+
+    Accepts PDF, DOCX, TXT, MD, EPUB, PPTX, and image files.
+    Reads the document, chunks with SentenceSplitter, embeds, and stores
+    in pgvector for RAG retrieval. No AST parsing or ASG building.
+    """
+    project = pm.get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project.get("project_type") != "knowledge":
+        raise HTTPException(
+            status_code=400,
+            detail="This endpoint is for knowledge projects only. Use POST /{project_id}/upload for code projects.",
+        )
+
+    # Validate file extension
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+
+    file_ext = os.path.splitext(file.filename)[1].lower()
+    if file_ext not in KNOWLEDGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{file_ext}'. Supported: {', '.join(sorted(KNOWLEDGE_EXTENSIONS))}",
+        )
+
+    # Save to temp file
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=file_ext, prefix="codeloom_doc_", delete=False
+        ) as tmp:
+            content = await file.read()
+
+            size_mb = len(content) / (1024 * 1024)
+            if size_mb > MAX_UPLOAD_SIZE_MB:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File too large ({size_mb:.1f}MB). Maximum is {MAX_UPLOAD_SIZE_MB}MB.",
+                )
+
+            tmp.write(content)
+            temp_path = tmp.name
+
+        # Run knowledge ingestion pipeline
+        result = ingestion.ingest_document(
+            file_path=temp_path,
+            file_name=file.filename,
+            project_id=project_id,
+        )
+
+        return KnowledgeIngestionResponse(
+            project_id=result.project_id,
+            file_name=file.filename,
+            chunks_created=result.chunks_created,
+            embeddings_stored=result.embeddings_stored,
+            errors=result.errors,
+            elapsed_seconds=result.elapsed_seconds,
+        )
+
+    finally:
         if temp_path and os.path.exists(temp_path):
             os.unlink(temp_path)
 

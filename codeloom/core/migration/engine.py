@@ -29,6 +29,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import UUID, uuid4
 
+from .. import defaults
 from ..db import DatabaseManager
 from ..db.models import CodeFile, CodeUnit, FunctionalMVP, MigrationPlan, MigrationPhase, Project
 from .context_builder import MigrationContextBuilder
@@ -2479,7 +2480,7 @@ class MigrationEngine:
                 "started_at": started_at.isoformat(),
                 "completed_at": completed_at.isoformat(),
                 "duration_ms": duration_ms,
-                "llm_model": os.environ.get("LLM_PROVIDER", "unknown"),
+                "llm_model": defaults.LLM_PROVIDER,
                 "llm_temperature": None,  # Placeholder: requires LLM callback
                 "token_usage": None,  # Placeholder: requires LLM callback
             }

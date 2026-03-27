@@ -72,6 +72,7 @@ def create_app(
     from .routes.understanding import router as understanding_router
     from .routes.diagrams import router as diagrams_router
     from .routes.analytics import router as analytics_router
+    from .routes.reverse_engineering import router as reveng_router
 
     app.include_router(auth_router, prefix="/api")
     app.include_router(projects_router, prefix="/api")
@@ -82,6 +83,7 @@ def create_app(
     app.include_router(understanding_router, prefix="/api")
     app.include_router(diagrams_router, prefix="/api")
     app.include_router(analytics_router, prefix="/api")
+    app.include_router(reveng_router, prefix="/api")
 
     @app.get("/api/health")
     async def health_check():

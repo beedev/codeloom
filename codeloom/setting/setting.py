@@ -23,6 +23,11 @@ from codeloom.core.config.config_loader import (
 
 load_dotenv()
 
+# Import centralized defaults to avoid conflicting inline defaults.
+# We import lazily inside default_factory lambdas to avoid circular imports
+# (defaults.py imports os only, but setting.py is imported by providers
+# which are imported by core modules).
+
 
 # Find config directory relative to project root
 def _get_config_path() -> Path:
@@ -41,11 +46,29 @@ def _get(config: Dict[str, Any], key: str, default: Any) -> Any:
     return config.get(key, default)
 
 
+def _get_llm_model_default() -> str:
+    """Get LLM_MODEL from centralized defaults (avoids circular import)."""
+    from codeloom.core.defaults import LLM_MODEL
+    return LLM_MODEL or "gpt-4.1"  # Fallback for OllamaSettings display
+
+
+def _get_embedding_model_default() -> str:
+    """Get EMBEDDING_MODEL from centralized defaults (avoids circular import)."""
+    from codeloom.core.defaults import EMBEDDING_MODEL
+    return EMBEDDING_MODEL
+
+
+def _get_image_generation_provider_default() -> str:
+    """Get IMAGE_GENERATION_PROVIDER from centralized defaults (avoids circular import)."""
+    from codeloom.core.defaults import IMAGE_GENERATION_PROVIDER
+    return IMAGE_GENERATION_PROVIDER
+
+
 class OllamaSettings(BaseModel):
     """Ollama LLM settings (loaded from config/ingestion.yaml llm section)."""
 
     llm: str = Field(
-        default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4.1"),
+        default_factory=_get_llm_model_default,
         description="LLM model"
     )
     keep_alive: str = Field(
@@ -126,7 +149,7 @@ class IngestionSettings(BaseModel):
     """Ingestion settings (loaded from config/ingestion.yaml chunking/embedding sections)."""
 
     embed_llm: str = Field(
-        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        default_factory=_get_embedding_model_default,
         description="Embedding LLM model"
     )
     embed_batch_size: int = Field(
@@ -218,8 +241,8 @@ class GeminiSettings(BaseModel):
 class ImageGenerationSettings(BaseModel):
     """Settings for image generation."""
     provider: str = Field(
-        default_factory=lambda: os.getenv("IMAGE_GENERATION_PROVIDER", "imagen"),
-        description="Image generation provider (dalle|imagen)"
+        default_factory=_get_image_generation_provider_default,
+        description="Image generation provider (gemini|imagen)"
     )
     imagen_model: str = Field(
         default_factory=lambda: os.getenv("IMAGEN_MODEL", "imagen-3.0-generate-001"),
@@ -369,7 +392,7 @@ class QueryTimeSettings(BaseModel):
     These settings are passed with each query and override the defaults
     loaded from config files. They are NOT persisted.
 
-    Frontend → Backend Mapping:
+    Frontend -> Backend Mapping:
     - search_style (0-100): 0=keyword (BM25), 100=semantic (vector)
     - result_depth: focused=10 results, balanced=20, comprehensive=40
     - temperature (0-100): maps to 0.0-2.0 for LLM
@@ -410,8 +433,8 @@ class QueryTimeSettings(BaseModel):
         top_k_map = {"focused": 10, "balanced": 20, "comprehensive": 40}
         similarity_top_k = top_k_map.get(result_depth, 20)
 
-        # Convert temperature slider to float (0-100 → 0.0-2.0)
-        temp_float = temperature / 50  # 0→0, 50→1.0, 100→2.0
+        # Convert temperature slider to float (0-100 -> 0.0-2.0)
+        temp_float = temperature / 50  # 0->0, 50->1.0, 100->2.0
 
         return cls(
             bm25_weight=bm25_weight,

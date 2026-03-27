@@ -6,6 +6,8 @@ Provides runtime configuration for LLM models and reranker.
 import logging
 import os
 
+from codeloom.core import defaults
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
@@ -76,7 +78,7 @@ async def get_models(
         })
 
     current_model = pipeline.get_model_name() or settings.default_model
-    current_provider = os.getenv("LLM_PROVIDER", settings.default_provider)
+    current_provider = defaults.LLM_PROVIDER or settings.default_provider
 
     return {
         "providers": providers,

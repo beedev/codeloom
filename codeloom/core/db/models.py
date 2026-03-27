@@ -14,6 +14,7 @@ Code intelligence and migration platform models:
 - EmbeddingConfig: Tracks active embedding model
 - Role, UserRole: RBAC core
 - ProjectAccess: Grants users access to specific projects
+- ReverseEngineeringDoc: Structured reverse engineering documentation
 """
 
 from sqlalchemy import (
@@ -107,6 +108,7 @@ class Project(Base):
     user_id = Column(UUID(), ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
     name = Column(String(255), nullable=False)
     description = Column(Text)
+    project_type = Column(String(20), default='code', nullable=False)  # 'code' | 'knowledge'
     primary_language = Column(String(50))           # python, javascript, java, csharp
     languages = Column(JSONB, default=list)          # all detected languages
     file_count = Column(Integer, default=0)
@@ -117,6 +119,7 @@ class Project(Base):
     source_url = Column(String(2048), nullable=True)                     # git URL or local path
     repo_branch = Column(String(255), nullable=True)                     # git branch
     last_synced_at = Column(TIMESTAMP, nullable=True)                    # last ingestion time
+    parent_project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=True)  # links migration notebook → code project
     deep_analysis_status = Column(String(20), default='none', nullable=False)  # none|pending|running|completed|failed
     age_graph_status = Column(String(20), default='pending', nullable=False)    # pending|syncing|synced|error
     created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
@@ -253,6 +256,7 @@ class MigrationPlan(Base):
     migration_type = Column(String(30), default='framework_migration', nullable=False)  # version_upgrade, framework_migration, rewrite
     pipeline_version = Column(Integer, default=2, nullable=False)  # 1=old 6-phase, 2=new 4-phase
     asset_strategies = Column(JSONB, nullable=True)               # {lang: {strategy, target}} per-file-type migration strategies
+    knowledge_notebook_ids = Column(JSONB, nullable=True)          # [uuid-str, ...] — reference notebooks selected during init
     migration_lane_id = Column(String(100), nullable=True)       # auto-detected lane, e.g. "struts_to_springboot"
     lane_versions = Column(JSONB, nullable=True)                 # {"struts_to_springboot": "1.0.0"} — recorded on first execution
     batch_executions = Column(JSONB, default=list)                # [{batch_id, status, mvp_results, ...}]
@@ -644,3 +648,37 @@ class AnalysisUnit(Base):
 
     def __repr__(self):
         return f"<AnalysisUnit(analysis={self.analysis_id}, unit={self.unit_id}, depth={self.min_depth})>"
+
+
+# =============================================================================
+# Reverse Engineering Documentation
+# =============================================================================
+
+class ReverseEngineeringDoc(Base):
+    """Reverse engineering documentation for a project.
+
+    Stores a structured 9-chapter document composed from existing intelligence
+    (Understanding Engine, ASG queries, ground truth). Each chapter is stored
+    as a markdown string in the chapters JSONB column keyed by chapter number.
+    """
+    __tablename__ = "reverse_engineering_docs"
+    __table_args__ = (
+        Index('idx_reveng_docs_project', 'project_id'),
+    )
+
+    doc_id = Column(UUID(), primary_key=True, default=uuid.uuid4)
+    project_id = Column(UUID(), ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), default='pending', nullable=False)   # pending|generating|completed|failed
+    chapters = Column(JSONB, default=dict)            # {"1": "# Chapter 1...", "2": "...", ...}
+    chapter_titles = Column(JSONB, default=list)      # ["Executive Summary", "Architecture Overview", ...]
+    progress = Column(Integer, default=0)             # Number of chapters completed so far
+    total_chapters = Column(Integer, default=9)
+    error = Column(Text, nullable=True)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    project = relationship("Project")
+
+    def __repr__(self):
+        return f"<ReverseEngineeringDoc(doc_id={self.doc_id}, project={self.project_id}, status='{self.status}', progress={self.progress}/{self.total_chapters})>"

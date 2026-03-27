@@ -20,6 +20,10 @@ class AnthropicLLMProvider(LLMProvider):
     - claude-3-opus-20240229
     """
 
+    # Provider-specific default model (used when no LLM_MODEL env var is set
+    # and the caller selected the Anthropic provider).
+    DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+
     SUPPORTED_MODELS = {
         "claude-3-5-sonnet-20241022",
         "claude-3-5-haiku-20241022",
@@ -38,7 +42,8 @@ class AnthropicLLMProvider(LLMProvider):
     ):
         self._setting = setting or get_settings()
 
-        self._model = model or os.getenv("LLM_MODEL", "claude-3-5-sonnet-20241022")
+        # Model resolution: explicit arg > env var > provider-specific default
+        self._model = model or os.getenv("LLM_MODEL") or self.DEFAULT_MODEL
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY") or self._setting.anthropic.api_key
         self._temperature = temperature
         self._max_tokens = max_tokens

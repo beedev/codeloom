@@ -111,6 +111,7 @@ export async function getProject(projectId: string): Promise<Project> {
 export async function createProject(data: {
   name: string;
   description?: string;
+  project_type?: 'code' | 'knowledge';
 }): Promise<Project> {
   return request<Project>('/api/projects', {
     method: 'POST',
@@ -168,6 +169,65 @@ export async function ingestFromLocal(
   return request<IngestionResult>(`/api/projects/${projectId}/ingest/local`, {
     method: 'POST',
     body: JSON.stringify({ dir_path: dirPath }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge Project — Document Upload & Chat
+// ---------------------------------------------------------------------------
+
+export async function uploadDocument(
+  projectId: string,
+  file: File,
+): Promise<{ file_id: string; file_path: string; chunks_created: number }> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(`/api/projects/${projectId}/upload-document`, {
+    method: 'POST',
+    credentials: 'include',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new ApiError(response.status, body);
+  }
+
+  return response.json();
+}
+
+export interface ChatQueryOptions {
+  model?: string;
+  reranker_enabled?: boolean;
+  reranker_model?: string;
+  response_format?: string;
+  top_k?: number;
+}
+
+export async function chatWithProject(
+  projectId: string,
+  query: string,
+  includeSources: boolean = true,
+  options?: ChatQueryOptions,
+): Promise<{
+  response: string;
+  sources?: Array<{
+    filename: string;
+    snippet: string;
+    score: number;
+  }>;
+}> {
+  return request(`/api/projects/${projectId}/chat`, {
+    method: 'POST',
+    body: JSON.stringify({
+      query,
+      include_sources: includeSources,
+      ...(options?.model && { model: options.model }),
+      ...(options?.reranker_enabled !== undefined && { reranker_enabled: options.reranker_enabled }),
+      ...(options?.response_format && { response_format: options.response_format }),
+      ...(options?.top_k !== undefined && { top_k: options.top_k }),
+    }),
   });
 }
 

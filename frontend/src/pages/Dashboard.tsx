@@ -2,6 +2,7 @@
  * Dashboard Page
  *
  * 4 stat cards, grid of project cards with Open/Chat buttons, and a "Create Project" action.
+ * Knowledge projects display a distinct indigo badge.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -18,6 +19,7 @@ import {
   FolderOpen,
   BarChart3,
   BookOpen,
+  Code2,
 } from 'lucide-react';
 import { Layout } from '../components/Layout.tsx';
 import { useProjects } from '../hooks/useProjects.ts';
@@ -196,11 +198,17 @@ function ProjectCard({
     error: 'bg-danger/10 text-danger',
   };
 
+  const isKnowledge = project.project_type === 'knowledge';
+
   return (
     <div className="group rounded-lg border border-void-surface/50 bg-void-light/40 p-5 transition-all hover:border-void-surface hover:bg-void-light">
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
-          <span className="material-symbols-outlined text-[20px] text-glow">folder_copy</span>
+          {isKnowledge ? (
+            <BookOpen className="h-5 w-5 text-indigo-400" />
+          ) : (
+            <span className="material-symbols-outlined text-[20px] text-glow">folder_copy</span>
+          )}
           <h3 className="text-sm font-medium text-text">{project.name}</h3>
         </div>
         <button
@@ -222,23 +230,35 @@ function ProjectCard({
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-text-dim">
-        {project.primary_language && (
-          <span className="rounded bg-void-surface/50 px-2 py-0.5 text-text-muted">
-            {project.primary_language}
+        {/* Project type badge */}
+        {isKnowledge ? (
+          <span className="flex items-center gap-1 rounded border border-indigo-500/30 bg-indigo-500/20 px-2 py-0.5 text-[10px] font-medium text-indigo-400">
+            <BookOpen className="h-2.5 w-2.5" />
+            Knowledge Base
           </span>
+        ) : (
+          <>
+            {project.primary_language && (
+              <span className="rounded bg-void-surface/50 px-2 py-0.5 text-text-muted">
+                {project.primary_language}
+              </span>
+            )}
+            <SourceBadge sourceType={project.source_type} />
+          </>
         )}
-        <SourceBadge sourceType={project.source_type} />
         <span className="flex items-center gap-1">
           <Hash className="h-3 w-3" />
-          {project.file_count} files
+          {project.file_count} {isKnowledge ? 'docs' : 'files'}
         </span>
-        <span
-          className={`rounded px-2 py-0.5 text-[10px] font-medium ${
-            statusColors[project.ast_status] ?? statusColors.pending
-          }`}
-        >
-          {project.ast_status}
-        </span>
+        {!isKnowledge && (
+          <span
+            className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+              statusColors[project.ast_status] ?? statusColors.pending
+            }`}
+          >
+            {project.ast_status}
+          </span>
+        )}
         {project.created_at && (
           <span className="flex items-center gap-1">
             <Clock className="h-3 w-3" />
@@ -247,7 +267,7 @@ function ProjectCard({
         )}
       </div>
 
-      {/* Open + Chat + Analytics buttons */}
+      {/* Action buttons */}
       <div className="mt-4 flex items-center gap-2">
         <button
           onClick={onOpen}
@@ -261,20 +281,24 @@ function ProjectCard({
         >
           Chat
         </button>
-        <button
-          onClick={onAnalytics}
-          className="flex items-center gap-1 rounded-lg border border-void-surface px-3 py-1.5 text-xs text-text-muted transition-colors hover:bg-void-surface hover:text-text"
-        >
-          <BarChart3 className="h-3 w-3" />
-          Analytics
-        </button>
-        <button
-          onClick={onWiki}
-          className="flex items-center gap-1 rounded-lg border border-void-surface px-3 py-1.5 text-xs text-text-muted transition-colors hover:bg-void-surface hover:text-text"
-        >
-          <BookOpen className="h-3 w-3" />
-          Wiki
-        </button>
+        {!isKnowledge && (
+          <button
+            onClick={onAnalytics}
+            className="flex items-center gap-1 rounded-lg border border-void-surface px-3 py-1.5 text-xs text-text-muted transition-colors hover:bg-void-surface hover:text-text"
+          >
+            <BarChart3 className="h-3 w-3" />
+            Analytics
+          </button>
+        )}
+        {!isKnowledge && (
+          <button
+            onClick={onWiki}
+            className="flex items-center gap-1 rounded-lg border border-void-surface px-3 py-1.5 text-xs text-text-muted transition-colors hover:bg-void-surface hover:text-text"
+          >
+            <BookOpen className="h-3 w-3" />
+            Wiki
+          </button>
+        )}
       </div>
     </div>
   );
@@ -339,6 +363,7 @@ function CreateProjectModal({
 }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [projectType, setProjectType] = useState<'code' | 'knowledge'>('code');
   const [isCreating, setIsCreating] = useState(false);
   const navigate = useNavigate();
 
@@ -347,14 +372,27 @@ function CreateProjectModal({
       e.preventDefault();
       if (!name.trim()) return;
       setIsCreating(true);
-      const project = await onCreate(name.trim(), description.trim() || undefined);
-      setIsCreating(false);
-      if (project) {
+      try {
+        // Use the API directly to pass project_type
+        const project = await api.createProject({
+          name: name.trim(),
+          description: description.trim() || undefined,
+          project_type: projectType,
+        });
         onClose();
         navigate(`/project/${project.project_id}`);
+      } catch {
+        // Fall back to the hook-based create (which refreshes the list)
+        const project = await onCreate(name.trim(), description.trim() || undefined);
+        if (project) {
+          onClose();
+          navigate(`/project/${project.project_id}`);
+        }
+      } finally {
+        setIsCreating(false);
       }
     },
-    [name, description, onCreate, onClose, navigate],
+    [name, description, projectType, onCreate, onClose, navigate],
   );
 
   return (
@@ -362,6 +400,45 @@ function CreateProjectModal({
       <div className="w-full max-w-md rounded-xl border border-void-surface bg-void p-6 shadow-2xl">
         <h2 className="text-lg font-semibold text-text">New Project</h2>
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
+          {/* Project Type Selector */}
+          <div>
+            <label className="block text-sm font-medium text-text-muted mb-2">
+              Project Type
+            </label>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setProjectType('code')}
+                className={`flex flex-1 items-center gap-2.5 rounded-lg border px-4 py-3 text-left transition-colors ${
+                  projectType === 'code'
+                    ? 'border-glow bg-glow/10 text-text'
+                    : 'border-void-surface bg-void-light text-text-muted hover:border-void-surface hover:bg-void-light/80'
+                }`}
+              >
+                <Code2 className={`h-5 w-5 ${projectType === 'code' ? 'text-glow' : 'text-text-dim'}`} />
+                <div>
+                  <p className="text-sm font-medium">Code</p>
+                  <p className="text-[11px] text-text-dim">Upload and analyze source code</p>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setProjectType('knowledge')}
+                className={`flex flex-1 items-center gap-2.5 rounded-lg border px-4 py-3 text-left transition-colors ${
+                  projectType === 'knowledge'
+                    ? 'border-indigo-500 bg-indigo-500/10 text-text'
+                    : 'border-void-surface bg-void-light text-text-muted hover:border-void-surface hover:bg-void-light/80'
+                }`}
+              >
+                <BookOpen className={`h-5 w-5 ${projectType === 'knowledge' ? 'text-indigo-400' : 'text-text-dim'}`} />
+                <div>
+                  <p className="text-sm font-medium">Knowledge</p>
+                  <p className="text-[11px] text-text-dim">Upload docs and chat with AI</p>
+                </div>
+              </button>
+            </div>
+          </div>
+
           <div>
             <label
               htmlFor="project-name"
@@ -375,7 +452,7 @@ function CreateProjectModal({
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="mt-1 w-full rounded-lg border border-void-surface bg-void-light px-4 py-2.5 text-sm text-text placeholder-text-dim focus:border-glow/50 focus:outline-none focus:ring-1 focus:ring-glow/50"
-              placeholder="e.g. my-react-app"
+              placeholder={projectType === 'knowledge' ? 'e.g. company-docs' : 'e.g. my-react-app'}
               autoFocus
               disabled={isCreating}
             />
@@ -393,7 +470,11 @@ function CreateProjectModal({
               onChange={(e) => setDescription(e.target.value)}
               rows={2}
               className="mt-1 w-full resize-none rounded-lg border border-void-surface bg-void-light px-4 py-2.5 text-sm text-text placeholder-text-dim focus:border-glow/50 focus:outline-none focus:ring-1 focus:ring-glow/50"
-              placeholder="Brief description of the codebase"
+              placeholder={
+                projectType === 'knowledge'
+                  ? 'What kind of documents will this hold?'
+                  : 'Brief description of the codebase'
+              }
               disabled={isCreating}
             />
           </div>

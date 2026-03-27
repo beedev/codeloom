@@ -32,8 +32,19 @@ class ProjectManager:
         user_id: str,
         name: str,
         description: str = "",
+        project_type: str = "code",
     ) -> Dict:
-        """Create a new project."""
+        """Create a new project.
+
+        Args:
+            user_id: UUID of the owning user
+            name: Project name (unique per user)
+            description: Optional project description
+            project_type: 'code' for codebase projects, 'knowledge' for document-only RAG projects
+        """
+        if project_type not in ("code", "knowledge"):
+            raise ValueError(f"Invalid project_type '{project_type}'. Must be 'code' or 'knowledge'.")
+
         try:
             with self.db.get_session() as session:
                 existing = session.query(Project).filter(
@@ -44,18 +55,50 @@ class ProjectManager:
                 if existing:
                     raise ValueError(f"Project '{name}' already exists for user {user_id}")
 
+                # Knowledge projects skip AST/ASG entirely
+                if project_type == "knowledge":
+                    ast_status = "not_applicable"
+                    asg_status = "not_applicable"
+                else:
+                    ast_status = "pending"
+                    asg_status = "pending"
+
                 project = Project(
                     project_id=uuid4(),
                     user_id=UUID(user_id),
                     name=name,
                     description=description,
+                    project_type=project_type,
+                    ast_status=ast_status,
+                    asg_status=asg_status,
                 )
 
                 session.add(project)
                 session.flush()
 
-                logger.info(f"Created project: {project.project_id} ({name})")
-                return self._project_to_dict(project)
+                # Auto-create a migration notebook for code projects
+                migration_notebook = None
+                if project_type == "code":
+                    notebook_name = f"{name} — Migration Notebook"
+                    migration_notebook = Project(
+                        project_id=uuid4(),
+                        user_id=UUID(user_id),
+                        name=notebook_name,
+                        description=f"Project-specific migration docs for {name}. Upload SOWs, business rules, data models, mapping docs here.",
+                        project_type="knowledge",
+                        parent_project_id=project.project_id,
+                        ast_status="not_applicable",
+                        asg_status="not_applicable",
+                    )
+                    session.add(migration_notebook)
+                    session.flush()
+                    logger.info(f"Auto-created migration notebook: {migration_notebook.project_id} for project {project.project_id}")
+
+                result = self._project_to_dict(project)
+                if migration_notebook:
+                    result["migration_notebook_id"] = str(migration_notebook.project_id)
+                    result["migration_notebook_name"] = migration_notebook.name
+                return result
 
         except ValueError:
             raise
@@ -133,7 +176,7 @@ class ProjectManager:
             raise
 
     def delete_project(self, project_id: str) -> bool:
-        """Delete a project and all associated data (CASCADE)."""
+        """Delete a project and all associated data (CASCADE + embeddings)."""
         try:
             with self.db.get_session() as session:
                 project = session.query(Project).filter(
@@ -143,6 +186,17 @@ class ProjectManager:
                 if not project:
                     return False
 
+                # Clean up pgvector embeddings for this project
+                try:
+                    from sqlalchemy import text
+                    session.execute(
+                        text("DELETE FROM data_embeddings WHERE metadata_->>'project_id' = :pid"),
+                        {"pid": str(project_id)},
+                    )
+                    logger.info(f"Cleaned up embeddings for project {project_id}")
+                except Exception as emb_err:
+                    logger.warning(f"Failed to clean up embeddings for {project_id}: {emb_err}")
+
                 session.delete(project)
                 logger.info(f"Deleted project: {project_id} ({project.name})")
                 return True
@@ -150,6 +204,21 @@ class ProjectManager:
         except Exception as e:
             logger.error(f"Failed to delete project {project_id}: {e}")
             raise
+
+    def get_migration_notebook(self, project_id: str) -> Optional[Dict]:
+        """Get the auto-created migration notebook for a code project."""
+        try:
+            with self.db.get_session() as session:
+                notebook = session.query(Project).filter(
+                    Project.parent_project_id == UUID(project_id),
+                    Project.project_type == "knowledge",
+                ).first()
+                if not notebook:
+                    return None
+                return self._project_to_dict(notebook)
+        except Exception as e:
+            logger.error(f"Failed to get migration notebook for {project_id}: {e}")
+            return None
 
     # =========================================================================
     # Project Stats
@@ -350,6 +419,8 @@ class ProjectManager:
             "user_id": str(project.user_id),
             "name": project.name,
             "description": project.description or "",
+            "project_type": project.project_type or "code",
+            "parent_project_id": str(project.parent_project_id) if project.parent_project_id else None,
             "primary_language": project.primary_language,
             "languages": project.languages or [],
             "file_count": project.file_count or 0,

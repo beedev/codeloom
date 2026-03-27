@@ -1,7 +1,8 @@
 """Code Ingestion Service.
 
-Orchestrates: upload/clone/path → extract → AST parse → chunk → embed → store.
-Supports zip upload, git clone, and local directory ingestion.
+Orchestrates: upload/clone/path -> extract -> AST parse -> chunk -> embed -> store.
+Supports zip upload, git clone, local directory ingestion, and document ingestion
+for knowledge projects.
 """
 
 import hashlib
@@ -45,7 +46,7 @@ class IngestionResult:
 
 
 class CodeIngestionService:
-    """Orchestrates code ingestion: source → parse → chunk → embed → store."""
+    """Orchestrates code ingestion: source -> parse -> chunk -> embed -> store."""
 
     def __init__(
         self,
@@ -214,6 +215,133 @@ class CodeIngestionService:
         self._log_result(result)
         return result
 
+    def ingest_document(
+        self,
+        file_path: str,
+        file_name: str,
+        project_id: str,
+    ) -> IngestionResult:
+        """Ingest a single document for a knowledge project.
+
+        Reads the document with DocumentReader, chunks with SentenceSplitter,
+        embeds, and stores in pgvector. No AST parsing, no code_units, no ASG.
+
+        Also creates a code_files row so the document appears in the /files
+        endpoint listing.
+
+        Args:
+            file_path: Path to the document file on disk (temp file)
+            file_name: Original filename (for metadata)
+            project_id: UUID of the knowledge project
+
+        Returns:
+            IngestionResult with chunk/embedding counts
+        """
+        start = time.time()
+        result = IngestionResult(project_id=project_id)
+
+        try:
+            # Read document content
+            from .ingestion import DocumentReader
+            reader = DocumentReader()
+            text_content = reader.read(file_path)
+
+            if not text_content or not text_content.strip():
+                result.errors.append(f"No text extracted from {file_name}")
+                result.elapsed_seconds = time.time() - start
+                return result
+
+            logger.info(f"Extracted {len(text_content)} chars from {file_name}")
+
+            # Chunk with SentenceSplitter
+            from llama_index.core import Document, Settings as LISettings
+            from llama_index.core.node_parser import SentenceSplitter
+
+            document = Document(
+                text=text_content.strip(),
+                metadata={
+                    "file_name": file_name,
+                    "project_id": project_id,
+                    "source_type": "knowledge",
+                },
+            )
+
+            splitter = SentenceSplitter(chunk_size=1024, chunk_overlap=128)
+            nodes = splitter.get_nodes_from_documents([document])
+
+            if not nodes:
+                result.errors.append(f"No chunks created from {file_name}")
+                result.elapsed_seconds = time.time() - start
+                return result
+
+            result.chunks_created = len(nodes)
+            result.files_processed = 1
+            logger.info(f"Created {len(nodes)} chunks from {file_name}")
+
+            # Stamp metadata on all nodes
+            for node in nodes:
+                node.metadata["project_id"] = project_id
+                node.metadata["file_name"] = file_name
+                node.metadata["source_type"] = "knowledge"
+                node.metadata["tree_level"] = 0  # leaf node for RAPTOR compatibility
+
+            # Embed
+            embed_model = LISettings.embed_model
+            texts = [node.get_content() for node in nodes]
+            BATCH_SIZE = 100
+            all_embeddings = []
+            for i in range(0, len(texts), BATCH_SIZE):
+                batch = texts[i : i + BATCH_SIZE]
+                batch_embeddings = embed_model.get_text_embedding_batch(batch)
+                all_embeddings.extend(batch_embeddings)
+                logger.info(
+                    f"Embedded batch {i // BATCH_SIZE + 1}/"
+                    f"{(len(texts) + BATCH_SIZE - 1) // BATCH_SIZE}"
+                )
+
+            for node, embedding in zip(nodes, all_embeddings):
+                node.embedding = embedding
+
+            # Store in pgvector
+            logger.info(f"Storing {len(nodes)} embeddings for knowledge project {project_id}")
+            self._vector_store.add_nodes(nodes, project_id=project_id)
+            result.embeddings_stored = len(nodes)
+
+            # Create a code_files row so the /files endpoint lists this document
+            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            with open(file_path, "rb") as fh:
+                file_hash = hashlib.md5(fh.read()).hexdigest()
+
+            ext = os.path.splitext(file_name)[1].lower().lstrip(".")
+            doc_language = ext if ext else "document"
+
+            with self._db.get_session() as session:
+                code_file = CodeFile(
+                    file_id=UUID(str(uuid4())),
+                    project_id=UUID(project_id),
+                    file_path=file_name,
+                    language=doc_language,
+                    file_hash=file_hash,
+                    line_count=0,
+                    size_bytes=file_size,
+                )
+                session.add(code_file)
+
+            # Update project file_count (accumulate across multiple uploads)
+            self._increment_knowledge_file_count(project_id, file_name, len(nodes))
+
+            logger.info(
+                f"Knowledge ingestion complete: {file_name} -> "
+                f"{result.chunks_created} chunks, {result.embeddings_stored} embeddings"
+            )
+
+        except Exception as e:
+            logger.error(f"Knowledge ingestion failed for {file_name}: {e}")
+            result.errors.append(str(e))
+
+        result.elapsed_seconds = time.time() - start
+        return result
+
     # ── Core ingestion logic ─────────────────────────────────────────────
 
     def _ingest_directory(
@@ -222,7 +350,7 @@ class CodeIngestionService:
         project_id: str,
         user_id: str,
     ) -> IngestionResult:
-        """Core ingestion: walk directory → parse → chunk → embed → store.
+        """Core ingestion: walk directory -> parse -> chunk -> embed -> store.
 
         Shared by ingest_zip, ingest_git, and ingest_local.
 
@@ -356,7 +484,7 @@ class CodeIngestionService:
         project_id: str,
         result: IngestionResult,
     ):
-        """Process a single file: parse → enrich → store records → chunk.
+        """Process a single file: parse -> enrich -> store records -> chunk.
 
         Returns:
             Tuple of (nodes, line_count, language) or None if skipped
@@ -376,7 +504,7 @@ class CodeIngestionService:
                 enricher = SemanticEnricher()
                 enricher.enrich_units(parse_result.units, source_text, parse_result.language)
 
-                # Bridge enrichment (JavaParser / Roslyn) — graceful if unavailable
+                # Bridge enrichment (JavaParser / Roslyn) -- graceful if unavailable
                 self._run_bridge_enrichment(file_path, parse_result.units, parse_result.language)
         except Exception as e:
             logger.warning(f"Semantic enrichment failed for {file_path}: {e}")
@@ -540,6 +668,28 @@ class CodeIngestionService:
                     project.repo_branch = repo_branch
         except Exception as e:
             logger.error(f"Failed to update project source: {e}")
+
+    def _increment_knowledge_file_count(
+        self,
+        project_id: str,
+        file_name: str,
+        chunk_count: int,
+    ):
+        """Increment file_count for a knowledge project after document upload."""
+        try:
+            with self._db.get_session() as session:
+                project = session.query(Project).filter(
+                    Project.project_id == UUID(project_id)
+                ).first()
+                if project:
+                    project.file_count = (project.file_count or 0) + 1
+                    project.last_synced_at = datetime.utcnow()
+                    logger.info(
+                        f"Knowledge project {project_id}: added {file_name} "
+                        f"({chunk_count} chunks, total files: {project.file_count})"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to update knowledge project stats: {e}")
 
     def _log_result(self, result: IngestionResult):
         """Log ingestion result summary."""

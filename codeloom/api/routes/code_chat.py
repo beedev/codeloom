@@ -40,14 +40,32 @@ When answering questions about code:
 CONCISE_INSTRUCTION = "\nBe concise. Give short, direct answers. Skip lengthy explanations unless asked."
 
 
+RESPONSE_FORMAT_INSTRUCTIONS = {
+    "analytical": "\nProvide a thorough analytical response. Structure your answer with clear sections, evidence, and reasoning.",
+    "brief": "\nBe brief and direct. Answer in 2-3 sentences maximum unless more detail is essential.",
+    "detailed": "\nProvide a comprehensive, detailed answer with examples and thorough explanations.",
+}
+
+
 def _apply_request_settings(data: "ChatRequest", system_prompt: str) -> str:
-    """Apply per-request settings (temperature, response_type) and return adjusted prompt."""
+    """Apply per-request settings (temperature, response_type, response_format) and return adjusted prompt."""
     if data.temperature is not None:
         Settings.llm.temperature = data.temperature
+
+    # response_format takes precedence over legacy response_type
+    if data.response_format and data.response_format in RESPONSE_FORMAT_INSTRUCTIONS:
+        return system_prompt + RESPONSE_FORMAT_INSTRUCTIONS[data.response_format]
 
     if data.response_type == "concise":
         return system_prompt + CONCISE_INSTRUCTION
     return system_prompt
+
+
+def _effective_top_k(data: "ChatRequest") -> int:
+    """Return the effective top_k: explicit top_k overrides max_sources."""
+    if data.top_k is not None:
+        return max(1, min(data.top_k, 20))  # clamp 1-20
+    return data.max_sources
 
 
 class ChatRequest(BaseModel):
@@ -59,6 +77,15 @@ class ChatRequest(BaseModel):
     temperature: float | None = None
     response_type: str = "detailed"  # "detailed" | "concise"
     mode: str = "chat"  # "chat" | "impact"
+    # Query options (knowledge project + advanced code chat)
+    model: str | None = None           # LLM model override
+    reranker_enabled: bool | None = None  # toggle reranking
+    response_format: str | None = None  # analytical|detailed|brief|default
+    top_k: int | None = None            # retrieval result count (overrides max_sources)
+
+
+# ── Project-wide analysis types (no entity resolution needed) ─────────
+_PROJECT_WIDE_TYPES = {"dead_code", "complexity", "module_deps"}
 
 
 @router.post("/projects/{project_id}/chat")
@@ -90,7 +117,7 @@ async def code_chat(
     project = pm.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    if project.get("ast_status") not in ("complete",):
+    if project.get("ast_status") not in ("complete", "not_applicable"):
         raise HTTPException(
             status_code=400,
             detail=f"Project not ready for chat (status: {project.get('ast_status')})",
@@ -122,7 +149,7 @@ async def code_chat(
             vector_store=pipeline._vector_store,
             retriever_factory=pipeline._engine._retriever,
             llm=Settings.llm,
-            top_k=data.max_sources,
+            top_k=_effective_top_k(data),
         )
 
     # ASG expansion: enrich results with graph neighbors before context building
@@ -140,28 +167,39 @@ async def code_chat(
         except Exception as e:
             logger.warning(f"ASG expansion failed, using base results: {e}")
 
-    # Relationship query detection — runs before impact detection
+    # Relationship query detection -- runs before impact detection
     relationship_context = ""
     relationship_intent = None
     if project.get("asg_status") == "complete":
         relationship_intent = _detect_relationship_intent(data.query)
         if relationship_intent:
             try:
-                resolved = _resolve_entity(db_manager, project_id, relationship_intent["entity_name"])
-                if resolved:
+                rel_type = relationship_intent["relation_type"]
+                if rel_type in _PROJECT_WIDE_TYPES:
+                    # Project-wide queries skip entity resolution
                     relationship_context, _ = _build_relationship_context(
-                        db_manager, project_id, relationship_intent, resolved
+                        db_manager, project_id, relationship_intent, resolved_units=None
                     )
                     logger.info(
-                        "Relationship query: type=%s entity=%s resolved=%d",
-                        relationship_intent["relation_type"],
-                        relationship_intent["entity_name"],
-                        len(resolved),
+                        "Project-wide analysis query: type=%s",
+                        rel_type,
                     )
+                else:
+                    resolved = _resolve_entity(db_manager, project_id, relationship_intent["entity_name"])
+                    if resolved:
+                        relationship_context, _ = _build_relationship_context(
+                            db_manager, project_id, relationship_intent, resolved
+                        )
+                        logger.info(
+                            "Relationship query: type=%s entity=%s resolved=%d",
+                            relationship_intent["relation_type"],
+                            relationship_intent["entity_name"],
+                            len(resolved),
+                        )
             except Exception as e:
                 logger.warning(f"Relationship context building failed: {e}")
 
-    # Blast radius detection — skip if relationship intent already handled
+    # Blast radius detection -- skip if relationship intent already handled
     run_impact = (
         not relationship_intent
         and (data.mode == "impact" or _detect_impact_intent(data.query))
@@ -266,9 +304,9 @@ async def code_chat_stream(
     """SSE streaming code chat endpoint.
 
     Emits events in order:
-      1. type=sources  — list of source citations
-      2. type=content  — streaming LLM response chunks
-      3. type=done     — final metadata
+      1. type=sources  -- list of source citations
+      2. type=content  -- streaming LLM response chunks
+      3. type=done     -- final metadata
     """
     from codeloom.core.stateless import (
         fast_retrieve,
@@ -284,6 +322,11 @@ async def code_chat_stream(
     project = pm.get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("ast_status") not in ("complete", "not_applicable"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project not ready for chat (status: {project.get('ast_status')})",
+        )
 
     user_id = data.user_id or user["user_id"]
     session_id = data.session_id or generate_session_id()
@@ -315,7 +358,7 @@ async def code_chat_stream(
                     vector_store=pipeline._vector_store,
                     retriever_factory=pipeline._engine._retriever,
                     llm=Settings.llm,
-                    top_k=data.max_sources,
+                    top_k=_effective_top_k(data),
                 )
 
             # ASG expansion
@@ -333,7 +376,7 @@ async def code_chat_stream(
                 except Exception as e:
                     logger.warning(f"ASG expansion failed, using base results: {e}")
 
-            # Relationship query detection — runs before impact detection
+            # Relationship query detection -- runs before impact detection
             relationship_context = ""
             relationship_data = None
             relationship_intent = None
@@ -341,17 +384,28 @@ async def code_chat_stream(
                 relationship_intent = _detect_relationship_intent(data.query)
                 if relationship_intent:
                     try:
-                        resolved = _resolve_entity(db_manager, project_id, relationship_intent["entity_name"])
-                        if resolved:
+                        rel_type = relationship_intent["relation_type"]
+                        if rel_type in _PROJECT_WIDE_TYPES:
+                            # Project-wide queries skip entity resolution
                             relationship_context, relationship_data = _build_relationship_context(
-                                db_manager, project_id, relationship_intent, resolved
+                                db_manager, project_id, relationship_intent, resolved_units=None
                             )
                             logger.info(
-                                "Relationship query: type=%s entity=%s resolved=%d",
-                                relationship_intent["relation_type"],
-                                relationship_intent["entity_name"],
-                                len(resolved),
+                                "Project-wide analysis query: type=%s",
+                                rel_type,
                             )
+                        else:
+                            resolved = _resolve_entity(db_manager, project_id, relationship_intent["entity_name"])
+                            if resolved:
+                                relationship_context, relationship_data = _build_relationship_context(
+                                    db_manager, project_id, relationship_intent, resolved
+                                )
+                                logger.info(
+                                    "Relationship query: type=%s entity=%s resolved=%d",
+                                    relationship_intent["relation_type"],
+                                    relationship_intent["entity_name"],
+                                    len(resolved),
+                                )
                     except Exception as e:
                         logger.warning(f"Relationship context building failed: {e}")
 
@@ -359,7 +413,7 @@ async def code_chat_stream(
             if relationship_data:
                 yield f"data: {json.dumps({'type': 'relationships', 'relationships': relationship_data})}\n\n"
 
-            # Blast radius detection — skip if relationship intent already handled
+            # Blast radius detection -- skip if relationship intent already handled
             run_impact = (
                 not relationship_intent
                 and (data.mode == "impact" or _detect_impact_intent(data.query))
@@ -479,9 +533,9 @@ def _detect_impact_intent(query: str) -> bool:
 # ── Relationship intent detection ──────────────────────────────────────
 
 # Entity name: backtick-wrapped, quoted, or a code-like identifier
-# (camelCase, PascalCase, snake_case, dot.separated — excludes common English words)
+# (camelCase, PascalCase, snake_case, dot.separated -- excludes common English words)
 _RELATIONSHIP_INTENT_PROMPT = """\
-You are a code relationship intent classifier. Given a user's chat query about a codebase, determine if they are asking about a specific code relationship.
+You are a code relationship intent classifier. Given a user's chat query about a codebase, determine if they are asking about a specific code relationship or analysis.
 
 Relation types:
 - callers: who/what calls a function/method
@@ -492,8 +546,19 @@ Relation types:
 - implementors: what classes implement an interface
 - call_chain: path/chain from one function to another
 
+Additional analysis types:
+- all_callers: "show all callers of X transitively", "who calls X recursively", "full caller tree"
+- all_callees: "what does X call transitively", "full call tree of X", "everything X calls"
+- dead_code: "find dead code", "unused functions", "unreachable code", "functions with no callers"
+- complexity: "most complex functions", "complexity report", "cyclomatic complexity", "longest functions"
+- decorators: "functions with @X", "methods annotated with X", "find @Override", "uses @Transactional"
+- module_deps: "module dependencies", "file dependencies", "which modules depend on X", "directory dependency graph"
+
+For dead_code, complexity, and module_deps: entity_name can be "ALL" (project-wide scan).
+For decorators: entity_name is the decorator name (e.g., "Override", "Transactional", "app.route").
+
 Respond with EXACTLY one line in this format:
-- If relationship query: RELATION|entity_name|relation_type|target_name_or_NONE
+- If relationship/analysis query: RELATION|entity_name|relation_type|target_name_or_NONE
 - If NOT a relationship query: NONE
 
 Examples:
@@ -514,6 +579,27 @@ RELATION|AuthMiddleware|dependents|NONE
 
 Query: "What inherits from BaseModel?"
 RELATION|BaseModel|inheritors|NONE
+
+Query: "Show all transitive callers of processOrder"
+RELATION|processOrder|all_callers|NONE
+
+Query: "What does main call recursively?"
+RELATION|main|all_callees|NONE
+
+Query: "Find dead code in the project"
+RELATION|ALL|dead_code|NONE
+
+Query: "Show me the most complex functions"
+RELATION|ALL|complexity|NONE
+
+Query: "Find all functions with @Override"
+RELATION|Override|decorators|NONE
+
+Query: "Show module dependencies"
+RELATION|ALL|module_deps|NONE
+
+Query: "Which functions are annotated with @Transactional?"
+RELATION|Transactional|decorators|NONE
 
 Query: "explain the auth flow"
 NONE
@@ -555,14 +641,23 @@ def _detect_relationship_intent(query: str) -> dict | None:
 
     _, entity_name, relation_type, target_raw = parts[0], parts[1], parts[2], parts[3]
 
-    valid_types = {"callers", "callees", "dependencies", "dependents",
-                   "inheritors", "implementors", "call_chain"}
+    valid_types = {
+        "callers", "callees", "dependencies", "dependents",
+        "inheritors", "implementors", "call_chain",
+        # Extended analysis types
+        "all_callers", "all_callees",
+        "dead_code", "complexity", "decorators", "module_deps",
+    }
     if relation_type not in valid_types:
         return None
 
     entity_name = entity_name.strip().strip("`'\"")
     if not entity_name:
         return None
+
+    # Project-wide queries don't need a specific entity name
+    if relation_type in _PROJECT_WIDE_TYPES:
+        entity_name = entity_name or "ALL"
 
     target_name = None
     if target_raw.strip() not in ("NONE", ""):
@@ -573,6 +668,9 @@ def _detect_relationship_intent(query: str) -> dict | None:
         "dependencies": 2, "dependents": 2,
         "inheritors": 3, "implementors": 1,
         "call_chain": 10,
+        "all_callers": 5, "all_callees": 5,
+        "dead_code": 1, "complexity": 1,
+        "decorators": 1, "module_deps": 1,
     }
 
     return {
@@ -581,8 +679,6 @@ def _detect_relationship_intent(query: str) -> dict | None:
         "depth": depth_map.get(relation_type, 2),
         "target_name": target_name if relation_type == "call_chain" else None,
     }
-
-    return None
 
 
 def _resolve_entity(
@@ -658,9 +754,12 @@ def _build_relationship_context(
     db_manager,
     project_id: str,
     intent: dict,
-    resolved_units: list[dict],
+    resolved_units: list[dict] | None,
 ) -> tuple[str, list[dict]]:
     """Build LLM context from ASG graph traversal for a relationship query.
+
+    For project-wide queries (dead_code, complexity, module_deps), resolved_units
+    can be None. For entity-specific queries, resolved_units must be provided.
 
     Returns (markdown_context, structured_data).
     """
@@ -675,6 +774,14 @@ def _build_relationship_context(
     sections: list[str] = []
     structured: list[dict] = []
 
+    # ── Extended analysis types (new) ─────────────────────────────────
+    if rel_type in ("all_callers", "all_callees", "dead_code", "complexity",
+                     "decorators", "module_deps"):
+        return _build_extended_analysis_context(
+            db_manager, project_id, intent, resolved_units
+        )
+
+    # ── Original relationship types ───────────────────────────────────
     # Map relation_type to query function + direction label
     query_map = {
         "callers": (get_callers, "Callers of"),
@@ -693,7 +800,7 @@ def _build_relationship_context(
         else:
             target_units = []
 
-        for src in resolved_units[:3]:
+        for src in (resolved_units or [])[:3]:
             for tgt in target_units[:3]:
                 try:
                     path = find_call_path(
@@ -706,9 +813,9 @@ def _build_relationship_context(
                     path = None
 
                 if path:
-                    section = f"### Call Path: `{src['name']}` → `{tgt['name']}`\n\n"
+                    section = f"### Call Path: `{src['name']}` -> `{tgt['name']}`\n\n"
                     for i, step in enumerate(path, 1):
-                        prefix = "   ↓ calls\n" if i > 1 else ""
+                        prefix = "   -> calls\n" if i > 1 else ""
                         loc = f", {step.get('language', '')}" if step.get('language') else ""
                         section += f"{prefix}{i}. `{step['qualified_name'] or step['name']}()` ({step['unit_type']}{loc})\n"
                     section += f"\nPath length: {len(path)} hops\n"
@@ -741,7 +848,7 @@ def _build_relationship_context(
         elif rel_type == "implementors":
             edge_filter = "implements"
 
-        for unit in resolved_units[:5]:
+        for unit in (resolved_units or [])[:5]:
             try:
                 results = query_fn(db_manager, project_id, unit["unit_id"], depth=depth)
             except Exception as e:
@@ -794,6 +901,234 @@ def _build_relationship_context(
         return "", []
 
     header = "## Code Relationship Analysis\n\n"
+    return header + "\n".join(sections), structured
+
+
+def _build_extended_analysis_context(
+    db_manager,
+    project_id: str,
+    intent: dict,
+    resolved_units: list[dict] | None,
+) -> tuple[str, list[dict]]:
+    """Build LLM context for extended analysis types.
+
+    Handles: all_callers, all_callees, dead_code, complexity, decorators, module_deps.
+
+    Returns (markdown_context, structured_data).
+    """
+    # Import with fallback -- these functions are in the same queries module
+    try:
+        from codeloom.core.asg_builder.queries import (
+            get_all_callers, get_all_callees, get_dead_code,
+            get_complexity_report, find_units_by_decorator,
+            get_module_dependency_graph,
+        )
+    except ImportError:
+        logger.warning("Extended ASG query functions not available")
+        return "Extended analysis queries are not available in this version.", []
+
+    rel_type = intent["relation_type"]
+    depth = intent["depth"]
+    sections: list[str] = []
+    structured: list[dict] = []
+
+    if rel_type == "all_callers":
+        if not resolved_units:
+            return "Could not resolve entity for transitive caller analysis.", []
+
+        for unit in resolved_units[:3]:
+            try:
+                data = get_all_callers(
+                    db_manager, project_id, unit["unit_id"], max_depth=depth
+                )
+            except Exception as e:
+                logger.debug(f"Transitive callers lookup failed for {unit['name']}: {e}")
+                continue
+
+            results = data.get("results", [])
+            total = data.get("total", 0)
+            max_depth_reached = data.get("max_depth_reached", 0)
+
+            section = (
+                f"### Transitive Callers of `{unit['name']}` "
+                f"({unit['unit_type']} in {unit['file_path']})\n\n"
+                f"Found {total} callers across {max_depth_reached} depth levels:\n\n"
+            )
+            for r in results[:30]:
+                qual = r.get("qualified_name", r["name"])
+                fp = r.get("file_path", "")
+                section += f"  [{r.get('depth', '?')}] `{qual}` ({fp})\n"
+            if total > 30:
+                section += f"\n  ... and {total - 30} more\n"
+
+            sections.append(section)
+            structured.append({
+                "type": "all_callers",
+                "unit_name": unit["name"],
+                "total": total,
+                "max_depth_reached": max_depth_reached,
+                "results": results[:30],
+            })
+
+    elif rel_type == "all_callees":
+        if not resolved_units:
+            return "Could not resolve entity for transitive callee analysis.", []
+
+        for unit in resolved_units[:3]:
+            try:
+                data = get_all_callees(
+                    db_manager, project_id, unit["unit_id"], max_depth=depth
+                )
+            except Exception as e:
+                logger.debug(f"Transitive callees lookup failed for {unit['name']}: {e}")
+                continue
+
+            results = data.get("results", [])
+            total = data.get("total", 0)
+            max_depth_reached = data.get("max_depth_reached", 0)
+
+            section = (
+                f"### Transitive Callees of `{unit['name']}` "
+                f"({unit['unit_type']} in {unit['file_path']})\n\n"
+                f"Found {total} callees across {max_depth_reached} depth levels:\n\n"
+            )
+            for r in results[:30]:
+                qual = r.get("qualified_name", r["name"])
+                fp = r.get("file_path", "")
+                section += f"  [{r.get('depth', '?')}] `{qual}` ({fp})\n"
+            if total > 30:
+                section += f"\n  ... and {total - 30} more\n"
+
+            sections.append(section)
+            structured.append({
+                "type": "all_callees",
+                "unit_name": unit["name"],
+                "total": total,
+                "max_depth_reached": max_depth_reached,
+                "results": results[:30],
+            })
+
+    elif rel_type == "dead_code":
+        try:
+            data = get_dead_code(db_manager, project_id, limit=30)
+        except Exception as e:
+            logger.debug(f"Dead code scan failed: {e}")
+            return "Dead code analysis encountered an error.", []
+
+        section = f"### Potentially Dead Code ({len(data)} functions with no callers)\n\n"
+        for r in data:
+            qual = r.get("qualified_name", r["name"])
+            fp = r.get("file_path", "")
+            sl = r.get("start_line", "?")
+            section += f"  - `{qual}` in {fp}:{sl}\n"
+
+        if not data:
+            section += "No potentially dead functions found.\n"
+
+        sections.append(section)
+        structured.append({
+            "type": "dead_code",
+            "total": len(data),
+            "results": data,
+        })
+
+    elif rel_type == "complexity":
+        try:
+            data = get_complexity_report(db_manager, project_id, sort="desc", limit=20)
+        except Exception as e:
+            logger.debug(f"Complexity report failed: {e}")
+            return "Complexity analysis encountered an error.", []
+
+        section = "### Most Complex Functions\n\n"
+        for r in data:
+            name = r.get("name", "?")
+            fp = r.get("file_path", "")
+            complexity = r.get("complexity", 0)
+            line_count = r.get("line_count", 0)
+            branch_count = r.get("branch_count", 0)
+            section += (
+                f"  - `{name}` ({fp}) -- "
+                f"complexity: {complexity} "
+                f"(lines: {line_count}, branches: {branch_count})\n"
+            )
+
+        if not data:
+            section += "No functions found for complexity analysis.\n"
+
+        sections.append(section)
+        structured.append({
+            "type": "complexity",
+            "total": len(data),
+            "results": data,
+        })
+
+    elif rel_type == "decorators":
+        decorator_name = intent.get("entity_name", "")
+        if not decorator_name or decorator_name == "ALL":
+            return "Please specify a decorator name (e.g., 'find functions with @Override').", []
+
+        try:
+            data = find_units_by_decorator(
+                db_manager, project_id, decorator_name, limit=30
+            )
+        except Exception as e:
+            logger.debug(f"Decorator search failed: {e}")
+            return "Decorator search encountered an error.", []
+
+        section = f"### Functions/Methods with @{decorator_name}\n\n"
+        for r in data:
+            qual = r.get("qualified_name", r["name"])
+            fp = r.get("file_path", "")
+            sl = r.get("start_line", "?")
+            section += f"  - `{qual}` ({fp}:{sl})\n"
+
+        if not data:
+            section += f"No functions/methods found with @{decorator_name}.\n"
+
+        sections.append(section)
+        structured.append({
+            "type": "decorators",
+            "decorator": decorator_name,
+            "total": len(data),
+            "results": data,
+        })
+
+    elif rel_type == "module_deps":
+        try:
+            data = get_module_dependency_graph(
+                db_manager, project_id, level="directory"
+            )
+        except Exception as e:
+            logger.debug(f"Module dependency graph failed: {e}")
+            return "Module dependency analysis encountered an error.", []
+
+        links = data.get("links", [])
+        nodes = data.get("nodes", [])
+
+        section = f"### Module Dependencies (directory level, {len(nodes)} modules)\n\n"
+        for link in links[:30]:
+            section += (
+                f"  {link['source']} -> {link['target']} "
+                f"(weight: {link['weight']})\n"
+            )
+        if len(links) > 30:
+            section += f"\n  ... and {len(links) - 30} more edges\n"
+
+        if not links:
+            section += "No inter-module dependencies found.\n"
+
+        sections.append(section)
+        structured.append({
+            "type": "module_deps",
+            "total_modules": len(nodes),
+            "total_links": len(links),
+            "links": links[:30],
+        })
+
+    if not sections:
+        return "", []
+
+    header = "## Code Analysis Results\n\n"
     return header + "\n".join(sections), structured
 
 
@@ -928,7 +1263,7 @@ def _build_blast_radius_context(
 
     Phase 1: Collect retrieval roots from retrieval results.
     Phase 2: Expand roots via implements/inherits edges (ASG-based).
-    Phase 3: Multi-root traversal — get_dependents for all roots.
+    Phase 3: Multi-root traversal -- get_dependents for all roots.
     Phase 4: Build enriched LLM context with relationship graph.
 
     Returns (markdown_context, structured_impact_list).
@@ -936,7 +1271,7 @@ def _build_blast_radius_context(
     from codeloom.core.asg_builder.queries import get_dependents, get_dependencies
     from collections import defaultdict
 
-    # ── Phase 1: Collect retrieval roots ──────────────────────────────
+    # -- Phase 1: Collect retrieval roots --------------------------------
     roots: dict[str, dict] = {}  # unit_id -> {name, file_path, source}
     seen_names: set[str] = set()
 
@@ -955,7 +1290,7 @@ def _build_blast_radius_context(
             "source": "retrieval",
         }
 
-    # ── Phase 1b: Resolve parent classes for method-level units ─────────
+    # -- Phase 1b: Resolve parent classes for method-level units ----------
     # Retrieval often returns methods; implements/inherits edges live on the class.
     # Walk up via incoming 'contains' edge to find the parent class.
     parent_roots: dict[str, dict] = {}
@@ -981,7 +1316,7 @@ def _build_blast_radius_context(
     # Merge parent classes into roots (they get full traversal)
     roots.update(parent_roots)
 
-    # ── Phase 2: ASG-based root expansion ─────────────────────────────
+    # -- Phase 2: ASG-based root expansion --------------------------------
     expanded: dict[str, dict] = {}
     relationship_lines: list[str] = []
 
@@ -1020,7 +1355,7 @@ def _build_blast_radius_context(
         len(roots), len(all_roots) - len(roots),
     )
 
-    # ── Phase 3: Multi-root traversal ─────────────────────────────────
+    # -- Phase 3: Multi-root traversal ------------------------------------
     # Get total file count for impact score normalization
     total_files = 1
     try:
@@ -1138,7 +1473,7 @@ def _build_blast_radius_context(
     if not sections:
         return "", impact_list
 
-    # ── Phase 4: Enriched LLM context ─────────────────────────────────
+    # -- Phase 4: Enriched LLM context ------------------------------------
     asg_context = ""
     if relationship_lines or topology_lines:
         asg_parts = ["## ASG Context for Impact Analysis\n"]

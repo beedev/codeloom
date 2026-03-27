@@ -134,16 +134,24 @@ function parseAccuracyMarkdown(md: string): ParsedProgram[] {
     for (const bl of blockLines) {
       if (/^\*\*Bugs:\*\*/.test(bl)) { inBugs = true; continue; }
       if (/^\*\*Notes?:\*\*|^\*\*Fix:/.test(bl)) { inBugs = false; continue; }
-      if (!inBugs || !bl.startsWith('-')) continue;
+      if (!inBugs || !bl.startsWith('- ')) continue;  // '- ' not just '-' (excludes --- hr)
 
-      const isFixed = bl.includes('~~') || bl.includes('✅ **FIXED**');
-      const rawText = bl
-        .replace(/^-\s+~~/, '').replace(/~~$/, '')
-        .replace(/^-\s+/, '').replace(/\*\*/g, '').replace(/`/g, '').trim();
+      const isFixed = bl.includes('~~') || bl.includes('FIXED');
+      // Strip markdown: leading "- ", strikethrough ~~...~~, bold **, backticks, FIXED marker
+      let rawText = bl.replace(/^-\s+/, '').trim();
+      // Remove strikethrough wrapper: ~~content~~ suffix
+      rawText = rawText.replace(/^~~(.+?)~~.*$/, '$1').trim();
+      // Remove bold markers but preserve asterisks inside parens like (1500-*)
+      rawText = rawText.replace(/\*\*([^*]*)\*\*/g, '$1');
+      rawText = rawText.replace(/`/g, '').trim();
+      // Remove trailing FIXED markers
+      rawText = rawText.replace(/✅\s*FIXED\s*$/, '').trim();
       const sevMatch = rawText.match(/^\[(\w+)\]/);
       const severity = sevMatch ? sevMatch[1] : null;
       const displayText = rawText.replace(/^\[\w+\]\s*/, '').trim();
-      bugs.push({ raw: displayText, isFixed, severity });
+      if (displayText || rawText) {
+        bugs.push({ raw: displayText || rawText, isFixed, severity });
+      }
     }
 
     const notes: string[] = [];
@@ -476,11 +484,16 @@ export function AccuracyPanel({ planId, selectedMvpName }: AccuracyPanelProps) {
 
   // Auto-open program details and expand all when an MVP is selected
   useEffect(() => {
-    if (selectedMvpName && filteredPrograms.length > 0) {
-      setDetailsOpen(true);
-      setExpandedIds(new Set(filteredPrograms.map(p => p.id)));
+    if (selectedMvpName && programs.length > 0) {
+      const filtered = programs.filter(p =>
+        p.mvpSection.toLowerCase().includes(selectedMvpName.toLowerCase())
+      );
+      if (filtered.length > 0) {
+        setDetailsOpen(true);
+        setExpandedIds(new Set(filtered.map(p => p.id)));
+      }
     }
-  }, [selectedMvpName]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedMvpName, programs]);
 
   useEffect(() => {
     let cancelled = false;

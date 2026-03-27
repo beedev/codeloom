@@ -2,7 +2,7 @@
 
 Adds structured type info to CodeUnit.metadata without modifying existing
 fields. Extracts parsed_params, return_type, modifiers, is_async,
-is_override, is_abstract from tree-sitter AST nodes.
+is_override, is_abstract, cyclomatic_complexity from tree-sitter AST nodes.
 
 Also extracts field declarations from class/interface/struct bodies to
 populate metadata["fields"] for type_dep edge detection in the ASG builder.
@@ -30,6 +30,43 @@ class SemanticEnricher:
 
     # Languages this enricher knows how to process
     _SUPPORTED = frozenset({"java", "csharp", "python", "typescript"})
+
+    # Branching node types per language for cyclomatic complexity
+    _BRANCH_TYPES = {
+        "python": frozenset({
+            "if_statement", "elif_clause", "for_statement", "while_statement",
+            "except_clause", "with_statement", "conditional_expression",
+            "list_comprehension", "set_comprehension", "dictionary_comprehension",
+            "generator_expression",
+        }),
+        "java": frozenset({
+            "if_statement", "for_statement", "enhanced_for_statement",
+            "while_statement", "do_statement", "catch_clause",
+            "switch_expression", "ternary_expression",
+        }),
+        "csharp": frozenset({
+            "if_statement", "for_statement", "for_each_statement",
+            "while_statement", "do_statement", "catch_clause",
+            "switch_section", "conditional_expression",
+        }),
+        "typescript": frozenset({
+            "if_statement", "for_statement", "for_in_statement",
+            "while_statement", "do_statement", "catch_clause",
+            "switch_case", "ternary_expression",
+        }),
+        "javascript": frozenset({
+            "if_statement", "for_statement", "for_in_statement",
+            "while_statement", "do_statement", "catch_clause",
+            "switch_case", "ternary_expression",
+        }),
+    }
+
+    _BOOLEAN_OPS = frozenset({"&&", "||", "and", "or", "??"})
+
+    _NESTED_FUNC_TYPES = frozenset({
+        "function_definition", "function_declaration", "method_declaration",
+        "arrow_function", "lambda",
+    })
 
     def enrich_units(
         self,
@@ -107,6 +144,9 @@ class SemanticEnricher:
         elif language == "csharp":
             self._enrich_csharp(node, source, metadata)
 
+        # Cyclomatic complexity (all supported languages)
+        metadata["cyclomatic_complexity"] = self._compute_complexity(node, source, language)
+
     def _enrich_class_fields(
         self,
         unit: CodeUnit,
@@ -165,6 +205,40 @@ class SemanticEnricher:
 
         return self._dispatch_field_extraction(body, source_bytes, language)
 
+    def compute_complexity_from_source(
+        self,
+        source_text: str,
+        language: str,
+    ) -> int:
+        """Compute cyclomatic complexity from a callable unit's stored source.
+
+        Used by ASG builder to backfill complexity for existing units
+        without re-ingestion. Parses the source fragment, finds the
+        callable node, and computes McCabe complexity.
+
+        Returns:
+            McCabe cyclomatic complexity (>= 1), or 1 if parsing fails.
+        """
+        if language not in self._SUPPORTED:
+            return 1
+
+        source_bytes = source_text.encode("utf-8")
+        try:
+            ts_lang = self._get_language(language)
+        except Exception:
+            return 1
+
+        parser = tree_sitter.Parser(ts_lang)
+        tree = parser.parse(source_bytes)
+
+        target_types = self._declaration_types(language)
+        node = self._find_first_typed_node(tree.root_node, target_types)
+        if not node:
+            # Fallback: compute on root (the source may be just the body)
+            return self._compute_complexity(tree.root_node, source_bytes, language)
+
+        return self._compute_complexity(node, source_bytes, language)
+
     def _dispatch_field_extraction(
         self,
         body_node: tree_sitter.Node,
@@ -204,6 +278,56 @@ class SemanticEnricher:
                 if child.type == "class_body":
                     return child
         return None
+
+    # =========================================================================
+    # Cyclomatic complexity
+    # =========================================================================
+
+    def _compute_complexity(
+        self, root_node: tree_sitter.Node, source_bytes: bytes, language: str
+    ) -> int:
+        """McCabe cyclomatic complexity: 1 + count of branching nodes.
+
+        Counts branching statements (if, for, while, catch, ternary, etc.)
+        and boolean operators (&& || and or ??). Stops at nested function
+        boundaries to avoid double-counting.
+
+        Args:
+            root_node: tree-sitter AST node of the callable declaration
+            source_bytes: raw source bytes for text extraction
+            language: language identifier
+
+        Returns:
+            Integer complexity score (minimum 1)
+        """
+        lang_branches = self._BRANCH_TYPES.get(language, frozenset())
+        complexity = 1
+
+        def walk(node: tree_sitter.Node) -> None:
+            nonlocal complexity
+            for child in node.children:
+                # Don't descend into nested function definitions
+                if child.type in self._NESTED_FUNC_TYPES and child is not root_node:
+                    continue
+
+                if child.type in lang_branches:
+                    complexity += 1
+
+                # Count boolean operators as additional decision points
+                if child.type in ("binary_expression", "boolean_operator"):
+                    for gc in child.children:
+                        if not gc.is_named:
+                            token = source_bytes[gc.start_byte:gc.end_byte].decode(
+                                "utf-8", errors="replace"
+                            ).strip()
+                            if token in self._BOOLEAN_OPS:
+                                complexity += 1
+                                break
+
+                walk(child)
+
+        walk(root_node)
+        return complexity
 
     # =========================================================================
     # Python enrichment
@@ -472,9 +596,9 @@ class SemanticEnricher:
         """Extract type-annotated class variables from a Python class body.
 
         Handles:
-          x: int = 5      → {"name": "x", "type": "int"}
-          y: str           → {"name": "y", "type": "str"}
-          z = "hello"      → skipped (no type annotation)
+          x: int = 5      -> {"name": "x", "type": "int"}
+          y: str           -> {"name": "y", "type": "str"}
+          z = "hello"      -> skipped (no type annotation)
         """
         fields: List[Dict[str, Any]] = []
         for child in body_node.children:

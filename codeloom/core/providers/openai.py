@@ -22,6 +22,10 @@ class OpenAILLMProvider(LLMProvider):
     - O-series reasoning models (o1, o3, o4 - temperature must be 1)
     """
 
+    # Provider-specific default model (used when no LLM_MODEL env var is set
+    # and the caller selected the OpenAI provider).
+    DEFAULT_MODEL = "gpt-4.1"
+
     SUPPORTED_MODELS = {
         # GPT-4 series
         "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
@@ -71,7 +75,8 @@ class OpenAILLMProvider(LLMProvider):
     ):
         self._setting = setting or get_settings()
 
-        self._model = model or os.getenv("LLM_MODEL", "gpt-4.1")
+        # Model resolution: explicit arg > env var > provider-specific default
+        self._model = model or os.getenv("LLM_MODEL") or self.DEFAULT_MODEL
         self._api_key = api_key or os.getenv("OPENAI_API_KEY")
         self._temperature = temperature
         self._max_tokens = max_tokens

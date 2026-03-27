@@ -112,3 +112,15 @@ async def get_understanding_engine(request: Request):
             request.app.state.pipeline,
         )
     return request.app.state.understanding_engine
+
+
+async def get_reverse_engineering_service(request: Request):
+    """Get or create ReverseEngineeringService from app state."""
+    if not hasattr(request.app.state, '_reveng_service') or \
+       request.app.state._reveng_service is None:
+        from codeloom.core.reverse_engineering import ReverseEngineeringService
+        request.app.state._reveng_service = ReverseEngineeringService(
+            request.app.state.db_manager,
+            getattr(request.app.state, 'pipeline', None),
+        )
+    return request.app.state._reveng_service

@@ -440,12 +440,14 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
     const gn = node as GraphNode;
     // At Level 1, clicking a container drills into it
     if (!drillTarget && CONTAINER_TYPES.has(gn.unit_type)) {
+      console.log('[Graph] Drilling into:', gn.name, gn.unit_type);
       setDrillTarget(gn);
       setSelectedNode(null);
       selectedIdRef.current = null;
       setTimeout(() => graphRef.current?.zoomToFit(400, 40), 300);
       return;
     }
+    console.log('[Graph] Selecting:', gn.name, gn.unit_type, 'drillTarget:', drillTarget?.name ?? 'null');
     selectedIdRef.current = node.id;
     setSelectedNode(gn);
   }, [drillTarget]);

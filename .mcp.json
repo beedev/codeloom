@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codeloom": {
+      "type": "stdio",
+      "command": "/Users/bharath/Desktop/codeloom/venv/bin/python",
+      "args": ["-m", "codeloom.mcp"],
+      "cwd": "/Users/bharath/Desktop/codeloom",
+      "env": {
+        "DATABASE_URL": "postgresql://codeloom:codeloom@localhost:5432/codeloom_dev",
+        "PYTHONPATH": "/Users/bharath/Desktop/codeloom"
+      }
+    }
+  }
+}

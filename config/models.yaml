@@ -125,8 +125,8 @@ providers:
         context_window: 128000
 
 # Default model to select on startup (optional)
-default_model: "gpt-4.1"
-default_provider: "openai"
+default_model: "meta-llama/llama-4-maverick-17b-128e-instruct"
+default_provider: "groq"
 
 # ============================================
 # Reranker Models

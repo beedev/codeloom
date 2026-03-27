@@ -125,10 +125,30 @@ class LocalRAGModel:
             LLM model instance
         """
         setting = setting or get_settings()
-        model_name = model_name or setting.ollama.llm
 
-        # Detect provider using dynamically loaded model sets
-        if model_name in cls._get_openai_models():
+        # If no model specified, use centralized defaults for provider + model
+        if not model_name:
+            from codeloom.core.defaults import LLM_PROVIDER, LLM_MODEL
+            if LLM_MODEL:
+                model_name = LLM_MODEL
+            else:
+                model_name = setting.ollama.llm
+
+        # Detect provider: first check centralized default, then infer from model name
+        from codeloom.core.defaults import LLM_PROVIDER as _default_provider
+        if not model_name or model_name == setting.ollama.llm:
+            # No explicit model — use the configured provider
+            provider = _default_provider
+            # Get provider-specific default model if model_name is still generic
+            if provider == "groq" and model_name not in cls._get_groq_models():
+                model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+            elif provider == "openai" and model_name not in cls._get_openai_models():
+                model_name = "gpt-4.1"
+            elif provider == "claude" and model_name not in cls._get_claude_models():
+                model_name = "claude-3-5-sonnet-20241022"
+            elif provider == "gemini" and model_name not in cls._get_gemini_models():
+                model_name = "gemini-1.5-flash"
+        elif model_name in cls._get_openai_models():
             provider = "openai"
         elif model_name in cls._get_claude_models():
             provider = "claude"
@@ -137,7 +157,7 @@ class LocalRAGModel:
         elif model_name in cls._get_groq_models():
             provider = "groq"
         else:
-            provider = "ollama"
+            provider = _default_provider if _default_provider != "ollama" else "ollama"
 
         # Cache key includes provider and system prompt hash
         prompt_hash = hash(system_prompt) if system_prompt else "none"

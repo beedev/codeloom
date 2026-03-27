@@ -153,7 +153,7 @@ class ASGBuilder:
 
         return len(unique_edges)
 
-    # ── Re-enrichment for existing projects ──────────────────────────
+    # -- Re-enrichment for existing projects ----------------------------------
 
     @staticmethod
     def enrich_class_fields_from_db(db_manager: "DatabaseManager", project_id: str) -> int:
@@ -202,4 +202,52 @@ class ASGBuilder:
                     updated += 1
 
         logger.info(f"Field re-enrichment: {updated}/{len(class_units)} class units updated")
+        return updated
+
+    @staticmethod
+    def enrich_complexity_from_db(db_manager: "DatabaseManager", project_id: str) -> int:
+        """Backfill cyclomatic complexity for callable units missing it.
+
+        For projects already ingested (function/method units in DB but no
+        metadata["cyclomatic_complexity"]), this reads each unit's stored
+        source, parses it with tree-sitter, computes McCabe complexity,
+        and updates the JSONB metadata.
+
+        Returns:
+            Number of units updated with complexity metadata.
+        """
+        from ..ast_parser.enricher import SemanticEnricher
+
+        pid = UUID(project_id) if isinstance(project_id, str) else project_id
+        enricher = SemanticEnricher()
+        updated = 0
+
+        with db_manager.get_session() as session:
+            callable_units = (
+                session.query(CodeUnit)
+                .filter(
+                    CodeUnit.project_id == pid,
+                    CodeUnit.unit_type.in_(("function", "method", "constructor", "paragraph")),
+                )
+                .all()
+            )
+
+            for cu in callable_units:
+                if not cu.source or not cu.language:
+                    continue
+
+                meta = cu.unit_metadata or {}
+                if meta.get("cyclomatic_complexity") is not None:
+                    continue
+
+                complexity = enricher.compute_complexity_from_source(cu.source, cu.language)
+                new_meta = dict(meta)
+                new_meta["cyclomatic_complexity"] = complexity
+                cu.unit_metadata = new_meta
+                updated += 1
+
+        logger.info(
+            f"Complexity re-enrichment: {updated}/{len(callable_units)} "
+            f"callable units updated for project {project_id}"
+        )
         return updated

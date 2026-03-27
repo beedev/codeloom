@@ -1,9 +1,10 @@
 """CodeLoom MCP Server implementation.
 
-Exposes 16 tools covering project intelligence, MVP management, phase execution,
+Exposes 20 tools covering project intelligence, MVP management, phase execution,
 source code access, RAG search, ground truth validation, lane detection, and
 full-autonomy migration (list_units, get_import_graph, save_plan, save_mvps,
-complete_transform, start_transform).
+complete_transform, start_transform), and reverse engineering
+documentation (generate_reverse_doc, get_reverse_doc, list_reverse_docs).
 
 All tool handlers are registered on the mcp.server.Server instance and communicate
 via JSON-encoded TextContent responses.
@@ -389,6 +390,75 @@ _TOOL_DEFINITIONS: List[Tool] = [
             "required": ["plan_id", "overall_score", "fixed_score", "fixes_applied", "fixes_pending", "report_markdown"],
         },
     ),
+    Tool(
+        name="codeloom_generate_reverse_doc",
+        description=(
+            "Generate a structured 9-chapter reverse engineering document for a project. "
+            "Composes existing intelligence from Understanding Engine, ASG queries, and "
+            "deep analysis into chapters: Executive Summary, Architecture Overview, "
+            "Entry Points, Functional Requirements, Data Model, Call Trees, "
+            "External Integrations, Code Quality & Risk, Technology Stack. "
+            "Chapters 2 and 5 use LLM synthesis; all others are pure data."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project UUID"},
+                "chapters": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Optional list of chapter numbers (1-9) to generate. Omit for all chapters.",
+                },
+            },
+            "required": ["project_id"],
+        },
+    ),
+    Tool(
+        name="codeloom_get_reverse_doc",
+        description=(
+            "Get a reverse engineering document by its ID. "
+            "Returns all chapters, status, and metadata."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string", "description": "Document UUID"},
+            },
+            "required": ["doc_id"],
+        },
+    ),
+    Tool(
+        name="codeloom_list_reverse_docs",
+        description=(
+            "List all reverse engineering documents for a project. "
+            "Returns summaries with status and chapter titles."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project UUID"},
+            },
+            "required": ["project_id"],
+        },
+    ),
+    Tool(
+        name="codeloom_search_knowledge",
+        description=(
+            "Search a knowledge base (uploaded documents like IBM Redbooks, technical manuals, "
+            "architecture guides, PDFs, DOCX files). Returns relevant passages with similarity scores. "
+            "Uses the same RAG pipeline as codeloom_search_codebase but is semantically named for "
+            "document-based knowledge projects."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Knowledge project UUID"},
+                "query": {"type": "string", "description": "Natural language search query"},
+                "top_k": {"type": "integer", "default": 5, "description": "Number of results"},
+            },
+            "required": ["project_id", "query"],
+        },
+    ),
 ]
 
 
@@ -466,6 +536,12 @@ class CodeLoomMCPServer:
             "codeloom_start_transform": self._start_transform,
             "codeloom_get_import_graph": self._get_import_graph,
             "codeloom_save_accuracy_report": self._save_accuracy_report,
+            # Reverse engineering documentation tools
+            "codeloom_generate_reverse_doc": self._generate_reverse_doc,
+            "codeloom_get_reverse_doc": self._get_reverse_doc,
+            "codeloom_list_reverse_docs": self._list_reverse_docs,
+            # Knowledge project tools
+            "codeloom_search_knowledge": self._search_knowledge,
         }
         handler = dispatch_table.get(name)
         if handler is None:
@@ -952,6 +1028,11 @@ class CodeLoomMCPServer:
             return {"project_id": project_id, "query": query, "results": results}
         except Exception as exc:
             return {"error": f"Search failed: {exc}"}
+
+
+    async def _search_knowledge(self, args: Dict) -> Dict:
+        """Search a knowledge project. Delegates to _search_codebase (same RAG pipeline)."""
+        return await self._search_codebase(args)
 
     async def _validate_output(self, args: Dict) -> Dict:
         from codeloom.core.migration.ground_truth import CodebaseGroundTruth
@@ -1529,6 +1610,38 @@ class CodeLoomMCPServer:
             "mvps_completed": mvp_count,
             "message": "Accuracy report saved. Migration marked complete.",
         }
+
+
+    # ── Reverse Engineering Documentation ───────────────────────────────
+
+    async def _generate_reverse_doc(self, args: Dict) -> Dict:
+        """Generate reverse engineering documentation for a project."""
+        from codeloom.core.reverse_engineering import ReverseEngineeringService
+
+        project_id = args["project_id"]
+        chapters = args.get("chapters")
+
+        svc = ReverseEngineeringService(self._db, self._pipeline)
+        result = svc.generate(project_id, chapters=chapters)
+        return result
+
+    async def _get_reverse_doc(self, args: Dict) -> Dict:
+        """Get a reverse engineering document by ID."""
+        from codeloom.core.reverse_engineering import ReverseEngineeringService
+
+        doc_id = args["doc_id"]
+        svc = ReverseEngineeringService(self._db, self._pipeline)
+        result = svc.get_doc_by_id(doc_id)
+        return result
+
+    async def _list_reverse_docs(self, args: Dict) -> Dict:
+        """List reverse engineering documents for a project."""
+        from codeloom.core.reverse_engineering import ReverseEngineeringService
+
+        project_id = args["project_id"]
+        svc = ReverseEngineeringService(self._db, self._pipeline)
+        docs = svc.list_docs(project_id)
+        return {"docs": docs, "count": len(docs)}
 
     # ── Internal helpers ────────────────────────────────────────────────
 

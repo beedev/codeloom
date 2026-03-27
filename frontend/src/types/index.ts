@@ -10,6 +10,7 @@ export interface Project {
   user_id: string;
   name: string;
   description: string;
+  project_type: 'code' | 'knowledge';
   primary_language: string | null;
   languages: string[];
   file_count: number;
@@ -23,6 +24,15 @@ export interface Project {
   last_synced_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface KnowledgeDocument {
+  file_id: string;
+  file_path: string;
+  language: string;
+  line_count: number;
+  size_bytes: number;
+  created_at: string | null;
 }
 
 export interface CodeFile {
