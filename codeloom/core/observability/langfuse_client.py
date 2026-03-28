@@ -28,7 +28,7 @@ _tracer_lock = threading.Lock()
 
 
 def _make_trace_id() -> str:
-    return uuid4().hex
+    return str(uuid4())
 
 
 def _now_iso() -> str:
@@ -154,7 +154,7 @@ class LangfuseTracer:
         try:
             now = _now_iso()
             self._enqueue({
-                "id": uuid4().hex,
+                "id": str(uuid4()),
                 "type": "trace-create",
                 "timestamp": now,
                 "body": {
@@ -194,10 +194,11 @@ class LangfuseTracer:
             start_time = _offset_iso(timing_ms) if timing_ms else end_time
 
             self._enqueue({
-                "id": uuid4().hex,
+                "id": str(uuid4()),
                 "type": "span-create",
                 "timestamp": end_time,
                 "body": {
+                    "id": str(uuid4()),
                     "traceId": trace_id,
                     "name": name,
                     "startTime": start_time,
@@ -230,6 +231,7 @@ class LangfuseTracer:
             # Langfuse generation body — model, usage, startTime, endTime
             # are the fields that populate Latency, Cost, Model Name columns
             body: Dict[str, Any] = {
+                "id": str(uuid4()),
                 "traceId": trace_id,
                 "name": name,
                 "model": model,
@@ -250,7 +252,7 @@ class LangfuseTracer:
                 body["metadata"] = {"timing_ms": round(timing_ms, 1)}
 
             self._enqueue({
-                "id": uuid4().hex,
+                "id": str(uuid4()),
                 "type": "generation-create",
                 "timestamp": end_time,
                 "body": body,
@@ -270,10 +272,11 @@ class LangfuseTracer:
 
         try:
             self._enqueue({
-                "id": uuid4().hex,
+                "id": str(uuid4()),
                 "type": "score-create",
                 "timestamp": _now_iso(),
                 "body": {
+                    "id": str(uuid4()),
                     "traceId": trace_id,
                     "name": name,
                     "value": value,
@@ -301,7 +304,7 @@ class LangfuseTracer:
                 output.update(metadata)
 
             self._enqueue({
-                "id": uuid4().hex,
+                "id": str(uuid4()),
                 "type": "trace-create",
                 "timestamp": _now_iso(),
                 "body": {

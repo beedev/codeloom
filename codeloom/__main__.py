@@ -200,6 +200,14 @@ def main():
     except Exception as e:
         logger.debug(f"Langfuse init skipped: {e}")
 
+    # Start feedback analyzer worker (adaptive RAG tuning)
+    feedback_analyzer_enabled = os.getenv("FEEDBACK_ANALYZER_ENABLED", "false").lower() in ("true", "1")
+    if feedback_analyzer_enabled and db_manager:
+        from .core.services.feedback_analyzer_worker import FeedbackAnalyzerWorker
+        feedback_worker = FeedbackAnalyzerWorker(db_manager=db_manager)
+        feedback_worker.start()
+        logger.info("FeedbackAnalyzerWorker started (adaptive RAG tuning)")
+
     # Build FastAPI app
     from .api.app import create_app
     app = create_app(

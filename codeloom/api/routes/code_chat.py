@@ -192,6 +192,20 @@ async def code_chat(
             max_history=10,
         )
 
+    # Check for adaptive retrieval settings (from feedback loop)
+    adaptive_top_k = data.max_sources
+    try:
+        import importlib
+        _opt_mod = importlib.import_module("codeloom.core.services.parameter_optimizer_service")
+        ParameterOptimizerService = _opt_mod.ParameterOptimizerService
+        optimizer = ParameterOptimizerService(pipeline=pipeline, db_manager=db_manager)
+        adaptive = optimizer.get_adaptive_settings(project_id=project_id)
+        if adaptive:
+            adaptive_top_k = adaptive.get("top_k", adaptive_top_k)
+            logger.info(f"Adaptive RAG settings applied: {adaptive}")
+    except Exception:
+        pass  # Non-critical — use defaults
+
     # Retrieve relevant code chunks
     nodes = pipeline._get_cached_nodes(project_id)
     retrieval_results = []
@@ -204,7 +218,7 @@ async def code_chat(
             vector_store=pipeline._vector_store,
             retriever_factory=pipeline._engine._retriever,
             llm=Settings.llm,
-            top_k=_effective_top_k(data),
+            top_k=adaptive_top_k if data.top_k is None else _effective_top_k(data),
         )
 
     # ASG expansion: enrich results with graph neighbors before context building
