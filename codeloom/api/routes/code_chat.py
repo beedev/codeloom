@@ -325,13 +325,23 @@ async def code_chat(
     )
     llm_ms = (time.time() - llm_start) * 1000
 
-    # Log LLM generation to Langfuse
+    # Log LLM generation to Langfuse (with model + usage for cost/latency)
+    llm_model = getattr(Settings.llm, "model", None) or "unknown"
+    # Try to get the underlying model name from gateway
+    if hasattr(Settings.llm, "_llm"):
+        llm_model = getattr(Settings.llm._llm, "model", llm_model)
+
+    # Estimate token usage from prompt/response length (~4 chars per token)
+    prompt_tokens = max(len(full_context) // 4, 1)
+    completion_tokens = max(len(response_text) // 4, 1) if response_text else 0
+
     tracer.log_generation(
         trace_id=trace_id,
         name="llm_response",
-        model=getattr(Settings.llm, "model", "unknown"),
+        model=llm_model,
         prompt=data.query,
-        completion=response_text[:500] if response_text else "",
+        completion=response_text[:1000] if response_text else "",
+        usage={"input": prompt_tokens, "output": completion_tokens},
         timing_ms=llm_ms,
     )
 

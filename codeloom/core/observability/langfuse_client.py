@@ -1,13 +1,7 @@
 """Langfuse observability client using direct HTTP ingestion API.
 
-The Langfuse 3.x SDK's OTEL-based start_span/start_generation silently
-drops traces due to OpenTelemetry version conflicts.  This client bypasses
-the SDK's tracing layer entirely and posts events directly to the
-/api/public/ingestion REST endpoint — the same approach that was verified
-to work with 207/201 responses.
-
-The SDK is still used for auth_check() and get_trace_url() — only the
-trace/span/generation creation uses direct HTTP.
+Bypasses the SDK's OTEL transport (which silently drops traces) and posts
+events directly to /api/public/ingestion.
 
 Configuration (env vars):
     LANGFUSE_ENABLED     — "true" to enable (default: false)
@@ -21,7 +15,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -38,15 +32,17 @@ def _make_trace_id() -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _offset_iso(ms: float) -> str:
+    """Return ISO timestamp offset by -ms milliseconds from now."""
+    dt = datetime.now(timezone.utc) - timedelta(milliseconds=ms)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class LangfuseTracer:
-    """Thread-safe Langfuse tracing via direct HTTP ingestion.
-
-    All public methods are wrapped in try/except so tracing failures
-    NEVER propagate into the main RAG pipeline flow.
-    """
+    """Thread-safe Langfuse tracing via direct HTTP ingestion."""
 
     _MAX_BATCH_SIZE = 20
     _FLUSH_INTERVAL_S = 5.0
@@ -56,6 +52,7 @@ class LangfuseTracer:
         self._host: str = ""
         self._public_key: str = ""
         self._secret_key: str = ""
+        self._project_id: str = ""
         self._batch: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
         self._flush_timer: Optional[threading.Timer] = None
@@ -84,7 +81,6 @@ class LangfuseTracer:
             logger.warning("Langfuse enabled but keys not set — tracing disabled")
             return
 
-        # Verify auth
         try:
             resp = requests.get(
                 f"{self._host}/api/public/projects",
@@ -92,21 +88,23 @@ class LangfuseTracer:
                 timeout=5,
             )
             if resp.status_code == 200:
+                projects = resp.json().get("data", [])
+                if projects:
+                    self._project_id = projects[0]["id"]
                 self._enabled = True
                 logger.info(f"Langfuse 3.x tracing initialized | host={self._host}")
             else:
-                logger.warning(f"Langfuse auth failed (status {resp.status_code}) — tracing disabled")
+                logger.warning(f"Langfuse auth failed ({resp.status_code}) — tracing disabled")
         except Exception as exc:
             logger.warning(f"Langfuse connection failed — tracing disabled: {exc}")
 
     def _enqueue(self, event: Dict[str, Any]) -> None:
-        """Add an event to the batch queue, flush if full."""
         with self._lock:
             self._batch.append(event)
             if len(self._batch) >= self._MAX_BATCH_SIZE:
                 batch = self._batch[:]
                 self._batch.clear()
-                threading.Thread(target=self._send_batch, args=(batch,), daemon=True).start()
+                self._send_batch(batch)
             elif self._flush_timer is None:
                 self._flush_timer = threading.Timer(self._FLUSH_INTERVAL_S, self._timed_flush)
                 self._flush_timer.daemon = True
@@ -129,7 +127,11 @@ class LangfuseTracer:
                 timeout=10,
             )
             if resp.status_code not in (200, 207):
-                logger.debug(f"Langfuse ingestion returned {resp.status_code}: {resp.text[:200]}")
+                logger.debug(f"Langfuse ingestion {resp.status_code}: {resp.text[:200]}")
+            else:
+                errors = resp.json().get("errors", [])
+                if errors:
+                    logger.debug(f"Langfuse ingestion errors: {errors}")
         except Exception as exc:
             logger.debug(f"Langfuse batch send failed (non-fatal): {exc}")
 
@@ -150,25 +152,28 @@ class LangfuseTracer:
             return trace_id
 
         try:
+            now = _now_iso()
             self._enqueue({
                 "id": uuid4().hex,
                 "type": "trace-create",
-                "timestamp": _now_iso(),
+                "timestamp": now,
                 "body": {
                     "id": trace_id,
                     "name": name,
                     "userId": user_id,
+                    "timestamp": now,
                     "input": {
                         "query": query or "",
                         "project_id": notebook_id,
+                    },
+                    "metadata": {
+                        "project_id": notebook_id,
                         **(metadata or {}),
                     },
-                    "metadata": {"project_id": notebook_id, **(metadata or {})},
-                    "timestamp": _now_iso(),
                 },
             })
         except Exception as exc:
-            logger.debug(f"Langfuse start_trace failed (non-fatal): {exc}")
+            logger.debug(f"Langfuse start_trace failed: {exc}")
 
         return trace_id
 
@@ -185,26 +190,25 @@ class LangfuseTracer:
             return
 
         try:
-            now = _now_iso()
+            end_time = _now_iso()
+            start_time = _offset_iso(timing_ms) if timing_ms else end_time
+
             self._enqueue({
                 "id": uuid4().hex,
                 "type": "span-create",
-                "timestamp": now,
+                "timestamp": end_time,
                 "body": {
                     "traceId": trace_id,
                     "name": name,
+                    "startTime": start_time,
+                    "endTime": end_time,
                     "input": input_data,
                     "output": output_data,
-                    "metadata": {
-                        **(metadata or {}),
-                        **({"timing_ms": timing_ms} if timing_ms is not None else {}),
-                    },
-                    "startTime": now,
-                    "endTime": now,
+                    "metadata": metadata,
                 },
             })
         except Exception as exc:
-            logger.debug(f"Langfuse log_span failed (non-fatal): {exc}")
+            logger.debug(f"Langfuse log_span failed: {exc}")
 
     def log_generation(
         self,
@@ -220,32 +224,39 @@ class LangfuseTracer:
             return
 
         try:
-            now = _now_iso()
-            usage_body = {}
+            end_time = _now_iso()
+            start_time = _offset_iso(timing_ms) if timing_ms else end_time
+
+            # Langfuse generation body — model, usage, startTime, endTime
+            # are the fields that populate Latency, Cost, Model Name columns
+            body: Dict[str, Any] = {
+                "traceId": trace_id,
+                "name": name,
+                "model": model,
+                "startTime": start_time,
+                "endTime": end_time,
+                "input": prompt if isinstance(prompt, (dict, list)) else {"text": str(prompt)},
+                "output": completion if isinstance(completion, (dict, list)) else {"text": str(completion)},
+            }
+
             if usage:
-                usage_body = {
+                body["usage"] = {
                     "input": usage.get("prompt_tokens", usage.get("input", 0)),
                     "output": usage.get("completion_tokens", usage.get("output", 0)),
+                    "unit": "TOKENS",
                 }
+
+            if timing_ms:
+                body["metadata"] = {"timing_ms": round(timing_ms, 1)}
 
             self._enqueue({
                 "id": uuid4().hex,
                 "type": "generation-create",
-                "timestamp": now,
-                "body": {
-                    "traceId": trace_id,
-                    "name": name,
-                    "model": model,
-                    "input": prompt,
-                    "output": completion,
-                    "usage": usage_body if usage_body else None,
-                    "metadata": {"timing_ms": timing_ms} if timing_ms is not None else None,
-                    "startTime": now,
-                    "endTime": now,
-                },
+                "timestamp": end_time,
+                "body": body,
             })
         except Exception as exc:
-            logger.debug(f"Langfuse log_generation failed (non-fatal): {exc}")
+            logger.debug(f"Langfuse log_generation failed: {exc}")
 
     def log_score(
         self,
@@ -270,7 +281,7 @@ class LangfuseTracer:
                 },
             })
         except Exception as exc:
-            logger.debug(f"Langfuse log_score failed (non-fatal): {exc}")
+            logger.debug(f"Langfuse log_score failed: {exc}")
 
     def end_trace(
         self,
@@ -285,7 +296,7 @@ class LangfuseTracer:
         try:
             output: Dict[str, Any] = {"status": status}
             if response is not None:
-                output["response"] = response
+                output["response"] = response[:2000]
             if metadata:
                 output.update(metadata)
 
@@ -299,7 +310,7 @@ class LangfuseTracer:
                 },
             })
 
-            # Flush synchronously on trace end (ensures delivery before process exit)
+            # Flush synchronously
             with self._lock:
                 batch = self._batch[:]
                 self._batch.clear()
@@ -309,29 +320,16 @@ class LangfuseTracer:
             if batch:
                 self._send_batch(batch)
         except Exception as exc:
-            logger.debug(f"Langfuse end_trace failed (non-fatal): {exc}")
+            logger.debug(f"Langfuse end_trace failed: {exc}")
 
     def get_trace_url(self, trace_id: str) -> Optional[str]:
         if not self._enabled or not trace_id:
             return None
-        try:
-            # Get project ID from API
-            resp = requests.get(
-                f"{self._host}/api/public/projects",
-                auth=(self._public_key, self._secret_key),
-                timeout=5,
-            )
-            if resp.status_code == 200:
-                projects = resp.json().get("data", [])
-                if projects:
-                    pid = projects[0]["id"]
-                    return f"{self._host}/project/{pid}/traces/{trace_id}"
-        except Exception:
-            pass
+        if self._project_id:
+            return f"{self._host}/project/{self._project_id}/traces/{trace_id}"
         return None
 
     def flush(self) -> None:
-        """Block until all buffered events have been sent."""
         if not self._enabled:
             return
         with self._lock:
