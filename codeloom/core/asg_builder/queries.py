@@ -9,6 +9,7 @@ Also provides advanced analysis queries:
 - Dead code detection (uncalled functions with smart exclusions)
 - Transitive call chains (full caller/callee closure)
 - Module-level dependency graphs (file and directory aggregation)
+- Source type inventory (aggregated source type detection for migration)
 
 Traversal queries try Apache AGE Cypher first (if graph is synced),
 falling back to recursive CTEs on the relational code_edges table.
@@ -1356,3 +1357,172 @@ def _traverse_sql(
             }
             for row in result.fetchall()
         ]
+
+
+# =========================================================================
+# Source type inventory (migration target mapping)
+# =========================================================================
+
+
+def get_source_type_inventory(
+    db: DatabaseManager,
+    project_id: str,
+    sample_limit: int = 3,
+) -> List[Dict[str, Any]]:
+    """Aggregate detected source types from parsed code units.
+
+    Groups units by (language, program_category/unit_type, technology flags)
+    and returns counts with sample unit names per group.  Used by the
+    ``/migrate`` skill to build a migration manifest: Platform DETECTS →
+    LLM PROPOSES targets → User CONFIRMS.
+
+    Args:
+        db: DatabaseManager instance.
+        project_id: UUID string of the project.
+        sample_limit: Max sample unit names per group (default 3).
+
+    Returns:
+        List of dicts, each describing a detected source type::
+
+            {"source_type": "cobol_batch_program", "language": "cobol",
+             "unit_type": "program", "count": 12,
+             "sample_units": ["ORDERMGMT", "CALCBILL", "VSS"],
+             "flags": {"has_exec_sql": 2, "has_exec_cics": 0,
+                       "has_ims_dli": 1, "has_vsam": 5}}
+    """
+    sql = text("""
+        WITH unit_flags AS (
+            SELECT
+                u.unit_id,
+                u.name,
+                u.language,
+                u.unit_type,
+                COALESCE(u.metadata->>'program_category', '') AS program_category,
+                CASE WHEN (u.metadata->>'has_exec_sql')::boolean THEN 1 ELSE 0 END AS has_exec_sql,
+                CASE WHEN (u.metadata->>'has_exec_cics')::boolean THEN 1 ELSE 0 END AS has_exec_cics,
+                CASE WHEN (u.metadata->>'has_ims_dli')::boolean THEN 1 ELSE 0 END AS has_ims_dli,
+                CASE WHEN u.metadata ? 'file_assignments'
+                     AND u.metadata->>'file_assignments' != '{}'
+                     THEN 1 ELSE 0 END AS has_vsam,
+                COALESCE(u.metadata->>'pgm_category', '') AS jcl_pgm_category,
+                ROW_NUMBER() OVER (
+                    PARTITION BY u.language, u.unit_type,
+                        COALESCE(u.metadata->>'program_category', ''),
+                        COALESCE(u.metadata->>'pgm_category', '')
+                    ORDER BY u.name
+                ) AS rn
+            FROM code_units u
+            JOIN code_files f ON u.file_id = f.file_id
+            WHERE f.project_id = :project_id
+              AND u.unit_type IN (
+                  'program', 'step', 'proc', 'job', 'copybook',
+                  'procedure', 'entry', 'package',
+                  'function', 'class', 'method', 'module',
+                  'stored_procedure', 'view', 'trigger'
+              )
+        )
+        SELECT
+            language,
+            unit_type,
+            program_category,
+            jcl_pgm_category,
+            COUNT(*) AS cnt,
+            SUM(has_exec_sql) AS exec_sql_count,
+            SUM(has_exec_cics) AS exec_cics_count,
+            SUM(has_ims_dli) AS ims_dli_count,
+            SUM(has_vsam) AS vsam_count,
+            ARRAY_AGG(name ORDER BY name)
+                FILTER (WHERE rn <= :sample_limit) AS sample_units
+        FROM unit_flags
+        GROUP BY language, unit_type, program_category, jcl_pgm_category
+        ORDER BY cnt DESC, language, unit_type
+    """)
+
+    with db.get_session() as session:
+        rows = session.execute(
+            sql, {"project_id": project_id, "sample_limit": sample_limit}
+        ).fetchall()
+
+    inventory = []
+    for row in rows:
+        source_type = _classify_source_type(
+            row.language, row.unit_type,
+            row.program_category, row.jcl_pgm_category,
+        )
+        inventory.append({
+            "source_type": source_type,
+            "language": row.language,
+            "unit_type": row.unit_type,
+            "program_category": row.program_category or None,
+            "count": row.cnt,
+            "sample_units": list(row.sample_units) if row.sample_units else [],
+            "flags": {
+                "has_exec_sql": row.exec_sql_count or 0,
+                "has_exec_cics": row.exec_cics_count or 0,
+                "has_ims_dli": row.ims_dli_count or 0,
+                "has_vsam": row.vsam_count or 0,
+            },
+        })
+    return inventory
+
+
+def _classify_source_type(
+    language: str,
+    unit_type: str,
+    program_category: str,
+    jcl_pgm_category: str,
+) -> str:
+    """Derive a human-readable source type label from unit metadata.
+
+    Combines language, unit_type, and parser-assigned categories into
+    a single classification string used in the migration manifest.
+    """
+    lang = (language or "").lower()
+    utype = (unit_type or "").lower()
+    pcat = (program_category or "").lower()
+    jcat = (jcl_pgm_category or "").lower()
+
+    if lang == "cobol":
+        if utype == "copybook":
+            return "cobol_copybook"
+        if pcat == "cics_online":
+            return "cobol_cics_online"
+        if pcat == "ims_dli":
+            return "cobol_ims_dli"
+        if pcat == "utility_subprogram":
+            return "cobol_utility_subprogram"
+        if pcat == "batch_program" or utype == "program":
+            return "cobol_batch_program"
+        return f"cobol_{utype}"
+
+    if lang == "jcl":
+        if jcat == "sort_merge":
+            return "jcl_sort_merge"
+        if jcat == "compile_link":
+            return "jcl_compile_link"
+        if jcat == "data_mgmt":
+            return "jcl_data_mgmt"
+        if utype == "proc":
+            return "jcl_proc"
+        if utype == "job":
+            return "jcl_job"
+        if jcat == "application_run" or utype == "step":
+            return "jcl_application_run"
+        return f"jcl_{utype}"
+
+    if lang in ("pli", "pl1"):
+        if utype == "entry":
+            return "pli_entry"
+        if utype == "package":
+            return "pli_package"
+        return "pli_procedure"
+
+    if lang == "sql" and utype == "stored_procedure":
+        return "sql_stored_procedure"
+    if lang == "sql" and utype == "view":
+        return "sql_view"
+    if lang == "sql" and utype == "trigger":
+        return "sql_trigger"
+
+    # Generic fallback
+    return f"{lang}_{utype}" if lang else utype

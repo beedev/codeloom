@@ -25,9 +25,15 @@ from .continuity_service import ContinuityService
 from .document_service import DocumentService
 from .document_routing_service import DocumentRoutingService
 from .image_service import ImageService
-from .refinement_service import RefinementService
+try:
+    from .refinement_service import RefinementService
+except ImportError:
+    RefinementService = None  # Optional — depends on codeloom.core.agents
 from .retrieval_service import RetrievalService, RetrievalRequest, RetrievalResult
-from .suggestion_service import SuggestionService
+try:
+    from .suggestion_service import SuggestionService
+except ImportError:
+    SuggestionService = None  # Optional — depends on codeloom.core.agents
 
 __all__ = [
     "BaseService",

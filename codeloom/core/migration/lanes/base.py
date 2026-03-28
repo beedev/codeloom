@@ -283,6 +283,27 @@ class MigrationLane(ABC):
         """
         ...
 
+    # ── Source Type Context (for LLM target proposal) ────────────
+
+    def get_source_type_context(self) -> str:
+        """Return domain knowledge about source types for LLM target proposal.
+
+        This text is injected into the LLM prompt when proposing migration
+        targets per source type.  It describes what each source type IS
+        (semantics, runtime behaviour, I/O patterns) so the LLM can reason
+        about what it should BECOME in the target ecosystem.
+
+        This is NOT a hardcoded source→target map.  The LLM uses this
+        context together with the detected source type inventory and the
+        user's stated target ecosystem to propose targets intelligently.
+        The user confirms or overrides at the approval gate.
+
+        Returns:
+            Domain knowledge string, or ``""`` (default) when the lane has
+            no source-type-specific guidance.
+        """
+        return ""
+
     # ── Asset Strategy Overrides ─────────────────────────────────
 
     @abstractmethod

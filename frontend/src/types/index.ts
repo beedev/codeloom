@@ -61,6 +61,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   sources?: ChatSource[];
+  trace_id?: string;
+  feedback?: 'positive' | 'negative' | null;
 }
 
 export interface ChatSource {

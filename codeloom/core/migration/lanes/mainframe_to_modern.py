@@ -123,6 +123,11 @@ class MainframeToModernLane(MigrationLane):
         # code generation.
         return []
 
+    # ── Source Type Context ─────────────────────────────────────
+
+    def get_source_type_context(self) -> str:
+        return _MAINFRAME_SOURCE_TYPE_CONTEXT
+
     # ── LLM Prompt Augmentation ──────────────────────────────────
 
     def augment_prompt(
@@ -252,4 +257,115 @@ Key architectural decisions for mainframe modernization:
 8. SORT/MERGE utilities → shell sort or target-lang streaming (heapq.merge)
 9. Working-Storage persistence → class instance variables (state preserved across calls)
 10. RETURN-CODE → exit codes or return values (process return code semantics)
+"""
+
+_MAINFRAME_SOURCE_TYPE_CONTEXT = """\
+Source type semantics for mainframe migration.  Use this context to propose
+intelligent migration targets.  The user will confirm or override your proposals.
+
+- cobol_batch_program: Standalone batch processing program.  Reads sequential
+  or VSAM files, processes records in a loop, writes output files.  Runs
+  unattended in z/OS batch (JCL EXEC PGM= invocation).
+  Natural target: service module in the target language.
+
+- cobol_cics_online: Interactive CICS transaction program.  Uses SEND MAP /
+  RECEIVE MAP for terminal UI, COMMAREA for inter-transaction state,
+  pseudo-conversational via RETURN TRANSID.  May have complex EIBAID
+  (PF-key) branching and BMS screen management.
+  Natural target: REST API endpoint (COMMAREA → request/response body).
+
+- cobol_utility_subprogram: Called by other programs via CALL ... USING.
+  Has LINKAGE SECTION defining its interface.  No standalone execution —
+  always invoked by a coordinator program (MAINPGM pattern).
+  Natural target: library function or class in the same language as its caller.
+
+- cobol_ims_dli: Program using IMS DL/I database calls (GU, GN, GNP, ISRT,
+  REPL, DLET via CBLTDLI/ASMTDLI or EXEC DLI).  Navigates hierarchical
+  segments.  Natural target: service with ORM (JPA/SQLAlchemy) using
+  parent-child table relationships.
+
+- cobol_copybook: Shared record layout (.cpy file).  Included via COPY
+  statement by multiple programs.  Defines FD record structure with PIC
+  clauses specifying exact field widths and types.
+  Natural target: shared data type (dataclass, POJO, record) — must be
+  a single definition imported by all consumers.
+
+- jcl_sort_merge: JCL step invoking DFSORT/SYNCSORT/ICEMAN utility program.
+  SORT FIELDS= define key positions and order.  May include INCLUDE/OMIT
+  conditions, OUTREC reformatting, SUM FIELDS aggregation.
+  Natural target: shell script using the native sort/merge commands —
+  NOT application-level code.
+
+- jcl_application_run: JCL EXEC PGM=<user-program> step.  Orchestrates
+  execution of a migrated COBOL or PL/I program with DD allocations
+  providing input/output file paths.
+  Natural target: shell or batch script that invokes the migrated program
+  module with environment variables or CLI arguments for file paths.
+
+- jcl_compile_link: JCL step running COBOL compiler (IGYWCL, COBOLCL) or
+  linkage editor.  Compiles source into load modules.
+  Natural target: SKIP — no equivalent needed.  The target language has
+  its own build system.
+
+- jcl_proc: Inline or cataloged JCL procedure (PROC...PEND block or
+  external PROCLIB member).  Groups related steps for reuse.
+  Natural target: shell function or reusable script.
+
+- jcl_data_mgmt: JCL step running IBM data management utilities (IDCAMS
+  REPRO/DEFINE/DELETE, IEBGENER, IEFBR14).  Performs dataset copy, define,
+  delete, or no-op allocation.
+  Natural target: shell commands (cp, mkdir, rm) or data migration scripts.
+
+- jcl_job: JCL JOB card — top-level batch job container.  Defines job-level
+  parameters (CLASS, MSGCLASS, NOTIFY, COND).
+  Natural target: wrapper shell script or orchestrator entry point.
+
+- pli_procedure: PL/I PROCEDURE block — primary callable unit.
+  Natural target: function or method in the target language.
+
+- pli_entry: PL/I ENTRY point — alternate entry into a procedure.
+  Natural target: overloaded method or separate function.
+
+- pli_package: PL/I PACKAGE — groups related procedures.
+  Natural target: module or class.
+
+- sql_stored_procedure: Database stored procedure containing SQL logic.
+  Natural target: application-level service method with ORM queries, or
+  migrated stored procedure in the target database.
+
+- sql_view: Database view definition.
+  Natural target: ORM query method or migrated view in target database.
+
+- sql_trigger: Database trigger.
+  Natural target: application-level event handler or migrated trigger.
+
+- VSAM KSDS (detected via file_assignments metadata): Key-Sequenced Data
+  Set.  Random access by primary key + sequential browse.  Programs
+  OPEN I-O, READ KEY IS, REWRITE, DELETE.
+  Natural target: DEPENDS ON DATA MIGRATION STRATEGY — could be relational
+  database table (PostgreSQL/MySQL), JSON files, SQLite, DynamoDB, or other
+  key-value store.  User should choose based on operational requirements.
+
+- VSAM ESDS: Entry-Sequenced Data Set.  Append-only sequential access.
+  Natural target: append-only log file, message queue, or database table.
+
+- BMS mapset: CICS Basic Mapping Support screen definition.  Field
+  positions, attributes, colors, initial values for 3270 terminal screens.
+  Natural target: user decides — React/HTML form component, API request
+  schema, or skip if UI is being redesigned.
+
+- Assembler: Low-level system utility or performance-critical routine.
+  Cannot be line-translated to high-level language.  Typically provides
+  a callable interface (ENTRY/USING) to COBOL/PL/I callers.
+  Natural target: functional equivalent in target language, or documented
+  interface with stub implementation.  Requires human review.
+
+- IMS DC transaction: IMS online transaction using MFS (Message Format
+  Service) screens and DL/I database access.  Similar to CICS but with
+  IMS-specific message processing and hierarchical DB navigation.
+  Natural target: REST endpoint with ORM, similar to CICS online.
+
+- REXX exec: z/OS REXX scripting — automation, tooling, ISPF dialogs.
+  Procedural, string-oriented, interpreted.
+  Natural target: Python script or shell script (both are natural fits).
 """

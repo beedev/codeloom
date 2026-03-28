@@ -918,3 +918,26 @@ export async function getProjectAnalytics(
 ): Promise<import('../types/index.ts').ProjectAnalytics> {
   return request(`/api/projects/${projectId}/analytics`);
 }
+
+// ---------------------------------------------------------------------------
+// RAG Feedback
+// ---------------------------------------------------------------------------
+
+export async function submitChatFeedback(
+  projectId: string,
+  traceId: string,
+  helpful: boolean,
+  category?: string,
+  message?: string,
+): Promise<{ feedback_id: string }> {
+  return request(`/api/projects/${projectId}/chat/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      trace_id: traceId,
+      helpful,
+      feedback_category: category,
+      user_message: message,
+    }),
+  });
+}

@@ -84,6 +84,50 @@ class ChatRequest(BaseModel):
     top_k: int | None = None            # retrieval result count (overrides max_sources)
 
 
+class FeedbackRequest(BaseModel):
+    trace_id: str
+    helpful: bool
+    feedback_category: str | None = None  # inaccurate|irrelevant|incomplete|helpful|other
+    user_message: str | None = None
+
+
+@router.post("/projects/{project_id}/chat/feedback")
+async def submit_feedback(
+    project_id: str,
+    data: FeedbackRequest,
+    user: dict = Depends(get_current_user),
+    pipeline=Depends(get_pipeline),
+    db_manager=Depends(get_db_manager),
+):
+    """Submit thumbs up/down feedback on a chat response.
+
+    Stores in rag_feedback table and forwards score to Langfuse.
+    """
+    from codeloom.core.services.feedback_service import FeedbackService
+    from uuid import uuid4
+
+    user_id = user["user_id"]
+
+    try:
+        svc = FeedbackService(pipeline=pipeline, db_manager=db_manager)
+        feedback_id = svc.submit_feedback(
+            trace_id=data.trace_id,
+            query_id=str(uuid4()),
+            user_id=user_id,
+            project_id=project_id,
+            helpful=data.helpful,
+            feedback_category=data.feedback_category,
+            user_message=data.user_message,
+        )
+        return {"success": True, "feedback_id": feedback_id}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        import traceback
+        logger.error(f"Feedback submission failed: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Project-wide analysis types (no entity resolution needed) ─────────
 _PROJECT_WIDE_TYPES = {"dead_code", "complexity", "module_deps"}
 
@@ -126,6 +170,17 @@ async def code_chat(
     user_id = data.user_id or user["user_id"]
     session_id = data.session_id or generate_session_id()
     start_time = time.time()
+
+    # Start Langfuse trace (no-op if disabled)
+    from codeloom.core.observability import get_tracer
+    tracer = get_tracer()
+    trace_id = tracer.start_trace(
+        name="code_chat",
+        user_id=user_id,
+        notebook_id=project_id,
+        query=data.query,
+        metadata={"session_id": session_id},
+    )
 
     # Load conversation history
     conversation_history = []
@@ -244,15 +299,40 @@ async def code_chat(
     if deep_narrative:
         context = deep_narrative + "\n\n" + context
 
+    # Log retrieval span to Langfuse
+    retrieval_ms = (time.time() - start_time) * 1000
+    tracer.log_span(
+        trace_id=trace_id,
+        name="retrieval",
+        input_data={"query": data.query, "node_count": len(nodes)},
+        output_data={
+            "result_count": len(retrieval_results),
+            "top_scores": [round(r.score or 0, 4) for r in retrieval_results[:5]],
+        },
+        timing_ms=retrieval_ms,
+    )
+
     # Add code system prompt to context (with response_type / temperature)
     effective_prompt = _apply_request_settings(data, CODE_SYSTEM_PROMPT)
     full_context = f"{effective_prompt}\n\n{context}"
 
     # Execute LLM query
+    llm_start = time.time()
     response_text = execute_query(
         query=data.query,
         context=full_context,
         llm=Settings.llm,
+    )
+    llm_ms = (time.time() - llm_start) * 1000
+
+    # Log LLM generation to Langfuse
+    tracer.log_generation(
+        trace_id=trace_id,
+        name="llm_response",
+        model=getattr(Settings.llm, "model", "unknown"),
+        prompt=data.query,
+        completion=response_text[:500] if response_text else "",
+        timing_ms=llm_ms,
     )
 
     # Format sources
@@ -278,10 +358,19 @@ async def code_chat(
 
     elapsed = time.time() - start_time
 
+    # End Langfuse trace
+    tracer.end_trace(
+        trace_id=trace_id,
+        status="success",
+        response=response_text[:1000] if response_text else "",
+        metadata={"execution_time_ms": int(elapsed * 1000)},
+    )
+
     return {
         "success": True,
         "response": response_text,
         "session_id": session_id,
+        "trace_id": trace_id,
         "sources": sources,
         "metadata": {
             "execution_time_ms": int(elapsed * 1000),
@@ -330,6 +419,17 @@ async def code_chat_stream(
 
     user_id = data.user_id or user["user_id"]
     session_id = data.session_id or generate_session_id()
+
+    # Start Langfuse trace for streaming endpoint
+    from codeloom.core.observability import get_tracer
+    stream_tracer = get_tracer()
+    stream_trace_id = stream_tracer.start_trace(
+        name="code_chat_stream",
+        user_id=user_id,
+        notebook_id=project_id,
+        query=data.query,
+        metadata={"session_id": session_id, "streaming": True},
+    )
 
     def event_generator():
         start_time = time.time()
@@ -491,7 +591,14 @@ async def code_chat_stream(
                 )
 
             elapsed = time.time() - start_time
-            yield f"data: {json.dumps({'type': 'done', 'metadata': {'execution_time_ms': int(elapsed * 1000), 'session_id': session_id, 'node_count': len(nodes), 'retrieval_count': len(retrieval_results)}})}\n\n"
+            # End Langfuse trace
+            stream_tracer.end_trace(
+                stream_trace_id, status="success",
+                response=response_text[:1000] if response_text else "",
+                metadata={"execution_time_ms": int(elapsed * 1000)},
+            )
+
+            yield f"data: {json.dumps({'type': 'done', 'trace_id': stream_trace_id, 'metadata': {'execution_time_ms': int(elapsed * 1000), 'session_id': session_id, 'node_count': len(nodes), 'retrieval_count': len(retrieval_results)}})}\n\n"
 
         except Exception as e:
             logger.error(f"Error in code chat stream: {e}")

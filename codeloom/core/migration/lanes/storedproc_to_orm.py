@@ -699,6 +699,41 @@ class StoredProcToOrmLane(MigrationLane):
             ],
         )
 
+    # ── Source Type Context ─────────────────────────────────────
+
+    def get_source_type_context(self) -> str:
+        return """\
+Source type semantics for Stored Procedure → ORM migration:
+
+- Stored procedure (CRUD): SP that performs INSERT/UPDATE/DELETE/SELECT on
+  one or two tables with parameter-based filtering.
+  Natural target: repository method (JPA, SQLAlchemy, Entity Framework).
+
+- Stored procedure (business logic): SP with complex branching, temp tables,
+  cursors, or multi-step transactions beyond simple CRUD.
+  Natural target: service-layer method with ORM queries.
+
+- Stored procedure (report/aggregation): SP that computes aggregates, joins
+  multiple tables, and returns result sets for reporting.
+  Natural target: read-only query method or dedicated reporting service.
+
+- SQL View: Named query providing a virtual table.
+  Natural target: ORM query method, database view migration, or materialized view.
+
+- SQL Trigger: Event-driven logic fired on INSERT/UPDATE/DELETE.
+  Natural target: application-level event handler, ORM lifecycle hook, or
+  migrated trigger in the target database.
+
+- SQL Function (scalar): Returns a single value. Often used in SELECT/WHERE.
+  Natural target: utility method in application code, or migrated DB function.
+
+- SQL Function (table-valued): Returns a result set.
+  Natural target: repository query method returning a collection.
+
+- DDL schema: Table/index/constraint definitions.
+  Natural target: ORM entity definition (JPA @Entity, SQLAlchemy model, EF DbSet).
+"""
+
     # ── Prompt Augmentation ─────────────────────────────────────
 
     def augment_prompt(

@@ -1956,6 +1956,43 @@ class StrutsToSpringBootLane(MigrationLane):
             ],
         )
 
+    # ── Source Type Context ─────────────────────────────────────
+
+    def get_source_type_context(self) -> str:
+        return """\
+Source type semantics for Struts → Spring Boot migration:
+
+- Struts Action class: Request handler mapped via struts-config.xml or annotations.
+  Natural target: Spring @RestController or @Controller method.
+
+- Struts ActionForm / DynaActionForm: Form bean for request data binding.
+  Natural target: Spring @RequestBody DTO or @ModelAttribute POJO.
+
+- struts-config.xml: Action mappings, form bean definitions, global forwards.
+  Natural target: SKIP — replaced by Spring annotations (@RequestMapping, etc.).
+
+- tiles-def.xml / tiles.xml: Tile layout definitions for JSP composition.
+  Natural target: SKIP if moving to SPA frontend; Thymeleaf layout if server-rendered.
+
+- JSP page: Server-rendered view with Struts tags (<html:form>, <bean:write>).
+  Natural target: Thymeleaf template, React component, or API-only (no view).
+
+- Struts validation.xml: Declarative field validation rules.
+  Natural target: Spring @Valid + Bean Validation annotations (@NotNull, @Size, etc.).
+
+- Struts MessageResources (.properties): i18n message bundles.
+  Natural target: Spring MessageSource .properties (same format, different lookup).
+
+- DispatchAction / MappingDispatchAction: Single Action with multiple methods.
+  Natural target: @RestController with multiple @RequestMapping methods.
+
+- Struts Plugin: Lifecycle plugin (init/destroy).
+  Natural target: Spring @Component with @PostConstruct / @PreDestroy.
+
+- Interceptor / RequestProcessor: Cross-cutting pre/post request logic.
+  Natural target: Spring HandlerInterceptor or @ControllerAdvice.
+"""
+
     # ── Prompt Augmentation ─────────────────────────────────────
 
     def augment_prompt(

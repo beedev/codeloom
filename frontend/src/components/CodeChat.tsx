@@ -30,6 +30,7 @@ import {
   History,
 } from 'lucide-react';
 import type { ChatMessage, ChatSource } from '../types/index.ts';
+import { FeedbackWidget } from './FeedbackWidget.tsx';
 
 interface CodeChatProps {
   messages: ChatMessage[];
@@ -137,6 +138,7 @@ export function CodeChat({
                 key={idx}
                 message={msg}
                 hideInlineSources={hideInlineSources}
+                projectId={projectId}
                 onViewFile={handleViewFile}
               />
             ))}
@@ -326,16 +328,20 @@ const markdownComponents = {
 function MessageBubble({
   message,
   hideInlineSources,
+  projectId,
   onViewFile,
+  onFeedback,
 }: {
   message: ChatMessage;
   hideInlineSources?: boolean;
+  projectId?: string;
   onViewFile: (source: ChatSource) => void;
+  onFeedback?: (messageIdx: number, type: 'positive' | 'negative') => void;
 }) {
   const isUser = message.role === 'user';
 
   return (
-    <div className="flex gap-3">
+    <div className="group flex gap-3">
       {/* Avatar */}
       <div
         className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
@@ -363,6 +369,11 @@ function MessageBubble({
                 {message.content}
               </ReactMarkdown>
             </div>
+
+            {/* Feedback widget */}
+            {message.trace_id && projectId && (
+              <FeedbackWidget traceId={message.trace_id} projectId={projectId} />
+            )}
 
             {/* Inline sources (hidden when side panel is active) */}
             {!hideInlineSources && message.sources && message.sources.length > 0 && (

@@ -22,8 +22,7 @@ build==1.3.0
 cachetools==6.2.4
 certifi==2025.11.12
 charset-normalizer==3.4.4
-chroma-hnswlib==0.7.3
-chromadb>=0.5.17
+# chromadb removed — PGVectorStore is the primary vector store
 click==8.3.1
 colorama==0.4.6
 coloredlogs==15.0.1
@@ -92,7 +91,7 @@ llama-index-embeddings-openai>=0.5.0
 # Vector stores and retrieval
 llama-index-vector-stores-postgres>=0.7.0
 llama-index-retrievers-bm25>=0.6.0
-llama-index-vector-stores-chroma>=0.4.0
+# llama-index-vector-stores-chroma removed — using pgvector only
 Mako==1.3.10
 markdown-it-py==4.0.0
 MarkupSafe==3.0.3
@@ -211,3 +210,6 @@ tree-sitter-c-sharp>=0.23.0
 # Bundled grammar pack — provides COBOL (nolanlwin/tree-sitter-cobol, COBOL85, MIT)
 # and 160+ other languages without separate pip packages
 tree-sitter-language-pack>=0.3.0
+
+# Observability — Langfuse LLM tracing (optional, graceful degradation when disabled)
+langfuse==3.14.5

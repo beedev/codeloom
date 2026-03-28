@@ -150,13 +150,15 @@ export function useCodeChat(): UseCodeChatReturn {
                   return updated;
                 });
               } else if (parsed.type === 'done') {
-                // Final message -- attach sources
+                // Final message -- attach sources + trace_id for feedback
+                const traceId = parsed.trace_id || '';
                 setMessages((prev) => {
                   const updated = [...prev];
                   updated[updated.length - 1] = {
                     role: 'assistant',
                     content: assistantContent,
                     sources: streamSources,
+                    trace_id: traceId,
                   };
                   return updated;
                 });

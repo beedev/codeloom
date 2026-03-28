@@ -189,6 +189,17 @@ def main():
         conversation_store = ConversationStore(db_manager)
         logger.info("ConversationStore initialized")
 
+    # Initialize Langfuse tracer (eager — so we see the log at startup)
+    try:
+        from .core.observability import get_tracer
+        tracer = get_tracer()
+        if tracer._enabled:
+            logger.info(f"Langfuse tracing enabled — traces going to Langfuse cloud")
+        else:
+            logger.info("Langfuse tracing disabled (set LANGFUSE_ENABLED=true to enable)")
+    except Exception as e:
+        logger.debug(f"Langfuse init skipped: {e}")
+
     # Build FastAPI app
     from .api.app import create_app
     app = create_app(

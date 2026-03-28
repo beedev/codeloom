@@ -1938,6 +1938,45 @@ class VbNetToDotNetCoreLane(MigrationLane):
         )
 
     # ═══════════════════════════════════════════════════════════════
+    # Source Type Context
+    # ═══════════════════════════════════════════════════════════════
+
+    def get_source_type_context(self) -> str:
+        return """\
+Source type semantics for VB.NET → .NET Core/C# migration:
+
+- VB.NET Web Form (.aspx + .aspx.vb): Server-rendered page with code-behind.
+  Event-driven lifecycle (Page_Load, Button_Click, etc.).
+  Natural target: Razor Page (.cshtml + .cshtml.cs) or MVC Controller + View.
+
+- VB.NET Module: Shared state and utility functions (Module ... End Module).
+  Natural target: C# static class with static methods.
+
+- VB.NET Class: Standard OOP class with properties and methods.
+  Natural target: C# class (syntax conversion: Dim→var, Sub→void, etc.).
+
+- VB.NET UserControl (.ascx): Reusable UI component embedded in Web Forms.
+  Natural target: Razor partial view, View Component, or Blazor component.
+
+- VB.NET Master Page (.master): Site-wide layout template.
+  Natural target: Razor _Layout.cshtml.
+
+- VB.NET Global.asax: Application lifecycle events (Application_Start, etc.).
+  Natural target: Program.cs / Startup.cs middleware configuration.
+
+- VB.NET Web.config: XML configuration (connection strings, app settings, handlers).
+  Natural target: appsettings.json + Program.cs service registration.
+
+- VB.NET .asmx Web Service: SOAP/XML web service.
+  Natural target: ASP.NET Core Web API controller (REST/JSON).
+
+- VB.NET Crystal Reports (.rpt): Report definitions.
+  Natural target: user decides — SSRS, DevExpress, or custom report service.
+
+- VB.NET Data Access (DataSet/TableAdapter): Typed dataset with generated SQL.
+  Natural target: Entity Framework Core DbContext + entities.
+"""
+
     # Prompt Augmentation
     # ═══════════════════════════════════════════════════════════════
 

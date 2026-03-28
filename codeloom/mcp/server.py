@@ -234,6 +234,16 @@ _TOOL_DEFINITIONS: List[Tool] = [
                     "type": "string",
                     "description": "JSON string with business context: {dead_code, processing_volumes, integrations, landmines, compliance, deployment_platform}",
                 },
+                "target_manifest": {
+                    "type": "string",
+                    "description": (
+                        "JSON array of per-source-type target decisions. Each entry: "
+                        '{"source_type": "cobol_batch_program", "count": 12, '
+                        '"target_language": "python", "target_artifact": "service", '
+                        '"target_detail": "FastAPI service module", "confirmed": true}. '
+                        "Built during init: Platform DETECTS source types, LLM PROPOSES targets, User CONFIRMS."
+                    ),
+                },
                 "status": {
                     "type": "string",
                     "description": "Plan status: 'draft' (waiting for UI input) or 'in_progress' (default)",
@@ -698,6 +708,15 @@ class CodeLoomMCPServer:
                             "target_frameworks": lane_info["target_frameworks"],
                         })
 
+        # Source type inventory (for migration manifest)
+        from codeloom.core.asg_builder.queries import get_source_type_inventory
+
+        source_inventory = []
+        try:
+            source_inventory = get_source_type_inventory(self._db, project_id)
+        except Exception as _inv_err:
+            logger.debug("source type inventory failed: %s", _inv_err)
+
         return {
             "project_id": project_id,
             "name": project.name,
@@ -708,6 +727,7 @@ class CodeLoomMCPServer:
             "understanding_analyses": understanding_status,
             "migration_plans": plan_summaries,
             "detected_lanes": detected_lanes,
+            "source_type_inventory": source_inventory,
         }
 
     async def _list_mvps(self, args: Dict) -> Dict:
@@ -1116,6 +1136,13 @@ class CodeLoomMCPServer:
         except Exception as _ge:
             logger.debug("Could not enumerate quality gates: %s", _ge)
 
+        # Source type context for LLM target proposal
+        source_type_context = ""
+        try:
+            source_type_context = lane.get_source_type_context()
+        except Exception as _stc_err:
+            logger.debug("Could not get source type context: %s", _stc_err)
+
         return {
             "source_framework": source_framework,
             "lane_detected": True,
@@ -1125,6 +1152,7 @@ class CodeLoomMCPServer:
             "target_frameworks": lane.target_frameworks,
             "transform_rules": rules,
             "quality_gates": gates,
+            "source_type_context": source_type_context,
         }
 
     # ── Full-autonomy migration handlers ────────────────────────────────
@@ -1214,6 +1242,15 @@ class CodeLoomMCPServer:
                 except json.JSONDecodeError:
                     pass  # Ignore malformed brief — not critical
 
+            # Parse target_manifest if provided
+            target_manifest = None
+            manifest_str = args.get("target_manifest")
+            if manifest_str:
+                try:
+                    target_manifest = json.loads(manifest_str) if isinstance(manifest_str, str) else manifest_str
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
             plan = MigrationPlan(
                 plan_id=plan_id,
                 user_id=user_id,
@@ -1223,6 +1260,7 @@ class CodeLoomMCPServer:
                 status=plan_status,
                 pipeline_version=2,
                 migration_type="framework_migration",
+                target_manifest=target_manifest,
                 discovery_metadata={
                     "output_dir": output_dir,
                     "orchestrator": "claude_code_cli",
