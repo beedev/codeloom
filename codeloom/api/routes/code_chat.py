@@ -321,7 +321,7 @@ async def code_chat(
         input_data={"query": data.query, "node_count": len(nodes)},
         output_data={
             "result_count": len(retrieval_results),
-            "top_scores": [round(r.score or 0, 4) for r in retrieval_results[:5]],
+            "top_scores": [round(float(r.score or 0), 4) for r in retrieval_results[:5]],
         },
         timing_ms=retrieval_ms,
     )
