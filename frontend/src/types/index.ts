@@ -11,6 +11,9 @@ export interface Project {
   name: string;
   description: string;
   project_type: 'code' | 'knowledge';
+  parent_project_id: string | null;
+  migration_notebook_id: string | null;
+  migration_notebook_name: string | null;
   primary_language: string | null;
   languages: string[];
   file_count: number;
@@ -299,7 +302,7 @@ export interface MigrationFile {
   test_type?: 'unit' | 'integration' | 'equivalence' | 'sp_stub';
 }
 
-// ── Agent Event Types (SSE from agentic migration execution) ──
+// -- Agent Event Types (SSE from agentic migration execution) --
 
 export type AgentEventType =
   | 'agent_start'

@@ -485,6 +485,8 @@ async def code_chat_stream(
                     top_k=_effective_top_k(data),
                 )
 
+            retrieval_ms = (time.time() - start_time) * 1000
+
             # ASG expansion
             if retrieval_results and project.get("asg_status") == "complete":
                 try:
@@ -596,6 +598,7 @@ async def code_chat_stream(
             full_context = f"{effective_prompt}\n\n{context}"
 
             # Stream LLM response
+            llm_start = time.time()
             for chunk in execute_query_streaming(
                 query=data.query,
                 context=full_context,
@@ -615,6 +618,32 @@ async def code_chat_stream(
                 )
 
             elapsed = time.time() - start_time
+
+            # Log retrieval span
+            stream_tracer.log_span(
+                stream_trace_id, "retrieval",
+                input_data={"query": data.query, "node_count": len(nodes)},
+                output_data={"result_count": len(retrieval_results),
+                             "top_scores": [round(float(r.score or 0), 4) for r in retrieval_results[:5]]},
+                timing_ms=retrieval_ms,
+            )
+
+            # Log LLM generation
+            llm_model = getattr(Settings.llm, "model", None) or "unknown"
+            if hasattr(Settings.llm, "_llm"):
+                llm_model = getattr(Settings.llm._llm, "model", llm_model)
+            llm_ms = (time.time() - llm_start) * 1000
+            prompt_tokens = max(len(full_context) // 4, 1)
+            completion_tokens = max(len(response_text) // 4, 1) if response_text else 0
+            stream_tracer.log_generation(
+                stream_trace_id, "llm_response",
+                model=llm_model,
+                prompt=data.query,
+                completion=response_text[:1000] if response_text else "",
+                usage={"input": prompt_tokens, "output": completion_tokens},
+                timing_ms=llm_ms,
+            )
+
             # End Langfuse trace
             stream_tracer.end_trace(
                 stream_trace_id, status="success",
