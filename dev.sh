@@ -19,13 +19,45 @@ print_success() { echo -e "${GREEN}✓${NC} $1"; }
 print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
 print_error() { echo -e "${RED}✗${NC} $1"; }
 
+# Check if PostgreSQL is reachable (generic)
+is_postgres_running() {
+    local host="localhost"
+    local port="5432"
+    
+    if [ -f .env ]; then
+        local env_host=$(grep -E '^POSTGRES_HOST=' .env | cut -d= -f2 | tr -d '""'"''"'\r ')
+        local env_port=$(grep -E '^POSTGRES_PORT=' .env | cut -d= -f2 | tr -d '""'"''"'\r ')
+        [ -n "$env_host" ] && host="$env_host"
+        [ -n "$env_port" ] && port="$env_port"
+    fi
+    
+    if command -v pg_isready >/dev/null 2>&1; then
+        pg_isready -h "$host" -p "$port" -q 2>/dev/null
+        return $?
+    elif command -v nc >/dev/null 2>&1; then
+        nc -z "$host" "$port" 2>/dev/null
+        return $?
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('$host', int('$port')))" 2>/dev/null
+        return $?
+    else
+        # Return success if we have no tools to test it, let it fail naturally down the line
+        return 0
+    fi
+}
+
 # Check if PostgreSQL is running
 check_postgres() {
-    if /opt/homebrew/opt/postgresql@17/bin/pg_isready -q 2>/dev/null; then
+    if is_postgres_running; then
         return 0
     else
-        print_error "PostgreSQL is not running"
-        echo "  Start with: brew services start postgresql@17"
+        local host="localhost"
+        local port="5432"
+        [ -f .env ] && host=$(grep -E '^POSTGRES_HOST=' .env | cut -d= -f2 | tr -d '""'"''"'\r ') || host="localhost"
+        [ -f .env ] && port=$(grep -E '^POSTGRES_PORT=' .env | cut -d= -f2 | tr -d '""'"''"'\r ') || port="5432"
+        
+        print_error "PostgreSQL is not running on $host:$port"
+        echo "  Make sure your local or Docker database is started."
         return 1
     fi
 }
@@ -71,10 +103,15 @@ show_status() {
     echo -e "\n${BLUE}═══ CodeLoom Status ═══${NC}\n"
 
     # PostgreSQL
-    if /opt/homebrew/opt/postgresql@17/bin/pg_isready -q 2>/dev/null; then
-        print_success "PostgreSQL: Running on localhost:5432"
+    local pg_host="localhost"
+    local pg_port="5432"
+    [ -f .env ] && pg_host=$(grep -E '^POSTGRES_HOST=' .env | cut -d= -f2 | tr -d '""'"''"'\r ') || pg_host="localhost"
+    [ -f .env ] && pg_port=$(grep -E '^POSTGRES_PORT=' .env | cut -d= -f2 | tr -d '""'"''"'\r ') || pg_port="5432"
+    
+    if is_postgres_running; then
+        print_success "PostgreSQL: Reachable on $pg_host:$pg_port"
     else
-        print_error "PostgreSQL: Not running"
+        print_error "PostgreSQL: Not reachable on $pg_host:$pg_port"
     fi
 
     # Backend
@@ -240,7 +277,7 @@ build_all() {
     fi
 
     # Run migrations if Postgres is available
-    if /opt/homebrew/opt/postgresql@17/bin/pg_isready -q 2>/dev/null; then
+    if is_postgres_running; then
         print_status "Running database migrations..."
         PYTHONPATH="$SCRIPT_DIR" alembic upgrade head
         print_success "Database migrations applied"

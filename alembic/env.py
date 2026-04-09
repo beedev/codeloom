@@ -1,5 +1,8 @@
 import os
 from logging.config import fileConfig
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
@@ -14,7 +17,18 @@ config = context.config
 # This allows Docker containers to use their own DATABASE_URL
 database_url = os.environ.get("DATABASE_URL")
 if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+    # Escape % for ConfigParser interpolation
+    safe_url = database_url.replace('%', '%%')
+    config.set_main_option("sqlalchemy.url", safe_url)
+else:
+    # Fallback: construct URL from individual POSTGRES_* vars (useful if DATABASE_URL is missing)
+    host = os.getenv("POSTGRES_HOST", "localhost")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db = os.getenv("POSTGRES_DB", "codeloom_dev")
+    user = os.getenv("POSTGRES_USER", "postgres")
+    password = os.getenv("POSTGRES_PASSWORD", "")
+    fallback_url = f"postgresql://{user}:{password}@{host}:{port}/{db}"
+    config.set_main_option("sqlalchemy.url", fallback_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

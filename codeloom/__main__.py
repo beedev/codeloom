@@ -12,6 +12,13 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import nest_asyncio
 nest_asyncio.apply()
 
+# Fix for uvicorn >= 0.30 incompatibilities with nest_asyncio dropping kwargs
+import asyncio
+_original_asyncio_run = asyncio.run
+def _asyncio_run_with_kwargs(main, *, debug=False, **kwargs):
+    # Ignore kwargs like `loop_factory` which nest_asyncio's run() doesn't accept
+    return _original_asyncio_run(main, debug=debug)
+asyncio.run = _asyncio_run_with_kwargs
 # Limit PyTorch to single thread per operation (prevents segfaults in multi-threaded server)
 import torch
 torch.set_num_threads(1)
