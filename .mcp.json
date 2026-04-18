@@ -2,7 +2,7 @@
   "mcpServers": {
     "codeloom": {
       "type": "stdio",
-      "command": "/Users/bharath/Desktop/codeloom/venv/bin/python",
+      "command": "/Users/bharath/.appregistry/venvs/ai-full/bin/python",
       "args": ["-m", "codeloom.mcp"],
       "cwd": "/Users/bharath/Desktop/codeloom",
       "env": {
