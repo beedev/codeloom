@@ -2,7 +2,7 @@
  * Layout Component
  *
  * App shell with a sticky top nav bar and main content area.
- * Nav: Logo + permanent links (Dashboard, Migration Plans, Settings),
+ * Nav: Logo + permanent links (Dashboard, Migration Plans, Settings, MCP Demo),
  * Right: search bar, notifications bell, user avatar with logout dropdown.
  */
 
@@ -74,6 +74,12 @@ export function Layout({ children }: LayoutProps) {
               icon={<span className="material-symbols-outlined text-[16px]">settings</span>}
               label="Settings"
               active={location.pathname === '/settings'}
+            />
+            <NavLink
+              to="/mcp-demo"
+              icon={<span className="material-symbols-outlined text-[16px]">terminal</span>}
+              label="MCP Demo"
+              active={location.pathname === '/mcp-demo'}
             />
           </nav>
         </div>

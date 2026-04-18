@@ -6,6 +6,7 @@
  *   /                 -> Dashboard (protected)
  *   /project/:id      -> Project view (protected)
  *   /project/:id/chat -> Code chat (protected)
+ *   /mcp-demo         -> MCP Tool Explorer (protected)
  */
 
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
@@ -20,6 +21,7 @@ import { MigrationPlans } from './pages/MigrationPlans.tsx';
 import { AnalyticsPage } from './pages/AnalyticsPage.tsx';
 import { Settings } from './pages/Settings.tsx';
 import { ProjectWikiPage } from './pages/ProjectWikiPage.tsx';
+import { MCPDemo } from './pages/MCPDemo.tsx';
 
 // ---------------------------------------------------------------------------
 // ProtectedRoute -- redirects to /login if not authenticated
@@ -116,6 +118,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <MigrationWizard />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/mcp-demo"
+        element={
+          <ProtectedRoute>
+            <MCPDemo />
           </ProtectedRoute>
         }
       />

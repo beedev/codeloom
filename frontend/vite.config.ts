@@ -12,6 +12,10 @@ export default defineConfig({
         target: 'http://localhost:9005',
         changeOrigin: true,
       },
+      '/mcp': {
+        target: 'http://localhost:9005',
+        changeOrigin: true,
+      },
       '/chat': {
         target: 'http://localhost:9005',
         changeOrigin: true,
