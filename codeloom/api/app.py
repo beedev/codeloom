@@ -20,6 +20,7 @@ def create_app(
     project_manager,
     code_ingestion=None,
     conversation_store=None,
+    mcp_server=None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -29,6 +30,8 @@ def create_app(
         project_manager: ProjectManager instance
         code_ingestion: CodeIngestionService instance (optional)
         conversation_store: ConversationStore instance (optional)
+        mcp_server: CodeLoomMCPServer instance (optional) — mounted at /mcp for
+            streamable HTTP transport when provided.
 
     Returns:
         Configured FastAPI application
@@ -61,6 +64,7 @@ def create_app(
     app.state.project_manager = project_manager
     app.state.code_ingestion = code_ingestion
     app.state.conversation_store = conversation_store
+    app.state.mcp_server = mcp_server
 
     # Register routers
     from .routes.fastapi_auth import router as auth_router
@@ -88,6 +92,57 @@ def create_app(
     @app.get("/api/health")
     async def health_check():
         return {"status": "ok", "service": "codeloom"}
+
+    # Mount MCP streamable HTTP transport for remote Claude Code access
+    if mcp_server is not None:
+        try:
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+            from starlette.requests import Request
+            from starlette.responses import Response
+
+            session_manager = StreamableHTTPSessionManager(
+                app=mcp_server.server,
+                stateless=True,
+            )
+            app.state.mcp_session_manager = session_manager
+
+            @app.on_event("startup")
+            async def start_mcp_session_manager():
+                """Start the MCP session manager task group."""
+                import asyncio
+                asyncio.create_task(_run_mcp_manager(session_manager))
+
+            async def _run_mcp_manager(mgr):
+                import asyncio as _aio
+                async with mgr.run():
+                    logger.info("MCP session manager running")
+                    while True:
+                        await _aio.sleep(3600)
+
+            @app.api_route("/mcp", methods=["GET", "POST", "DELETE"])
+            @app.api_route("/mcp/{path:path}", methods=["GET", "POST", "DELETE"])
+            async def mcp_endpoint(request: Request):
+                """Forward requests to MCP StreamableHTTPSessionManager."""
+                import asyncio
+                # Give the session manager a moment to start on first request
+                for _ in range(10):
+                    try:
+                        await session_manager.handle_request(
+                            request.scope, request.receive, request._send
+                        )
+                        return Response(status_code=200)
+                    except RuntimeError:
+                        await asyncio.sleep(0.5)
+                return Response("MCP session manager not ready", status_code=503)
+
+            logger.info("MCP streamable HTTP transport mounted at /mcp")
+        except ImportError:
+            logger.warning(
+                "mcp.server.streamable_http_manager not available — "
+                "MCP HTTP transport not mounted. Install mcp[http] for HTTP support."
+            )
+        except Exception as exc:
+            logger.warning("Failed to mount MCP HTTP transport: %s", exc)
 
     logger.info("FastAPI app created with all routes registered")
     return app

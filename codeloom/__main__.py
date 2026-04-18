@@ -208,6 +208,16 @@ def main():
         feedback_worker.start()
         logger.info("FeedbackAnalyzerWorker started (adaptive RAG tuning)")
 
+    # Initialize MCP server for streamable HTTP transport
+    mcp_server = None
+    if db_manager:
+        try:
+            from .mcp.server import CodeLoomMCPServer
+            mcp_server = CodeLoomMCPServer(db_manager=db_manager, pipeline=pipeline)
+            logger.info("MCP server initialized (22 tools available)")
+        except Exception as e:
+            logger.warning(f"MCP server initialization failed: {e}")
+
     # Build FastAPI app
     from .api.app import create_app
     app = create_app(
@@ -216,6 +226,7 @@ def main():
         project_manager=project_manager,
         code_ingestion=code_ingestion,
         conversation_store=conversation_store,
+        mcp_server=mcp_server,
     )
 
     # Launch with uvicorn
