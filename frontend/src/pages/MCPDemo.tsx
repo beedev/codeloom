@@ -608,10 +608,17 @@ export function MCPDemo() {
       .catch(() => setProjects([]));
   }, []);
 
-  // Check MCP endpoint availability
+  // Check MCP endpoint availability via JSON-RPC initialize
   useEffect(() => {
-    fetch('/mcp', { method: 'GET', credentials: 'include' })
-      .then((r) => setMcpAvailable(r.ok || r.status === 405 || r.status === 400))
+    fetch('/mcp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 0, method: 'initialize',
+        params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'mcp-demo', version: '1.0' } },
+      }),
+    })
+      .then((r) => setMcpAvailable(r.ok))
       .catch(() => setMcpAvailable(false));
   }, []);
 
