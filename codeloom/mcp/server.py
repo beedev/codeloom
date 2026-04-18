@@ -461,13 +461,18 @@ _TOOL_DEFINITIONS: List[Tool] = [
     Tool(
         name="codeloom_get_reverse_doc",
         description=(
-            "Get a reverse engineering document by its ID. "
-            "Returns all chapters, status, and metadata."
+            "Get a reverse engineering document. Use 'chapter' param to retrieve "
+            "one chapter at a time (recommended — full doc can be 500K+ chars). "
+            "Without 'chapter', returns metadata + chapter titles only (no content)."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "doc_id": {"type": "string", "description": "Document UUID"},
+                "chapter": {
+                    "type": "integer",
+                    "description": "Chapter number (1-14) to retrieve. Omit to get metadata + titles only.",
+                },
             },
             "required": ["doc_id"],
         },
@@ -1802,13 +1807,55 @@ class CodeLoomMCPServer:
         return result
 
     async def _get_reverse_doc(self, args: Dict) -> Dict:
-        """Get a reverse engineering document by ID."""
-        from codeloom.core.reverse_engineering import ReverseEngineeringService
+        """Get a reverse engineering document — full or one chapter at a time."""
+        from codeloom.core.db.models import ReverseEngineeringDoc
 
         doc_id = args["doc_id"]
-        svc = ReverseEngineeringService(self._db, self._pipeline)
-        result = svc.get_doc_by_id(doc_id)
-        return result
+        chapter_num = args.get("chapter")
+
+        with self._db.get_session() as session:
+            doc = session.query(ReverseEngineeringDoc).filter(
+                ReverseEngineeringDoc.doc_id == doc_id,
+            ).first()
+            if not doc:
+                return {"error": f"Document {doc_id} not found"}
+
+            titles = doc.chapter_titles or []
+            chapters = doc.chapters or {}
+
+            if chapter_num is not None:
+                # Return single chapter
+                ch_key = str(int(chapter_num))
+                content = chapters.get(ch_key, "")
+                title = titles[int(chapter_num) - 1] if int(chapter_num) <= len(titles) else f"Chapter {chapter_num}"
+                return {
+                    "doc_id": str(doc.doc_id),
+                    "chapter": int(chapter_num),
+                    "title": title,
+                    "content": content,
+                    "content_length": len(content),
+                }
+            else:
+                # Return metadata + titles only (no content — too large)
+                chapter_summary = []
+                for i, title in enumerate(titles):
+                    ch_key = str(i + 1)
+                    content = chapters.get(ch_key, "")
+                    chapter_summary.append({
+                        "chapter": i + 1,
+                        "title": title,
+                        "chars": len(content),
+                        "words": len(content.split()) if content else 0,
+                    })
+                return {
+                    "doc_id": str(doc.doc_id),
+                    "project_id": str(doc.project_id),
+                    "status": doc.status,
+                    "total_chapters": doc.total_chapters,
+                    "progress": doc.progress,
+                    "chapters": chapter_summary,
+                    "hint": "Use chapter=N to retrieve a specific chapter's content",
+                }
 
     async def _list_reverse_docs(self, args: Dict) -> Dict:
         """List reverse engineering documents for a project."""
