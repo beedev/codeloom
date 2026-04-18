@@ -124,13 +124,14 @@ def create_app(
             async def mcp_endpoint(request: Request):
                 """Forward requests to MCP StreamableHTTPSessionManager."""
                 import asyncio
-                # Give the session manager a moment to start on first request
                 for _ in range(10):
                     try:
+                        # handle_request sends its own response via ASGI send
                         await session_manager.handle_request(
                             request.scope, request.receive, request._send
                         )
-                        return Response(status_code=200)
+                        # Return None — response already sent by handle_request
+                        return
                     except RuntimeError:
                         await asyncio.sleep(0.5)
                 return Response("MCP session manager not ready", status_code=503)

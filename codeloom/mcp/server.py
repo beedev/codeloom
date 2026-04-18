@@ -1152,7 +1152,7 @@ class CodeLoomMCPServer:
         transitive = [d for d in dependents if d.get("depth", 0) > 1]
         files_affected = len(set(d.get("file_id", "") for d in dependents))
 
-        return {
+        impact_data = {
             "unit": unit_info,
             "total_dependents": len(dependents),
             "direct_dependents": len(direct),
@@ -1161,6 +1161,32 @@ class CodeLoomMCPServer:
             "impact_level": "high" if len(dependents) > 10 else "medium" if len(dependents) > 3 else "low",
             "dependents": dependents,
         }
+
+        # Generate LLM explanation of the impact
+        if self._pipeline and dependents:
+            try:
+                dep_names = [d.get("name", "?") for d in direct[:10]]
+                trans_names = [d.get("name", "?") for d in transitive[:10]]
+                context = (
+                    f"Unit: {unit_info['name']} ({unit_info['unit_type']}, {unit_info['language']})\n"
+                    f"Total dependents: {len(dependents)} ({len(direct)} direct, {len(transitive)} transitive)\n"
+                    f"Files affected: {files_affected}\n"
+                    f"Direct dependents: {', '.join(dep_names)}\n"
+                    f"Transitive dependents: {', '.join(trans_names) if trans_names else 'none'}\n"
+                )
+                result = self._pipeline.stateless_query(
+                    message=f"Explain the blast radius and impact of modifying {unit_name}. "
+                            f"What would break? What needs testing? What's the risk level?",
+                    project_id=project_id,
+                    user_id="mcp-client",
+                    include_history=False,
+                    max_sources=3,
+                )
+                impact_data["explanation"] = result.get("response", "")
+            except Exception as exc:
+                logger.debug(f"Blast radius explanation failed: {exc}")
+
+        return impact_data
 
     async def _search_knowledge(self, args: Dict) -> Dict:
         """Search a knowledge project. Delegates to _search_codebase (same RAG pipeline)."""
