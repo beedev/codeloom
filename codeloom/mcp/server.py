@@ -1,9 +1,9 @@
 """CodeLoom MCP Server implementation.
 
-Exposes 20 tools covering project intelligence, MVP management, phase execution,
-source code access, RAG search, ground truth validation, lane detection, and
-full-autonomy migration (list_units, get_import_graph, save_plan, save_mvps,
-complete_transform, start_transform), and reverse engineering
+Exposes 22 tools covering project intelligence, MVP management, phase execution,
+source code access, RAG search, RAG chat, blast radius analysis, ground truth
+validation, lane detection, full-autonomy migration (list_units, get_import_graph,
+save_plan, save_mvps, complete_transform, start_transform), and reverse engineering
 documentation (generate_reverse_doc, get_reverse_doc, list_reverse_docs).
 
 All tool handlers are registered on the mcp.server.Server instance and communicate
@@ -132,6 +132,41 @@ _TOOL_DEFINITIONS: List[Tool] = [
                 "top_k": {"type": "integer", "default": 5, "description": "Number of results"},
             },
             "required": ["project_id", "query"],
+        },
+    ),
+    Tool(
+        name="codeloom_chat",
+        description=(
+            "Ask a question about a codebase. Uses RAG (BM25 + vector + reranking + RAPTOR) "
+            "to retrieve relevant code chunks and generate an LLM response with source citations."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project UUID"},
+                "query": {"type": "string", "description": "Natural language question about the code"},
+                "max_sources": {"type": "integer", "description": "Max source chunks to return (default 6)"},
+            },
+            "required": ["project_id", "query"],
+        },
+    ),
+    Tool(
+        name="codeloom_blast_radius",
+        description=(
+            "Analyze the blast radius (impact) of a code unit. Returns all direct and "
+            "transitive dependents that would be affected by changes to the specified unit."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Project UUID"},
+                "unit_name": {
+                    "type": "string",
+                    "description": "Name of the code unit (function, class, paragraph) to analyze",
+                },
+                "depth": {"type": "integer", "description": "Transitive dependency depth (default 3)"},
+            },
+            "required": ["project_id", "unit_name"],
         },
     ),
     Tool(
@@ -426,13 +461,18 @@ _TOOL_DEFINITIONS: List[Tool] = [
     Tool(
         name="codeloom_get_reverse_doc",
         description=(
-            "Get a reverse engineering document by its ID. "
-            "Returns all chapters, status, and metadata."
+            "Get a reverse engineering document. Use 'chapter' param to retrieve "
+            "one chapter at a time (recommended — full doc can be 500K+ chars). "
+            "Without 'chapter', returns metadata + chapter titles only (no content)."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "doc_id": {"type": "string", "description": "Document UUID"},
+                "chapter": {
+                    "type": "integer",
+                    "description": "Chapter number (1-14) to retrieve. Omit to get metadata + titles only.",
+                },
             },
             "required": ["doc_id"],
         },
@@ -536,6 +576,8 @@ class CodeLoomMCPServer:
             "codeloom_get_compiled_context": self._get_compiled_context,
             "codeloom_get_source_unit": self._get_source_unit,
             "codeloom_search_codebase": self._search_codebase,
+            "codeloom_chat": self._chat,
+            "codeloom_blast_radius": self._blast_radius,
             "codeloom_validate_output": self._validate_output,
             "codeloom_get_lane_info": self._get_lane_info,
             # Full-autonomy migration tools
@@ -1049,6 +1091,107 @@ class CodeLoomMCPServer:
         except Exception as exc:
             return {"error": f"Search failed: {exc}"}
 
+    async def _chat(self, args: Dict) -> Dict:
+        """RAG-powered code chat. Retrieves relevant chunks and generates an LLM response."""
+        if not self._pipeline:
+            return {"error": "Pipeline not available — start CodeLoom with full pipeline to enable chat"}
+
+        project_id = args["project_id"]
+        query = args["query"]
+        max_sources = int(args.get("max_sources", 6))
+
+        try:
+            result = self._pipeline.stateless_query(
+                message=query,
+                project_id=project_id,
+                user_id="mcp-client",
+                include_history=False,
+                max_sources=max_sources,
+            )
+
+            return {
+                "response": result.get("response", ""),
+                "sources": result.get("sources", []),
+                "metadata": result.get("metadata", {}),
+            }
+        except Exception as exc:
+            return {"error": f"Chat failed: {exc}"}
+
+    async def _blast_radius(self, args: Dict) -> Dict:
+        """Analyze the blast radius of a code unit by finding all dependents."""
+        from codeloom.core.db.models import CodeUnit
+        from codeloom.core.asg_builder.queries import get_dependents
+
+        project_id = args["project_id"]
+        unit_name = args["unit_name"]
+        depth = int(args.get("depth", 3))
+
+        with self._db.get_session() as session:
+            unit = session.query(CodeUnit).filter(
+                CodeUnit.project_id == project_id,
+                CodeUnit.name == unit_name,
+            ).first()
+
+            if not unit:
+                # Try partial match
+                unit = session.query(CodeUnit).filter(
+                    CodeUnit.project_id == project_id,
+                    CodeUnit.name.ilike(f"%{unit_name}%"),
+                ).first()
+
+            if not unit:
+                return {"error": f"Unit '{unit_name}' not found in project {project_id}"}
+
+            unit_id = str(unit.unit_id)
+            unit_info = {
+                "name": unit.name,
+                "qualified_name": unit.qualified_name,
+                "unit_type": unit.unit_type,
+                "language": unit.language,
+            }
+
+        dependents = get_dependents(self._db, project_id, unit_id, depth=depth)
+
+        # Summarize impact
+        direct = [d for d in dependents if d.get("depth", 0) == 1]
+        transitive = [d for d in dependents if d.get("depth", 0) > 1]
+        files_affected = len(set(d.get("file_id", "") for d in dependents))
+
+        impact_data = {
+            "unit": unit_info,
+            "total_dependents": len(dependents),
+            "direct_dependents": len(direct),
+            "transitive_dependents": len(transitive),
+            "files_affected": files_affected,
+            "impact_level": "high" if len(dependents) > 10 else "medium" if len(dependents) > 3 else "low",
+            "dependents": dependents,
+        }
+
+        # Generate LLM explanation of the impact
+        if self._pipeline and dependents:
+            try:
+                dep_names = [d.get("name", "?") for d in direct[:10]]
+                trans_names = [d.get("name", "?") for d in transitive[:10]]
+                context = (
+                    f"Unit: {unit_info['name']} ({unit_info['unit_type']}, {unit_info['language']})\n"
+                    f"Total dependents: {len(dependents)} ({len(direct)} direct, {len(transitive)} transitive)\n"
+                    f"Files affected: {files_affected}\n"
+                    f"Direct dependents: {', '.join(dep_names)}\n"
+                    f"Transitive dependents: {', '.join(trans_names) if trans_names else 'none'}\n"
+                )
+                result = self._pipeline.stateless_query(
+                    message=f"Explain the blast radius and impact of modifying {unit_name}. "
+                            f"What would break? What needs testing? What's the risk level?",
+                    project_id=project_id,
+                    user_id="mcp-client",
+                    include_history=False,
+                    max_sources=3,
+                )
+                impact_data["explanation"] = result.get("response", "")
+            except Exception as exc:
+                logger.debug(f"Blast radius explanation failed: {exc}")
+
+        return impact_data
 
     async def _search_knowledge(self, args: Dict) -> Dict:
         """Search a knowledge project. Delegates to _search_codebase (same RAG pipeline)."""
@@ -1664,13 +1807,55 @@ class CodeLoomMCPServer:
         return result
 
     async def _get_reverse_doc(self, args: Dict) -> Dict:
-        """Get a reverse engineering document by ID."""
-        from codeloom.core.reverse_engineering import ReverseEngineeringService
+        """Get a reverse engineering document — full or one chapter at a time."""
+        from codeloom.core.db.models import ReverseEngineeringDoc
 
         doc_id = args["doc_id"]
-        svc = ReverseEngineeringService(self._db, self._pipeline)
-        result = svc.get_doc_by_id(doc_id)
-        return result
+        chapter_num = args.get("chapter")
+
+        with self._db.get_session() as session:
+            doc = session.query(ReverseEngineeringDoc).filter(
+                ReverseEngineeringDoc.doc_id == doc_id,
+            ).first()
+            if not doc:
+                return {"error": f"Document {doc_id} not found"}
+
+            titles = doc.chapter_titles or []
+            chapters = doc.chapters or {}
+
+            if chapter_num is not None:
+                # Return single chapter
+                ch_key = str(int(chapter_num))
+                content = chapters.get(ch_key, "")
+                title = titles[int(chapter_num) - 1] if int(chapter_num) <= len(titles) else f"Chapter {chapter_num}"
+                return {
+                    "doc_id": str(doc.doc_id),
+                    "chapter": int(chapter_num),
+                    "title": title,
+                    "content": content,
+                    "content_length": len(content),
+                }
+            else:
+                # Return metadata + titles only (no content — too large)
+                chapter_summary = []
+                for i, title in enumerate(titles):
+                    ch_key = str(i + 1)
+                    content = chapters.get(ch_key, "")
+                    chapter_summary.append({
+                        "chapter": i + 1,
+                        "title": title,
+                        "chars": len(content),
+                        "words": len(content.split()) if content else 0,
+                    })
+                return {
+                    "doc_id": str(doc.doc_id),
+                    "project_id": str(doc.project_id),
+                    "status": doc.status,
+                    "total_chapters": doc.total_chapters,
+                    "progress": doc.progress,
+                    "chapters": chapter_summary,
+                    "hint": "Use chapter=N to retrieve a specific chapter's content",
+                }
 
     async def _list_reverse_docs(self, args: Dict) -> Dict:
         """List reverse engineering documents for a project."""

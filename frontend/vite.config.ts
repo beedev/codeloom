@@ -2,26 +2,35 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+// Ports from environment (set by dev.sh from appregistry) or defaults
+const FRONTEND_PORT = parseInt(process.env.PORT || '3000', 10)
+const BACKEND_PORT = parseInt(process.env.BACKEND_PORT || '9005', 10)
+const BACKEND_URL = `http://localhost:${BACKEND_PORT}`
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    port: 3000,
+    port: FRONTEND_PORT,
     proxy: {
       '/api': {
-        target: 'http://localhost:9005',
+        target: BACKEND_URL,
+        changeOrigin: true,
+      },
+      '/mcp': {
+        target: BACKEND_URL,
         changeOrigin: true,
       },
       '/chat': {
-        target: 'http://localhost:9005',
+        target: BACKEND_URL,
         changeOrigin: true,
       },
       '/upload': {
-        target: 'http://localhost:9005',
+        target: BACKEND_URL,
         changeOrigin: true,
       },
       '/image': {
-        target: 'http://localhost:9005',
+        target: BACKEND_URL,
         changeOrigin: true,
       },
     },

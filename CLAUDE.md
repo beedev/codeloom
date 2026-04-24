@@ -314,3 +314,23 @@ See `docs/architecture.md` for the full architecture document.
 - LLM Gateway intercepts all LLM calls transparently -- never bypass `Settings.llm` by instantiating LLMs directly
 - Understanding worker has max 2 concurrent jobs with stale job reclamation -- don't assume immediate execution
 - Deep analysis tier selection is automatic based on token count -- don't override unless you understand the budget implications
+
+## App Registry (auto-managed — do not edit manually)
+
+- **Backend port**: 8009
+- **Frontend port**: 3005
+- **Shared venv**: `~/.appregistry/venvs/ai-full`
+- **Activate**: `source ~/.appregistry/venvs/ai-full/bin/activate`
+- **Start backend**: `PYTHONPATH=. python3 -m codeloom --host 0.0.0.0 --port {port}`
+- **Start frontend**: `cd frontend && npm run dev -- --port {port}`
+
+### Rules for Claude Code
+- Do NOT create a project-local venv (no `python -m venv .venv` or `python -m venv venv`)
+- Use the shared venv: `source ~/.appregistry/venvs/ai-full/bin/activate`
+- Install packages: `source ~/.appregistry/venvs/ai-full/bin/activate && pip install <pkg>`
+- Backend server MUST use port **8009**
+- Frontend dev server MUST use port **3005**
+- Frontend API proxy should point to `http://localhost:8009`
+- Do NOT pick arbitrary port numbers — use the ports listed above
+
+<!-- end-app-registry -->

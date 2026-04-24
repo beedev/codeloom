@@ -7,6 +7,23 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Ports — read from appregistry via python, fall back to defaults
+APPREG="$HOME/.appregistry/registry.yaml"
+if [ -f "$APPREG" ] && command -v python3 &>/dev/null; then
+    _ports=$(python3 -c "
+import yaml
+with open('$APPREG') as f:
+    d = yaml.safe_load(f)
+a = d.get('apps',{}).get('codeloom',{})
+print(a.get('backend_port',''))
+print(a.get('frontend_port',''))
+" 2>/dev/null)
+    BACKEND_PORT=${BACKEND_PORT:-$(echo "$_ports" | sed -n '1p')}
+    FRONTEND_PORT=${FRONTEND_PORT:-$(echo "$_ports" | sed -n '2p')}
+fi
+BACKEND_PORT=${BACKEND_PORT:-9005}
+FRONTEND_PORT=${FRONTEND_PORT:-3000}
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -78,15 +95,15 @@ stop_all() {
     print_status "Stopping all services..."
 
     # Stop local backend
-    if lsof -ti:9005 >/dev/null 2>&1; then
-        lsof -ti:9005 | xargs kill -9 2>/dev/null || true
-        print_success "Stopped backend server (port 9005)"
+    if lsof -ti:$BACKEND_PORT >/dev/null 2>&1; then
+        lsof -ti:$BACKEND_PORT | xargs kill -9 2>/dev/null || true
+        print_success "Stopped backend server (port $BACKEND_PORT)"
     fi
 
     # Stop frontend dev server
-    if lsof -ti:3000 >/dev/null 2>&1; then
-        lsof -ti:3000 | xargs kill -9 2>/dev/null || true
-        print_success "Stopped frontend dev server (port 3000)"
+    if lsof -ti:$FRONTEND_PORT >/dev/null 2>&1; then
+        lsof -ti:$FRONTEND_PORT | xargs kill -9 2>/dev/null || true
+        print_success "Stopped frontend dev server (port $FRONTEND_PORT)"
     fi
 
     # Stop Docker container
@@ -115,15 +132,15 @@ show_status() {
     fi
 
     # Backend
-    if lsof -ti:9005 >/dev/null 2>&1; then
-        print_success "Backend: Running on http://localhost:9005"
+    if lsof -ti:$BACKEND_PORT >/dev/null 2>&1; then
+        print_success "Backend: Running on http://localhost:$BACKEND_PORT"
     else
         echo -e "  ${YELLOW}○${NC} Backend: Not running"
     fi
 
     # Frontend
-    if lsof -ti:3000 >/dev/null 2>&1; then
-        print_success "Frontend: Running on http://localhost:3000"
+    if lsof -ti:$FRONTEND_PORT >/dev/null 2>&1; then
+        print_success "Frontend: Running on http://localhost:$FRONTEND_PORT"
     else
         echo -e "  ${YELLOW}○${NC} Frontend: Not running"
     fi
@@ -152,9 +169,9 @@ start_local() {
     fi
 
     # Check if port is in use
-    if lsof -ti:9005 >/dev/null 2>&1; then
-        print_warning "Port 9005 in use, killing existing process..."
-        lsof -ti:9005 | xargs kill -9 2>/dev/null || true
+    if lsof -ti:$BACKEND_PORT >/dev/null 2>&1; then
+        print_warning "Port $BACKEND_PORT in use, killing existing process..."
+        lsof -ti:$BACKEND_PORT | xargs kill -9 2>/dev/null || true
         sleep 1
     fi
 
@@ -166,13 +183,17 @@ start_local() {
         export POSTGRES_HOST="${POSTGRES_HOST//host.docker.internal/localhost}"
     fi
 
-    # Activate venv and sync dependencies
-    if [ -d "venv" ]; then
+    # Activate venv — prefer shared appreg venv, fall back to local
+    SHARED_VENV="$HOME/.appregistry/venvs/ai-full"
+    if [ -d "$SHARED_VENV" ]; then
+        source "$SHARED_VENV/bin/activate"
+        print_success "Using shared venv: $SHARED_VENV"
+    elif [ -d "venv" ]; then
         source venv/bin/activate
         print_status "Syncing Python dependencies..."
         python3 -m pip install -q -r requirements.txt
     else
-        print_error "Virtual environment not found. Run: python3 -m venv venv && pip install -r requirements.txt"
+        print_error "No venv found. Run: appreg venv-create ai-full"
         exit 1
     fi
 
@@ -182,20 +203,20 @@ start_local() {
 
     # Start frontend dev server in background
     if [ -d "frontend" ]; then
-        print_status "Starting frontend dev server on http://localhost:3000..."
+        print_status "Starting frontend dev server on http://localhost:$FRONTEND_PORT..."
         cd frontend
         npm install --silent 2>/dev/null
-        npm run dev &
+        PORT=$FRONTEND_PORT BACKEND_PORT=$BACKEND_PORT npm run dev &
         FRONTEND_PID=$!
         cd "$SCRIPT_DIR"
         print_success "Frontend dev server started (PID $FRONTEND_PID)"
     fi
 
     # Start backend
-    print_success "Starting backend on http://localhost:9005"
-    echo -e "  ${YELLOW}Frontend:${NC} http://localhost:3000"
-    echo -e "  ${YELLOW}Backend:${NC}  http://localhost:9005"
-    echo -e "  ${YELLOW}API docs:${NC} http://localhost:9005/docs"
+    print_success "Starting backend on http://localhost:$BACKEND_PORT"
+    echo -e "  ${YELLOW}Frontend:${NC} http://localhost:$FRONTEND_PORT"
+    echo -e "  ${YELLOW}Backend:${NC}  http://localhost:$BACKEND_PORT"
+    echo -e "  ${YELLOW}API docs:${NC} http://localhost:$BACKEND_PORT/docs"
     echo -e "  ${YELLOW}Login:${NC}    admin / admin123"
     echo -e "  ${YELLOW}Stop:${NC}     ./dev.sh stop"
     echo ""
@@ -203,7 +224,7 @@ start_local() {
     # Trap to kill frontend when backend exits
     trap 'kill $FRONTEND_PID 2>/dev/null; exit' INT TERM EXIT
 
-    PYTHONPATH="$SCRIPT_DIR" python3 -m codeloom --host 0.0.0.0 --port 9005
+    PYTHONPATH="$SCRIPT_DIR" python3 -m codeloom --host 0.0.0.0 --port $BACKEND_PORT
 }
 
 # Start Docker
@@ -217,9 +238,9 @@ start_docker() {
     check_postgres || exit 1
 
     # Stop local backend if running
-    if lsof -ti:9005 >/dev/null 2>&1; then
+    if lsof -ti:$BACKEND_PORT >/dev/null 2>&1; then
         print_warning "Stopping local backend first..."
-        lsof -ti:9005 | xargs kill -9 2>/dev/null || true
+        lsof -ti:$BACKEND_PORT | xargs kill -9 2>/dev/null || true
     fi
 
     # Remove existing container if exists
@@ -266,13 +287,17 @@ build_all() {
     fi
 
     # Backend: venv + deps + typecheck
-    if [ -d "venv" ]; then
+    SHARED_VENV="$HOME/.appregistry/venvs/ai-full"
+    if [ -d "$SHARED_VENV" ]; then
+        source "$SHARED_VENV/bin/activate"
+        print_success "Using shared venv: $SHARED_VENV"
+    elif [ -d "venv" ]; then
         source venv/bin/activate
         print_status "Syncing Python dependencies..."
         python3 -m pip install -q -r requirements.txt
         print_success "Python dependencies up to date"
     else
-        print_error "Virtual environment not found. Run: python3 -m venv venv && pip install -r requirements.txt"
+        print_error "No venv found. Run: appreg venv-create ai-full"
         exit 1
     fi
 
@@ -450,7 +475,7 @@ PYEOF
         echo "Usage: ./dev.sh [command]"
         echo ""
         echo "Commands:"
-        echo "  local, l       Start backend (port 9005) + frontend dev server (port 3000)"
+        echo "  local, l       Start backend (port $BACKEND_PORT) + frontend dev server (port $FRONTEND_PORT)"
         echo "  build, b       Build frontend + sync backend deps + run migrations"
         echo "  docker, d      Start Docker container (port 7007)"
         echo "  stop, s        Stop all services"
