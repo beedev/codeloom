@@ -22,7 +22,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Layout } from '../components/Layout.tsx';
-import { listProjects } from '../services/api.ts';
+import { listProjects, apiPath } from '../services/api.ts';
 import type { Project } from '../types/index.ts';
 
 // ---------------------------------------------------------------------------
@@ -315,7 +315,7 @@ async function callMCPTool(toolName: string, args: Record<string, unknown>): Pro
 
   try {
     // Step 1: Initialize session
-    const initRes = await fetch('/mcp', {
+    const initRes = await fetch(apiPath('/mcp'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -353,7 +353,7 @@ async function callMCPTool(toolName: string, args: Record<string, unknown>): Pro
     };
     if (sessionId) notifHeaders['Mcp-Session-Id'] = sessionId;
 
-    await fetch('/mcp', {
+    await fetch(apiPath('/mcp'), {
       method: 'POST',
       headers: notifHeaders,
       credentials: 'include',
@@ -370,7 +370,7 @@ async function callMCPTool(toolName: string, args: Record<string, unknown>): Pro
     };
     if (sessionId) callHeaders['Mcp-Session-Id'] = sessionId;
 
-    const callRes = await fetch('/mcp', {
+    const callRes = await fetch(apiPath('/mcp'), {
       method: 'POST',
       headers: callHeaders,
       credentials: 'include',
@@ -610,7 +610,7 @@ export function MCPDemo() {
 
   // Check MCP endpoint availability via JSON-RPC initialize
   useEffect(() => {
-    fetch('/mcp', {
+    fetch(apiPath('/mcp'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
       body: JSON.stringify({

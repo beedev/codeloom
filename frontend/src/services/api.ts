@@ -4,6 +4,10 @@
  * Single point of contact for all backend communication.
  * Uses cookie-based sessions (credentials: 'include').
  * All paths are relative -- Vite proxies /api to FastAPI on :9005.
+ *
+ * In production Docker builds, VITE_BASE_PATH (e.g. /codeloom) is baked in
+ * via import.meta.env.BASE_URL so API calls go to /codeloom/api/... and
+ * Nginx strips the prefix before forwarding to the backend.
  */
 
 import type {
@@ -20,6 +24,23 @@ import type {
   GraphNeighbor,
   UnitDetail,
 } from '../types/index.ts';
+
+// ---------------------------------------------------------------------------
+// Base path (supports sub-path deployment behind reverse proxy)
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the API base path from Vite's BASE_URL.
+ *   Local dev  → BASE_URL = '/'  → API_BASE = ''  → paths stay '/api/...'
+ *   Docker     → BASE_URL = '/codeloom/' → API_BASE = '/codeloom' → '/codeloom/api/...'
+ */
+const _raw = import.meta.env.BASE_URL ?? '/';
+const API_BASE = _raw === '/' ? '' : _raw.replace(/\/+$/, '');
+
+/** Prepend the deployment base path to an absolute API path. */
+export function apiPath(path: string): string {
+  return `${API_BASE}${path}`;
+}
 
 // ---------------------------------------------------------------------------
 // Fetch wrapper
@@ -39,7 +60,7 @@ async function request<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(apiPath(path), {
     credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
@@ -136,7 +157,7 @@ export async function uploadCodebase(
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`/api/projects/${projectId}/upload`, {
+  const response = await fetch(apiPath(`/api/projects/${projectId}/upload`), {
     method: 'POST',
     credentials: 'include',
     body: formData,
@@ -183,7 +204,7 @@ export async function uploadDocument(
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`/api/projects/${projectId}/upload-document`, {
+  const response = await fetch(apiPath(`/api/projects/${projectId}/upload-document`), {
     method: 'POST',
     credentials: 'include',
     body: formData,
@@ -595,7 +616,7 @@ export async function executeMigrationPhaseAgentic(
   const qs = params.toString() ? `?${params.toString()}` : '';
 
   const response = await fetch(
-    `/api/migration/${planId}/phase/${phaseNumber}/execute-agent${qs}`,
+    apiPath(`/api/migration/${planId}/phase/${phaseNumber}/execute-agent${qs}`),
     {
       method: 'POST',
       credentials: 'include',
@@ -709,7 +730,7 @@ export function getPhaseDownloadUrl(
   if (mvpId != null) params.set('mvp_id', String(mvpId));
   params.set('format', format);
   if (filePath) params.set('file_path', filePath);
-  return `/api/migration/${planId}/phase/${phaseNumber}/download?${params.toString()}`;
+  return apiPath(`/api/migration/${planId}/phase/${phaseNumber}/download?${params.toString()}`);
 }
 
 // ── MVP Diagrams ──
@@ -868,7 +889,7 @@ export async function getAccuracyReport(planId: string): Promise<AccuracyReportD
 }
 
 export async function getAccuracyReportMarkdown(planId: string): Promise<string> {
-  const resp = await fetch(`/api/migration/${planId}/accuracy/report`, { credentials: 'include' });
+  const resp = await fetch(apiPath(`/api/migration/${planId}/accuracy/report`), { credentials: 'include' });
   if (!resp.ok) throw new ApiError(resp.status, resp.statusText);
   return resp.text();
 }

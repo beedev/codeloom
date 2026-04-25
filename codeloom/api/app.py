@@ -6,6 +6,7 @@ and all route modules registered.
 
 import logging
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,13 +47,16 @@ def create_app(
     secret_key = os.getenv("FLASK_SECRET_KEY", "codeloom-dev-secret-change-me")
     app.add_middleware(SessionMiddleware, secret_key=secret_key)
 
-    # CORS for React dev server
+    # CORS for React dev server and production reverse proxy
+    cors_env = os.getenv("CORS_ORIGINS", "")
+    cors_origins = [o.strip() for o in cors_env.split(",") if o.strip()] if cors_env else [
+        "http://localhost:3000",
+        "http://localhost:5173",
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://localhost:5173",
-        ],
+        allow_origins=cors_origins if cors_origins != ["*"] else [],
+        allow_origin_regex=r".*" if cors_origins == ["*"] else None,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -146,4 +150,38 @@ def create_app(
             logger.warning("Failed to mount MCP HTTP transport: %s", exc)
 
     logger.info("FastAPI app created with all routes registered")
+
+    # ── Serve built frontend (production / Docker) ───────────────────
+    # When frontend/dist exists (built by Docker multi-stage build),
+    # serve the static assets and provide SPA fallback for client-side
+    # routing.  In local dev, Vite dev server handles this instead.
+    _dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    if _dist.is_dir():
+        from starlette.staticfiles import StaticFiles
+        from starlette.responses import FileResponse
+
+        # Mount hashed assets at /assets (JS, CSS, images from Vite build)
+        _assets = _dist / "assets"
+        if _assets.is_dir():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(_assets)),
+                name="frontend-assets",
+            )
+
+        # SPA catch-all: any path not matched by API routes → index.html
+        _index = _dist / "index.html"
+
+        @app.get("/{full_path:path}")
+        async def _spa_fallback(full_path: str):
+            """Serve index.html for all non-API routes (SPA client-side routing)."""
+            # Check if a static file exists at the requested path
+            candidate = _dist / full_path
+            if candidate.is_file() and full_path:
+                return FileResponse(str(candidate))
+            return FileResponse(str(_index))
+
+        logger.info("Serving frontend from %s", _dist)
+
     return app
+

@@ -13,6 +13,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { apiPath } from '../services/api.ts';
 import {
   BookOpen,
   Loader2,
@@ -173,7 +174,7 @@ export function ReverseEngineeringPanel({ projectId }: Props) {
 
   const loadLatestDoc = useCallback(async () => {
     try {
-      const res = await fetch(`${apiBase}/doc/latest`, {
+      const res = await fetch(apiPath(`${apiBase}/doc/latest`), {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -218,7 +219,7 @@ export function ReverseEngineeringPanel({ projectId }: Props) {
     setProgress({ current: 0, total: 14 });
 
     try {
-      const res = await fetch(`${apiBase}/generate`, {
+      const res = await fetch(apiPath(`${apiBase}/generate`), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -242,7 +243,7 @@ export function ReverseEngineeringPanel({ projectId }: Props) {
 
     setIsValidating(true);
     try {
-      const res = await fetch(`${apiBase}/validate`, {
+      const res = await fetch(apiPath(`${apiBase}/validate`), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -313,7 +314,7 @@ export function ReverseEngineeringPanel({ projectId }: Props) {
 
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`${apiBase}/doc/latest`, {
+        const res = await fetch(apiPath(`${apiBase}/doc/latest`), {
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
         });

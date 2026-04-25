@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Frontend (rebuilt in Docker)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Git & IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.claude/
+
+# Environment (loaded via docker-compose env_file)
+.env
+.env.local
+
+# Docs & non-essential
+docs/
+tasks/
+*.pptx
+*.md
+!README.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Outputs (mounted as volumes)
+uploads/
+outputs/
+data/
+logs/

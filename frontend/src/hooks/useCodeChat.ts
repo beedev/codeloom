@@ -14,6 +14,7 @@
 
 import { useState, useCallback, useRef } from 'react';
 import type { ChatMessage, ChatSource } from '../types/index.ts';
+import { apiPath } from '../services/api.ts';
 
 export interface ImpactEntry {
   unit_name: string;
@@ -70,7 +71,7 @@ export function useCodeChat(): UseCodeChatReturn {
 
       try {
         const response = await fetch(
-          `/api/projects/${projectId}/chat/stream`,
+          apiPath(`/api/projects/${projectId}/chat/stream`),
           {
             method: 'POST',
             credentials: 'include',

@@ -10,6 +10,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import { apiPath } from '../services/api.ts';
 import {
   Loader2,
   Search,
@@ -71,7 +72,7 @@ export function MetadataSearchPanel({ projectId }: Props) {
           ? `/api/projects/${projectId}/graph/units/by-decorator?decorator=${encodeURIComponent(trimmed)}`
           : `/api/projects/${projectId}/graph/units/by-return-type?return_type=${encodeURIComponent(trimmed)}`;
 
-      const res = await fetch(endpoint, {
+      const res = await fetch(apiPath(endpoint), {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
       });
