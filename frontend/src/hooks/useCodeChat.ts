@@ -151,8 +151,7 @@ export function useCodeChat(): UseCodeChatReturn {
                   return updated;
                 });
               } else if (parsed.type === 'done') {
-                // Final message -- attach sources + trace_id for feedback
-                const traceId = parsed.trace_id || '';
+                const traceId = (parsed as any).trace_id || '';
                 setMessages((prev) => {
                   const updated = [...prev];
                   updated[updated.length - 1] = {

@@ -137,7 +137,7 @@ export function KnowledgeProjectView({ projectId, project }: KnowledgeProjectVie
     setIsLoadingDocs(true);
     try {
       const result = await api.getProjectFiles(projectId);
-      const files = Array.isArray(result) ? result : (result?.files ?? []);
+      const files = Array.isArray(result) ? result : ((result as any)?.files ?? []);
       setDocuments(files);
     } catch {
       // Silently handle -- project may have no files yet

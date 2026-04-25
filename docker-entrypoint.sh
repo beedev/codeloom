@@ -34,6 +34,13 @@ done
 
 echo "✓ PostgreSQL is ready"
 
+# ── Construct DATABASE_URL safely ────────────────────────────
+# We URL-encode the password in case it contains special characters (like @ or :)
+if [ -n "$POSTGRES_PASSWORD" ]; then
+    SAFE_PASS=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote_plus(sys.argv[1]))" "$POSTGRES_PASSWORD")
+    export DATABASE_URL="postgresql://${POSTGRES_USER:-postgres}:${SAFE_PASS}@${PG_HOST}:${PG_PORT}/${POSTGRES_DB:-codeloom_dev}"
+fi
+
 # ── Run Alembic migrations ───────────────────────────────────
 echo "▶ Running database migrations..."
 cd /app

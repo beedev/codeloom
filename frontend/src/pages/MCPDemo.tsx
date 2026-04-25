@@ -460,7 +460,7 @@ function parseSSEResponse(text: string): JsonRpcResponse | null {
 // Result display — renders markdown for text, structured cards for data
 // ---------------------------------------------------------------------------
 
-function ResultDisplay({ data, toolName }: { data: any; toolName: string }) {
+function ResultDisplay({ data }: { data: any }) {
   if (!data) return null;
 
   // Extract markdown-renderable content from common response shapes
@@ -896,7 +896,7 @@ export function MCPDemo() {
 
                 {/* Rich result display */}
                 {result.data !== null && (
-                  <ResultDisplay data={result.data} toolName={selectedTool?.name ?? ''} />
+                  <ResultDisplay data={result.data} />
                 )}
               </div>
             )}

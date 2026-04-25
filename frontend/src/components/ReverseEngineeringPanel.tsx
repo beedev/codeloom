@@ -33,15 +33,6 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-interface DocSummary {
-  doc_id: string;
-  status: 'generating' | 'complete' | 'failed';
-  progress: number;
-  total_chapters: number;
-  chapter_titles: string[];
-  created_at: string;
-}
-
 interface ValidationChapter {
   confidence: number;
   issues: string[];

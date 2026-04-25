@@ -10,6 +10,7 @@ import { useState, useEffect, useRef } from 'react';
 import { FileCode2, Copy, Check, ChevronRight, ExternalLink, X, Loader2 } from 'lucide-react';
 import { Highlight, themes } from 'prism-react-renderer';
 import type { ChatSource } from '../types/index.ts';
+import { apiPath } from '../services/api.ts';
 
 interface SourcePanelProps {
   sources: ChatSource[];
@@ -325,7 +326,7 @@ function FileViewerModal({
     setLoading(true);
     setFetchError(null);
 
-    fetch(`/api/projects/${projectId}/file/${data.filePath}`, {
+    fetch(apiPath(`/api/projects/${projectId}/file/${data.filePath}`), {
       credentials: 'include',
     })
       .then(async (res) => {

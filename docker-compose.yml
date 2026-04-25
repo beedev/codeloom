@@ -44,7 +44,6 @@ services:
     environment:
       # Override host to reach the host machine's PostgreSQL from inside Docker
       POSTGRES_HOST: host.docker.internal
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-codeloom}:${POSTGRES_PASSWORD:-codeloom}@host.docker.internal:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-codeloom_dev}"
       # Ollama on the host machine (if used)
       OLLAMA_HOST: host.docker.internal
       # Backend port inside the container

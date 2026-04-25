@@ -18,7 +18,8 @@ import os
 from dotenv import load_dotenv
 
 # Load .env FIRST so all os.getenv calls below pick up user configuration
-load_dotenv(override=True)
+# override=False ensures that variables explicitly set by Docker/system are NOT overwritten by .env
+load_dotenv(override=False)
 
 # ---------------------------------------------------------------------------
 # LLM Configuration

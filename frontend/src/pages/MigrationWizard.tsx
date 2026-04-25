@@ -17,7 +17,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useSearchParams, useNavigate, Link } from 'react-router-dom';
-import { Loader2, Trash2, ArrowLeft, ArrowRight, Lock, Terminal, Save } from 'lucide-react';
+import { Loader2, Trash2, ArrowLeft, ArrowRight, Lock } from 'lucide-react';
 import { Layout } from '../components/Layout.tsx';
 import { PhaseTimeline } from '../components/migration/PhaseTimeline.tsx';
 import { PhaseViewer } from '../components/migration/PhaseViewer.tsx';

@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import type { ChatMessage, ChatSource } from '../types/index.ts';
 import { FeedbackWidget } from './FeedbackWidget.tsx';
+import { apiPath } from '../services/api.ts';
 
 interface CodeChatProps {
   messages: ChatMessage[];
@@ -330,13 +331,11 @@ function MessageBubble({
   hideInlineSources,
   projectId,
   onViewFile,
-  onFeedback,
 }: {
   message: ChatMessage;
   hideInlineSources?: boolean;
   projectId?: string;
   onViewFile: (source: ChatSource) => void;
-  onFeedback?: (messageIdx: number, type: 'positive' | 'negative') => void;
 }) {
   const isUser = message.role === 'user';
 
@@ -606,7 +605,7 @@ function FileViewerModal({
     setLoading(true);
     setFetchError(null);
 
-    fetch(`/api/projects/${data.projectId}/file/${data.filePath}`, {
+    fetch(apiPath(`/api/projects/${data.projectId}/file/${data.filePath}`), {
       credentials: 'include',
     })
       .then(async (res) => {

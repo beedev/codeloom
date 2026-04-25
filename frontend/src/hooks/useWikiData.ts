@@ -122,7 +122,7 @@ export function useWikiData(projectId: string): WikiData {
       if (plans.length > 0) {
         // Prefer in_progress, then complete (most MVPs), then draft, then first
         const active = plans.find(p => p.status === 'in_progress')
-          ?? plans.filter(p => p.status === 'complete').sort((a, b) => (b.mvp_count ?? 0) - (a.mvp_count ?? 0))[0]
+          ?? plans.filter(p => p.status === 'complete').sort((a, b) => ((b as any).mvp_count ?? 0) - ((a as any).mvp_count ?? 0))[0]
           ?? plans.find(p => p.status === 'draft')
           ?? plans[0];
         const full = await api.getMigrationPlan(active.plan_id);

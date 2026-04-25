@@ -452,18 +452,6 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
     setSelectedNode(gn);
   }, [drillTarget]);
 
-  // Double-click drills into a container node
-  const handleNodeDoubleClick = useCallback((node: any) => {
-    if (!node) return;
-    const gn = node as GraphNode;
-    if (CONTAINER_TYPES.has(gn.unit_type)) {
-      setDrillTarget(gn);
-      setSelectedNode(null);
-      selectedIdRef.current = null;
-      // Zoom to fit after drill-in
-      setTimeout(() => graphRef.current?.zoomToFit(400, 40), 300);
-    }
-  }, []);
 
   const handleDrillBack = useCallback(() => {
     setDrillTarget(null);
@@ -550,7 +538,7 @@ export function GraphViewer({ projectId, asgStatus }: Props) {
       const dy = ny - y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       // Match the library's default circle radius: nodeRelSize * sqrt(nodeVal)
-      const r = 6 * Math.sqrt(getNodeVal(node.unit_type));
+      const r = 6 * Math.sqrt(getNodeVal(node.unit_type, false));
       if (dist <= r + 3 && dist < closestDist) {
         closest = node;
         closestDist = dist;
