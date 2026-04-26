@@ -140,9 +140,14 @@ function AppRoutes() {
 // App
 // ---------------------------------------------------------------------------
 
+// Derive basename from Vite's BASE_URL so React Router keeps /codeloom in the URL.
+//   Local dev  → BASE_URL = '/'          → basename = '/'
+//   Docker     → BASE_URL = '/codeloom/' → basename = '/codeloom'
+const ROUTER_BASENAME = import.meta.env.BASE_URL?.replace(/\/+$/, '') || '/';
+
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={ROUTER_BASENAME}>
       <AuthProvider>
         <AppRoutes />
       </AuthProvider>
