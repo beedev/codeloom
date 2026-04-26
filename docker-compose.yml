@@ -38,22 +38,17 @@ services:
     container_name: codeloom
     restart: unless-stopped
 
+    # Use host networking — container shares the server's network directly.
+    # This means localhost inside the container = the actual Ubuntu server.
+    # No port mapping or extra_hosts needed.
+    network_mode: "host"
+
     env_file:
       - .env
 
     environment:
-      # Override host to reach the host machine's PostgreSQL from inside Docker
-      POSTGRES_HOST: host.docker.internal
-      # Ollama on the host machine (if used)
-      OLLAMA_HOST: host.docker.internal
       # Backend port inside the container
       BACKEND_PORT: 9005
-
-    ports:
-      - "${CODELOOM_PORT:-9005}:9005"
-
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
     volumes:
       # Persist data across rebuilds
